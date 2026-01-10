@@ -1,169 +1,476 @@
-# SQL
+"""Database module for PRMajesticBot.
+
+Handles all MySQL database operations with error handling and logging.
+Uses aiomysql for async database connectivity.
+"""
+
 import aiomysql
+import time
+from typing import Optional, List, Dict, Any
 
 
 class Database:
-    def __init__(self, db_host, db_user, db_password, db_name, logger):
-        self.connection = None
-        self.DB_HOST = db_host
-        self.DB_USER = db_user
-        self.DB_PASSWORD = db_password
-        self.DB_NAME = db_name
+    """MySQL database handler for PRMajesticBot.
+    
+    Manages connections and provides CRUD operations for:
+    - Streamers (Twitch streamers being tracked)
+    - Subscriptions (Guild-to-Streamer relationships)
+    - Guilds (Discord server settings)
+    """
+
+    def __init__(self, db_host: str, db_user: str, db_password: str, db_name: str, logger) -> None:
+        """Initialize database configuration.
+        
+        Args:
+            db_host: MySQL server hostname
+            db_user: Database username
+            db_password: Database password
+            db_name: Database name
+            logger: Logger instance for this module
+        """
+        self.connection: Optional[aiomysql.Connection] = None
+        self.db_host = db_host
+        self.db_user = db_user
+        self.db_password = db_password
+        self.db_name = db_name
         self.logger = logger
 
-    async def start(self):
-        self.connection = await aiomysql.connect(
-            host=self.DB_HOST,
-            user=self.DB_USER,
-            password=self.DB_PASSWORD,
-            db=self.DB_NAME,
-            charset="utf8mb4",
-            cursorclass=aiomysql.DictCursor,
-        )
+    # =========================================================================
+    # Connection Management
+    # =========================================================================
 
-        await self.init_tables()
+    async def start(self) -> None:
+        """Start database connection and initialize tables."""
+        try:
+            self.logger.debug(f"Connecting to database at {self.db_host}...")
+            start_time = time.time()
 
-        await self.add_streamer_to_db("yamat0pr", 780806587)
-        # await self.add_streamer_to_db("everybodysosa", 837647929)
-        # await self.add_streamer_to_db("injtyy", 443489032)
-        # await self.add_streamer_to_db("mike4h", 493414313)
-        # await self.add_streamer_to_db("asiv0y", 808782745)
-        # await self.add_streamer_to_db("maurdos", 649944285)
-        # await self.add_streamer_to_db("lukeeeqq", 888790927)
-
-    async def init_tables(self):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS streamers (
-                StreamerName VARCHAR(255),
-                StreamerID BIGINT UNSIGNED PRIMARY KEY,
-                isOnline boolean DEFAULT FALSE,
-                startedAt TIMESTAMP NULL DEFAULT NULL,
-                gameID BIGINT UNSIGNED,
-                gameName VARCHAR(255),
-                title VARCHAR(255),
-                Priority int,
-                AddedAt TIMESTAMP,
-                AddedByID BIGINT UNSIGNED,
-                isPaid boolean
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                GuildID BIGINT UNSIGNED PRIMARY KEY,
-                NotificationChannelID BIGINT UNSIGNED
+            self.connection = await aiomysql.connect(
+                host=self.db_host,
+                user=self.db_user,
+                password=self.db_password,
+                db=self.db_name,
+                charset="utf8mb4",
+                cursorclass=aiomysql.DictCursor,
             )
-            """
-        )
-        await self.connection.commit()
 
-    async def add_streamer_to_db(
+            elapsed = time.time() - start_time
+            self.logger.debug(f"✓ Connected to database in {elapsed:.2f}s")
+
+            await self._init_tables()
+        except Exception as e:
+            self.logger.error(f"Failed to connect to database: {e}", exc_info=True)
+            raise
+
+    async def close(self) -> None:
+        """Close database connection."""
+        try:
+            if self.connection:
+                self.logger.debug("Closing database connection...")
+                self.connection.close()
+                self.logger.info("✓ Database connection closed")
+        except Exception as e:
+            self.logger.error(f"Error closing database connection: {e}", exc_info=True)
+
+    async def _init_tables(self) -> None:
+        """Initialize database tables if they don't exist."""
+        try:
+            self.logger.debug("Initializing database tables...")
+            cursor = await self.connection.cursor()
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS streamers (
+                    streamer_id BIGINT UNSIGNED PRIMARY KEY,
+                    streamer_name VARCHAR(255) NOT NULL,
+                    is_online BOOLEAN DEFAULT FALSE,
+                    started_at TIMESTAMP NULL DEFAULT NULL,
+                    game_id BIGINT UNSIGNED,
+                    game_name VARCHAR(255),
+                    stream_title VARCHAR(255),
+                    priority INT DEFAULT 0,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    added_by_id BIGINT UNSIGNED,
+                    is_paid BOOLEAN DEFAULT FALSE
+                );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    guild_id BIGINT UNSIGNED PRIMARY KEY,
+                    notification_channel_id BIGINT UNSIGNED
+                );
+
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    guild_id BIGINT UNSIGNED,
+                    streamer_id BIGINT UNSIGNED,
+                    PRIMARY KEY (guild_id, streamer_id),
+                    FOREIGN KEY (streamer_id) REFERENCES streamers(streamer_id) ON DELETE CASCADE
+                );
+            """)
+            await self.connection.commit()
+            self.logger.debug("✓ Database tables initialized")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize tables: {e}", exc_info=True)
+            raise
+
+    # =========================================================================
+    # Streamer Operations
+    # =========================================================================
+
+    async def create_streamer(
         self,
-        streamer_name,
-        streamer_id,
-        is_online=False,
-        started_at=None,
-        priority=0,
-        added_by_id=0,
-        is_paid=False,
-        game_id=None,
-        game_name=None,
-        title=None,
-    ):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            INSERT INTO streamers (StreamerName, StreamerID, isOnline, startedAt, Priority, AddedAt, AddedByID, isPaid, gameID, gameName, title)
-            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s) as new_streamers 
-            ON DUPLICATE KEY UPDATE StreamerName=new_streamers.StreamerName, isOnline=new_streamers.isOnline, startedAt=new_streamers.startedAt, Priority=new_streamers.Priority, AddedByID=new_streamers.AddedByID, isPaid=new_streamers.isPaid, gameID=new_streamers.gameID, gameName=new_streamers.gameName, title=new_streamers.title
-            """,
-            (
-                streamer_name,
-                streamer_id,
-                is_online,
-                started_at,
-                priority,
-                added_by_id,
-                is_paid,
-                game_id,
-                game_name,
-                title,
-            ),
-        )
-        await self.connection.commit()
+        streamer_id: int,
+        streamer_name: str,
+        is_online: bool = False,
+        started_at: Optional[str] = None,
+        priority: int = 0,
+        added_by_id: int = 0,
+        is_paid: bool = False,
+        game_id: Optional[int] = None,
+        game_name: Optional[str] = None,
+        stream_title: Optional[str] = None,
+    ) -> None:
+        """Create or update a streamer in the database.
+        
+        Args:
+            streamer_id: Twitch user ID
+            streamer_name: Twitch username
+            is_online: Current online status
+            started_at: Stream start timestamp
+            priority: Display priority
+            added_by_id: Discord user ID who added this streamer
+            is_paid: Whether this is a paid promotion
+            game_id: Current game/category ID
+            game_name: Current game/category name
+            stream_title: Current stream title
+        """
+        try:
+            self.logger.debug(f"Creating/updating streamer: {streamer_name} (ID: {streamer_id})")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                """
+                INSERT INTO streamers (
+                    streamer_id, streamer_name, is_online, started_at, priority, 
+                    added_at, added_by_id, is_paid, game_id, game_name, stream_title
+                )
+                VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s) AS new_data
+                ON DUPLICATE KEY UPDATE 
+                    streamer_name = new_data.streamer_name,
+                    is_online = new_data.is_online,
+                    started_at = new_data.started_at,
+                    priority = new_data.priority,
+                    added_by_id = new_data.added_by_id,
+                    is_paid = new_data.is_paid,
+                    game_id = new_data.game_id,
+                    game_name = new_data.game_name,
+                    stream_title = new_data.stream_title
+                """,
+                (streamer_id, streamer_name, is_online, started_at, priority,
+                 added_by_id, is_paid, game_id, game_name, stream_title),
+            )
+            await self.connection.commit()
+            self.logger.debug(f"✓ Streamer {streamer_name} saved")
+        except Exception as e:
+            self.logger.error(f"Failed to create streamer {streamer_name}: {e}", exc_info=True)
+            raise
 
-    async def remove_streamer_from_db(self, username):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            DELETE FROM streamers WHERE StreamerName = %s
-            """,
-            (username,),
-        )
-        await self.connection.commit()
+    async def get_streamer(self, streamer_id: int) -> Optional[Dict[str, Any]]:
+        """Get streamer information by ID.
+        
+        Args:
+            streamer_id: Twitch user ID
+            
+        Returns:
+            Streamer data dict or None if not found
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT * FROM streamers WHERE streamer_id = %s",
+                (streamer_id,),
+            )
+            return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to get streamer {streamer_id}: {e}", exc_info=True)
+            raise
 
-    async def get_online_streamers_from_db(self):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            SELECT * FROM streamers WHERE isOnline = TRUE
-            """
-        )
-        result = await cursor.fetchall()
-        return result
-
-    async def get_all_streamers_from_db(self):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            SELECT * FROM streamers
-            """
-        )
-        result = await cursor.fetchall()
-        print(result)
-        return result
-
-    async def set_streamer_status_in_db(
+    async def update_streamer_status(
         self,
-        streamer_id,
-        is_online,
-        started_at=None,
-        game_id=None,
-        game_name=None,
-        title=None,
-    ):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            UPDATE streamers SET isOnline = %s, startedAt = %s, gameID = %s, gameName = %s, title = %s WHERE StreamerID = %s
-            """,
-            (is_online, started_at, game_id, game_name, title, streamer_id),
-        )
-        await self.connection.commit()
+        streamer_id: int,
+        is_online: bool,
+        started_at: Optional[str] = None,
+        game_id: Optional[int] = None,
+        game_name: Optional[str] = None,
+        stream_title: Optional[str] = None,
+    ) -> None:
+        """Update streamer's online status and stream info.
+        
+        Args:
+            streamer_id: Twitch user ID
+            is_online: Current online status
+            started_at: Stream start timestamp
+            game_id: Current game/category ID
+            game_name: Current game/category name
+            stream_title: Current stream title
+        """
+        try:
+            self.logger.debug(f"Updating streamer {streamer_id} status: online={is_online}")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                """
+                UPDATE streamers 
+                SET is_online = %s, started_at = %s, game_id = %s, 
+                    game_name = %s, stream_title = %s 
+                WHERE streamer_id = %s
+                """,
+                (is_online, started_at, game_id, game_name, stream_title, streamer_id),
+            )
+            await self.connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to update streamer {streamer_id}: {e}", exc_info=True)
+            raise
 
-    async def isStreamerInDB(self, streamer_name):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            SELECT COUNT(*) as count FROM streamers WHERE StreamerName = %s
-            """,
-            (streamer_name,),
-        )
-        result = await cursor.fetchone()
-        return result["count"] > 0
+    async def delete_streamer(self, streamer_id: int) -> None:
+        """Delete a streamer from the database.
+        
+        Args:
+            streamer_id: Twitch user ID
+        """
+        try:
+            self.logger.debug(f"Deleting streamer {streamer_id}")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "DELETE FROM streamers WHERE streamer_id = %s",
+                (streamer_id,),
+            )
+            await self.connection.commit()
+            self.logger.debug(f"✓ Streamer {streamer_id} deleted")
+        except Exception as e:
+            self.logger.error(f"Failed to delete streamer {streamer_id}: {e}", exc_info=True)
+            raise
 
-    async def setup_guild(self, guild_id, channel_id):
-        cursor = await self.connection.cursor()
-        await cursor.execute(
-            """
-            INSERT INTO settings (GuildID, NotificationChannelID)
-            VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE NotificationChannelID = %s
-            """,
-            (guild_id, channel_id, channel_id),
-        )
-        await self.connection.commit()
+    async def streamer_exists(self, streamer_id: int) -> bool:
+        """Check if a streamer exists in the database.
+        
+        Args:
+            streamer_id: Twitch user ID
+            
+        Returns:
+            True if streamer exists, False otherwise
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT COUNT(*) as count FROM streamers WHERE streamer_id = %s",
+                (streamer_id,),
+            )
+            result = await cursor.fetchone()
+            return result["count"] > 0
+        except Exception as e:
+            self.logger.error(f"Failed to check streamer {streamer_id}: {e}", exc_info=True)
+            raise
 
-    def close(self):
-        if self.connection:
-            self.connection.close()
+    async def list_all_streamers(self) -> List[Dict[str, Any]]:
+        """Get all streamers from the database.
+        
+        Returns:
+            List of all streamer data dicts
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("SELECT * FROM streamers")
+            return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
+            raise
+
+    async def list_online_streamers(self) -> List[Dict[str, Any]]:
+        """Get all currently online streamers.
+        
+        Returns:
+            List of online streamer data dicts
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute("SELECT * FROM streamers WHERE is_online = TRUE")
+            return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to list online streamers: {e}", exc_info=True)
+            raise
+
+    # =========================================================================
+    # Subscription Operations
+    # =========================================================================
+
+    async def create_subscription(self, guild_id: int, streamer_id: int) -> None:
+        """Create a subscription (guild follows streamer).
+        
+        Args:
+            guild_id: Discord guild ID
+            streamer_id: Twitch user ID
+        """
+        try:
+            self.logger.debug(f"Creating subscription: guild={guild_id}, streamer={streamer_id}")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                """
+                INSERT INTO subscriptions (guild_id, streamer_id)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE guild_id = guild_id
+                """,
+                (guild_id, streamer_id),
+            )
+            await self.connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to create subscription: {e}", exc_info=True)
+            raise
+
+    async def delete_subscription(self, guild_id: int, streamer_id: int) -> None:
+        """Delete a subscription.
+        
+        Args:
+            guild_id: Discord guild ID
+            streamer_id: Twitch user ID
+        """
+        try:
+            self.logger.debug(f"Deleting subscription: guild={guild_id}, streamer={streamer_id}")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "DELETE FROM subscriptions WHERE guild_id = %s AND streamer_id = %s",
+                (guild_id, streamer_id),
+            )
+            await self.connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to delete subscription: {e}", exc_info=True)
+            raise
+
+    async def subscription_exists(self, guild_id: int, streamer_id: int) -> bool:
+        """Check if a subscription exists.
+        
+        Args:
+            guild_id: Discord guild ID
+            streamer_id: Twitch user ID
+            
+        Returns:
+            True if subscription exists, False otherwise
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT COUNT(*) as count FROM subscriptions WHERE guild_id = %s AND streamer_id = %s",
+                (guild_id, streamer_id),
+            )
+            result = await cursor.fetchone()
+            return result["count"] > 0
+        except Exception as e:
+            self.logger.error(f"Failed to check subscription: {e}", exc_info=True)
+            raise
+
+    async def list_guild_subscriptions(self, guild_id: int) -> List[int]:
+        """Get all streamer IDs that a guild is subscribed to.
+        
+        Args:
+            guild_id: Discord guild ID
+            
+        Returns:
+            List of streamer IDs
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT streamer_id FROM subscriptions WHERE guild_id = %s",
+                (guild_id,),
+            )
+            result = await cursor.fetchall()
+            return [row["streamer_id"] for row in result]
+        except Exception as e:
+            self.logger.error(f"Failed to list guild subscriptions for {guild_id}: {e}", exc_info=True)
+            raise
+
+    async def has_any_subscriptions(self, streamer_id: int) -> bool:
+        """Check if any guild is subscribed to a streamer.
+        
+        Used to determine if a streamer can be safely deleted.
+        
+        Args:
+            streamer_id: Twitch user ID
+            
+        Returns:
+            True if at least one subscription exists, False otherwise
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT COUNT(*) as count FROM subscriptions WHERE streamer_id = %s",
+                (streamer_id,),
+            )
+            result = await cursor.fetchone()
+            return result["count"] > 0
+        except Exception as e:
+            self.logger.error(f"Failed to check subscriptions for {streamer_id}: {e}", exc_info=True)
+            raise
+
+    async def list_streamer_guilds(self, streamer_id: int) -> List[int]:
+        """Get all guild IDs that are subscribed to a streamer.
+        
+        Args:
+            streamer_id: Twitch user ID
+            
+        Returns:
+            List of guild IDs
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT guild_id FROM subscriptions WHERE streamer_id = %s",
+                (streamer_id,),
+            )
+            result = await cursor.fetchall()
+            return [row["guild_id"] for row in result]
+        except Exception as e:
+            self.logger.error(f"Failed to list streamer guilds for {streamer_id}: {e}", exc_info=True)
+            raise
+
+    # =========================================================================
+    # Guild Operations
+    # =========================================================================
+
+    async def create_or_update_guild(self, guild_id: int, notification_channel_id: int) -> None:
+        """Create or update guild settings.
+        
+        Args:
+            guild_id: Discord guild ID
+            notification_channel_id: Discord channel ID for notifications
+        """
+        try:
+            self.logger.debug(f"Saving guild settings: guild={guild_id}, channel={notification_channel_id}")
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                """
+                INSERT INTO settings (guild_id, notification_channel_id)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE notification_channel_id = %s
+                """,
+                (guild_id, notification_channel_id, notification_channel_id),
+            )
+            await self.connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to save guild {guild_id}: {e}", exc_info=True)
+            raise
+
+    async def get_guild(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Get guild settings.
+        
+        Args:
+            guild_id: Discord guild ID
+            
+        Returns:
+            Guild settings dict or None if not found
+        """
+        try:
+            cursor = await self.connection.cursor()
+            await cursor.execute(
+                "SELECT * FROM settings WHERE guild_id = %s",
+                (guild_id,),
+            )
+            return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to get guild {guild_id}: {e}", exc_info=True)
+            raise

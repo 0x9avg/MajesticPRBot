@@ -80,6 +80,9 @@ def main():
         discord_bot.twitch_bot = twitch_bot
         logger.debug("Bots cross-referenced successfully")
         
+        # Load cogs AFTER cross-referencing (cogs need twitch_bot reference)
+        discord_bot.setup_cogs()
+        
         # Setup event loop
         logger.debug("Starting event loop...")
         loop = asyncio.get_event_loop()
@@ -112,8 +115,8 @@ def main():
         # Cleanup
         logger.debug("Cleaning up resources...")
         try:
-            if 'database' in locals() and database.connection:
-                logger.debug("Closing database connection...")
+            if 'database' in locals() and database.pool:
+                logger.debug("Closing database connection pool...")
                 # CRITICAL FIX: Properly await async close method
                 loop.run_until_complete(database.close())
                 logger.debug("✓ Database connection closed")

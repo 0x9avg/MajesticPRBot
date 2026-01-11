@@ -4,6 +4,7 @@ Handles Discord interactions and slash commands via cogs.
 
 import disnake
 from disnake.ext import commands
+from config import Config
 
 
 class DiscordBot(commands.Bot):
@@ -12,9 +13,7 @@ class DiscordBot(commands.Bot):
         self.database = database
         self._is_ready_ = False
         self.logger = logger
-        self.synced = False
-        self.channel_id = None
-        self.channel = None
+        self.twitch_bot = None  # Will be set by main.py before setup_cogs()
 
         intents = disnake.Intents.all()
 
@@ -24,6 +23,16 @@ class DiscordBot(commands.Bot):
             intents=intents,
         )
 
+    def setup_cogs(self):
+        """Load cogs. Call this AFTER setting twitch_bot reference."""
+        self.logger.debug("Loading cogs from 'cogs' directory...")
+        try:
+            self.load_extensions("cogs")
+            self.logger.debug("✓ All cogs loaded successfully")
+        except Exception as e:
+            self.logger.error(f"Error loading cogs: {e}", exc_info=True)
+            raise
+
     def start(self):
         """Start the Discord bot."""
         self.logger.debug("Starting Discord bot...")
@@ -31,15 +40,6 @@ class DiscordBot(commands.Bot):
 
     async def on_ready(self):
         """Called when the bot is ready and connected."""
-        if not self.synced:
-            try:
-                self.logger.debug("Loading cogs from 'cogs' directory...")
-                self.load_extensions("cogs")
-                self.logger.debug("✓ All cogs loaded successfully")
-                self.synced = True
-            except Exception as e:
-                self.logger.error(f"Error loading cogs: {e}", exc_info=True)
-                
         await self.change_presence(
             status=disnake.Status.idle, activity=disnake.Game("TEST BUILD")
         )
@@ -47,4 +47,3 @@ class DiscordBot(commands.Bot):
         self.logger.debug(f"Bot ID: {self.user.id}, Guilds: {len(self.guilds)}")
 
         self._is_ready_ = True
-

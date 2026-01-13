@@ -1,6 +1,10 @@
+"""Cog for bot information commands."""
+
 import disnake
-from disnake import ApplicationCommandInteraction, MessageInteraction, Embed
+from disnake import ApplicationCommandInteraction, Embed
 from disnake.ext import commands
+
+from config import Config
 
 
 class Info(commands.Cog):
@@ -9,13 +13,25 @@ class Info(commands.Cog):
         self.bot = bot
 
     @commands.slash_command(name="info", description="Shows build/version information")
+    @commands.cooldown(1, 5, commands.BucketType.user)
     async def info(self, interaction: ApplicationCommandInteraction) -> None:
-        embed = Embed(
-            title=f"Информация о {self.bot.user.name}",
-            color=disnake.Colour.red(),
-            description=f"Version: TEST BUILD\nDeveloper: 9avg",
-        )
-        await interaction.response.send_message(embed=embed)
+        """Display bot version and developer information."""
+        try:
+            embed = Embed(
+                title=f"Информация о {self.bot.user.name}",
+                color=disnake.Colour.red(),
+                description=f"**Version:** {Config.VERSION}\n**Developer:** 9avg",
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            self.bot.logger.error(f"Error in /info command: {e}", exc_info=True)
+            try:
+                await interaction.response.send_message(
+                    "Произошла ошибка при получении информации.",
+                    ephemeral=True,
+                )
+            except disnake.errors.InteractionResponded:
+                pass  # Already responded
 
 
 def setup(bot: commands.Bot) -> None:

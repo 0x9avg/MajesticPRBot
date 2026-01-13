@@ -12,6 +12,9 @@ from logging.handlers import RotatingFileHandler
 class Config:
     """Main configuration class for the bot."""
 
+    # Bot version
+    VERSION = os.getenv("BOT_VERSION", "1.0.0")
+
     # Twitch Game IDs
     GTA5_GAME_ID = "32982"
 
@@ -20,13 +23,28 @@ class Config:
         "GTA5": GTA5_GAME_ID,
     }
 
+    EVENT_TYPE_LABELS = {
+        "stream_online": "🔴 Начало стрима",
+        "stream_offline": "⚫ Конец стрима",
+        "category_to_gta": "🎮 Смена категории на GTA 5",
+        "category_from_gta": "🎮 Смена категории с GTA 5 на другую",
+    }
+
     # Default notification templates
     TEMPLATE_DEFAULTS = {
         "stream_online": "@everyone 🔴 {streamer_name} начал стрим!",
         "stream_offline": "⚫ {streamer_name} закончил стрим",
-        "category_to_gta": "@everyone 🎮 {streamer_name} переключился на GTA 5!",
-        "category_from_gta": "🎮 {streamer_name} ушёл с GTA 5",
+        "category_to_gta": "@everyone 🎮 {streamer_name} сменил категорию на GTA 5!",
+        "category_from_gta": "🎮 {streamer_name} сменил категорию с GTA 5 на другую",
     }
+
+    # Allowed event types for notification templates (SQL injection prevention)
+    ALLOWED_EVENT_TYPES = [
+        "stream_online",
+        "stream_offline",
+        "category_to_gta",
+        "category_from_gta",
+    ]
 
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -127,7 +145,7 @@ class Config:
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
 
-        # CRITICAL FIX: Prevent propagation to avoid duplicate logs from parent loggers
+        # Prevent propagation to avoid duplicate logs from parent loggers
         logger.propagate = False
 
         return logger

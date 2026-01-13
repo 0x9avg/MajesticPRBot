@@ -18,10 +18,7 @@ class DiscordBot(commands.Bot):
         intents = disnake.Intents.all()
 
         self.logger.debug("Initializing Discord bot with all intents")
-        super().__init__(
-            command_prefix="!",
-            intents=intents,
-        )
+        super().__init__(command_prefix="!", intents=intents)
 
     def setup_cogs(self):
         """Load cogs. Call this AFTER setting twitch_bot reference."""
@@ -41,7 +38,7 @@ class DiscordBot(commands.Bot):
     async def on_ready(self):
         """Called when the bot is ready and connected."""
         await self.change_presence(
-            status=disnake.Status.idle, activity=disnake.Game("TEST BUILD")
+            status=disnake.Status.idle, activity=disnake.Game(f"v{Config.VERSION}")
         )
         self.logger.info(f"✓ Discord bot ready as {self.user}")
         self.logger.debug(f"Bot ID: {self.user.id}, Guilds: {len(self.guilds)}")

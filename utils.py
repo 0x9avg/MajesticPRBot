@@ -2,9 +2,14 @@
 
 import disnake
 import calendar
+import logging
+import time
 from typing import List, Dict, Any
 
 from config import Config
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 
 def create_streamers_embed(
@@ -95,6 +100,7 @@ def create_streamers_component(
     """
     # Handle empty states
     if subscribed_count == 0:
+        now_unix = int(time.time())
         return disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 📭 Нет подписок"),
             disnake.ui.TextDisplay(
@@ -103,14 +109,19 @@ def create_streamers_component(
             disnake.ui.TextDisplay(
                 content="Используйте `/add_streamer` чтобы добавить стримера."
             ),
+            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
+            disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
         )
 
     if not online_streamers:
+        now_unix = int(time.time())
         return disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 😴 Все офлайн"),
             disnake.ui.TextDisplay(
                 content=f"Из **{subscribed_count}** подписанных стримеров сейчас никто не в эфире."
             ),
+            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
+            disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
         )
 
     # Sort by priority
@@ -163,6 +174,15 @@ def create_streamers_component(
                 accessory=disnake.ui.Thumbnail(media=thumbnail_url),
             )
         )
+
+    # Add last updated timestamp at the bottom
+    now_unix = int(time.time())
+    components.append(
+        disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
+    )
+    components.append(
+        disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>")
+    )
 
     # Return container directly - pass to components= parameter
     return disnake.ui.Container(*components, accent_colour=disnake.Colour(65358))
@@ -229,9 +249,17 @@ def format_notification_template(
     """
     streamer_link = f"https://twitch.tv/{streamer_name}"
 
-    return template.format(
-        streamer_name=streamer_name,
-        stream_title=stream_title or "Без названия",
-        game_name=game_name or "Не указана",
-        streamer_link=streamer_link,
-    )
+    try:
+        return template.format(
+            streamer_name=streamer_name,
+            stream_title=stream_title or "Без названия",
+            game_name=game_name or "Не указана",
+            streamer_link=streamer_link,
+        )
+    except KeyError as e:
+        logger.warning(
+            f"Invalid template placeholder {e} in template: {template[:100]}..."
+        )
+        # Return template with basic substitution as fallback
+        return template.replace("{streamer_name}", streamer_name)
+

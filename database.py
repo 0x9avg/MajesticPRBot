@@ -5,10 +5,48 @@ Uses aiomysql connection pool for async database connectivity.
 """
 
 import aiomysql
+import asyncio
 import time
 from typing import Optional, List, Dict, Any
+from functools import wraps
 
 from config import Config
+
+
+def db_retry(max_retries: int = 3, base_delay: float = 1.0):
+    """Decorator for automatic retry on transient database errors.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds (exponential backoff applied)
+    
+    Returns:
+        Decorated async function with retry logic
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(self, *args, **kwargs)
+                except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        self.logger.warning(
+                            f"Database connection error (attempt {attempt + 1}/{max_retries}): {e}. "
+                            f"Retrying in {delay:.1f}s..."
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        self.logger.error(
+                            f"Database connection failed after {max_retries} attempts: {e}",
+                            exc_info=True
+                        )
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class Database:
@@ -136,6 +174,7 @@ class Database:
     # Streamer Operations
     # =========================================================================
 
+    @db_retry()
     async def create_streamer(
         self,
         streamer_id: int,
@@ -212,6 +251,7 @@ class Database:
             )
             raise
 
+    @db_retry()
     async def get_streamer(self, streamer_id: int) -> Optional[Dict[str, Any]]:
         """Get streamer information by ID.
 
@@ -235,6 +275,7 @@ class Database:
             )
             raise
 
+    @db_retry()
     async def update_streamer_status(
         self,
         streamer_id: int,
@@ -286,6 +327,7 @@ class Database:
             )
             raise
 
+    @db_retry()
     async def delete_streamer(self, streamer_id: int) -> None:
         """Delete a streamer from the database.
 
@@ -308,6 +350,7 @@ class Database:
             )
             raise
 
+    @db_retry()
     async def streamer_exists(self, streamer_id: int) -> bool:
         """Check if a streamer exists in the database.
 
@@ -332,6 +375,7 @@ class Database:
             )
             raise
 
+    @db_retry()
     async def list_all_streamers(self) -> List[Dict[str, Any]]:
         """Get all streamers from the database.
 
@@ -347,6 +391,7 @@ class Database:
             self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
             raise
 
+    @db_retry()
     async def list_online_streamers(self) -> List[Dict[str, Any]]:
         """Get all currently online streamers.
 
@@ -615,10 +660,10 @@ class Database:
             raise
 
     async def list_guilds_with_monitoring(self) -> List[Dict[str, Any]]:
-        """Get all guilds that have monitoring configured.
+        """Get all guilds that have monitoring channel configured.
 
         Returns:
-            List of guild settings dicts with monitoring_channel_id and monitoring_message_id set
+            List of guild settings dicts with monitoring_channel_id set
         """
         try:
             async with self.pool.acquire() as conn:
@@ -626,8 +671,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT * FROM settings 
-                        WHERE monitoring_channel_id IS NOT NULL 
-                        AND monitoring_message_id IS NOT NULL
+                        WHERE monitoring_channel_id IS NOT NULL
                         """
                     )
                     return await cursor.fetchall()
@@ -680,7 +724,15 @@ class Database:
 
         Returns:
             Template string with placeholders
+        
+        Raises:
+            ValueError: If event_type is not in allowed list
         """
+        # SQL injection prevention: validate event_type against whitelist
+        if event_type not in Config.ALLOWED_EVENT_TYPES:
+            self.logger.error(f"Invalid event_type '{event_type}' - possible SQL injection attempt")
+            raise ValueError(f"Invalid event type: {event_type}")
+        
         column_name = f"template_{event_type}"
         try:
             async with self.pool.acquire() as conn:
@@ -709,7 +761,15 @@ class Database:
             event_type: One of 'stream_online', 'stream_offline',
                        'category_to_gta', 'category_from_gta'
             template: New template string
+        
+        Raises:
+            ValueError: If event_type is not in allowed list
         """
+        # SQL injection prevention: validate event_type against whitelist
+        if event_type not in Config.ALLOWED_EVENT_TYPES:
+            self.logger.error(f"Invalid event_type '{event_type}' - possible SQL injection attempt")
+            raise ValueError(f"Invalid event type: {event_type}")
+        
         column_name = f"template_{event_type}"
         try:
             async with self.pool.acquire() as conn:

@@ -18,6 +18,7 @@ class ManageStreamers(commands.Cog):
     @commands.slash_command(
         name="add_streamer", description="Add new streamer to the database"
     )
+    @commands.cooldown(1, 10, commands.BucketType.user)
     async def add_streamer(
         self,
         interaction: ApplicationCommandInteraction,
@@ -44,7 +45,7 @@ class ManageStreamers(commands.Cog):
             if streamer_id is None:
                 self.bot.logger.warning(f"Streamer {username} not found on Twitch")
                 await interaction.followup.send(
-                    f"Streamer {username} not found on Twitch."
+                    f"Streamer {username} not found on Twitch.", ephemeral=True
                 )
                 return
 
@@ -72,12 +73,12 @@ class ManageStreamers(commands.Cog):
             self.bot.logger.debug(
                 f"✓ Streamer {username} added for guild {interaction.guild_id}"
             )
-            
+
             # Update monitoring message for this guild
             await self.twitch_bot.update_monitoring_messages(interaction.guild_id)
-            
+
             await interaction.followup.send(
-                f"Streamer {username} added to the database."
+                f"Streamer {username} added to the database.", ephemeral=True
             )
         except Exception as e:
             self.bot.logger.error(f"Error adding streamer {url}: {e}", exc_info=True)
@@ -88,6 +89,7 @@ class ManageStreamers(commands.Cog):
     @commands.slash_command(
         name="remove_streamer", description="Remove a streamer from the database"
     )
+    @commands.cooldown(1, 10, commands.BucketType.user)
     async def remove_streamer(
         self, interaction: ApplicationCommandInteraction, url: str
     ) -> None:
@@ -104,7 +106,7 @@ class ManageStreamers(commands.Cog):
             streamer_id = await self.twitch_bot.get_streamer_id(username)
             if streamer_id is None:
                 await interaction.response.send_message(
-                    f"Streamer {username} not found on Twitch."
+                    f"Streamer {username} not found on Twitch.", ephemeral=True
                 )
                 return
 
@@ -118,19 +120,19 @@ class ManageStreamers(commands.Cog):
                 self.bot.logger.debug(
                     f"✓ Removed subscription to {username} for guild {interaction.guild_id}"
                 )
-                
+
                 # Update monitoring message for this guild
                 await self.twitch_bot.update_monitoring_messages(interaction.guild_id)
-                
+
                 await interaction.followup.send(
-                    f"Streamer {username} removed from the database."
+                    f"Streamer {username} removed from the database.", ephemeral=True
                 )
             else:
                 self.bot.logger.warning(
                     f"No subscription found for {username} on guild {interaction.guild_id}"
                 )
                 await interaction.response.send_message(
-                    f"You are not followed to {username}."
+                    f"You are not followed to {username}.", ephemeral=True
                 )
                 return
 
@@ -152,6 +154,7 @@ class ManageStreamers(commands.Cog):
         name="streamers",
         description="Показать онлайн стримеров на которых подписан сервер",
     )
+    @commands.cooldown(1, 5, commands.BucketType.user)
     async def streamers(self, interaction: ApplicationCommandInteraction) -> None:
         """Display online streamers that the guild is subscribed to."""
         try:

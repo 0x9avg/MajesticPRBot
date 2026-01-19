@@ -1,28 +1,29 @@
-"""Database module for PRMajesticBot.
-
-Handles all MySQL database operations with error handling and logging.
-Uses aiomysql connection pool for async database connectivity.
+"""Модуль работы с базой данных MySQL.
+Обрабатывает все операции DB, включая управление стримерами, настройками,
+событиями и статистикой. Включает автоматическое создание таблиц и логику повторных попыток.
 """
 
 import aiomysql
+from datetime import datetime, timezone, timedelta
 import asyncio
+import logging
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from functools import wraps
 
+from utils import format_spec_duration, split_time_by_day
 from config import Config
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
-    """Decorator for automatic retry on transient database errors.
+    """
+    Декоратор для повторного выполнения асинхронных методов базы данных при сбоях.
     
     Args:
-        max_retries: Maximum number of retry attempts
-        base_delay: Base delay in seconds (exponential backoff applied)
-    
-    Returns:
-        Decorated async function with retry logic
+        max_retries: Максимальное количество попыток.
+        base_delay: Задержка между попытками в секундах.
     """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(self, *args, **kwargs):
@@ -33,7 +34,7 @@ def db_retry(max_retries: int = 3, base_delay: float = 1.0):
                 except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
                     last_exception = e
                     if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        delay = base_delay * (2**attempt)  # Exponential backoff
                         self.logger.warning(
                             f"Database connection error (attempt {attempt + 1}/{max_retries}): {e}. "
                             f"Retrying in {delay:.1f}s..."
@@ -42,15 +43,17 @@ def db_retry(max_retries: int = 3, base_delay: float = 1.0):
                     else:
                         self.logger.error(
                             f"Database connection failed after {max_retries} attempts: {e}",
-                            exc_info=True
+                            exc_info=True,
                         )
             raise last_exception
+
         return wrapper
+
     return decorator
 
 
 class Database:
-    """MySQL database handler for PRMajesticBot.
+    """Обертка для базы данных MySQL с пулом соединений.
 
     Manages connection pool and provides CRUD operations for:
     - Streamers (Twitch streamers being tracked)
@@ -82,10 +85,10 @@ class Database:
     # =========================================================================
 
     async def start(self) -> None:
-        """Start database connection pool and initialize tables."""
+        """Запуск пула соединений с базой данных и инициализация таблиц."""
         try:
             self.logger.debug(
-                f"Creating connection pool to database at {self.db_host}..."
+                f"Initializing connection pool and tables at {self.db_host}..."
             )
             start_time = time.time()
 
@@ -104,13 +107,13 @@ class Database:
             elapsed = time.time() - start_time
             self.logger.debug(f"✓ Connection pool created in {elapsed:.2f}s")
 
-            await self._init_tables()
+            await self.init_db()
         except Exception as e:
             self.logger.error(f"Failed to create connection pool: {e}", exc_info=True)
             raise
 
     async def close(self) -> None:
-        """Close database connection pool."""
+        """Закрытие пула соединений."""
         try:
             if self.pool:
                 self.logger.debug("Closing database connection pool...")
@@ -121,13 +124,19 @@ class Database:
             self.logger.error(
                 f"Error closing database connection pool: {e}", exc_info=True
             )
+        finally:
+            self.pool = None
 
-    async def _init_tables(self) -> None:
-        """Initialize database tables if they don't exist."""
+    async def init_db(self):
+        """Создание таблиц, если они не существуют."""
         try:
-            self.logger.debug("Initializing database tables...")
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # Suppress warnings for IF NOT EXISTS
+                    await cursor.execute("SET sql_notes = 0")
+
+                    # Таблица: Стримеры
+                    # Хранит информацию о стримерах Twitch
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS streamers (
@@ -135,39 +144,134 @@ class Database:
                             streamer_name VARCHAR(255) NOT NULL,
                             is_online BOOLEAN DEFAULT FALSE,
                             started_at TIMESTAMP NULL DEFAULT NULL,
+                            priority INT DEFAULT 0,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            added_by_id BIGINT UNSIGNED,
+                            is_paid BOOLEAN DEFAULT FALSE,
                             game_id BIGINT UNSIGNED,
                             game_name VARCHAR(255),
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
-                            priority INT DEFAULT 0,
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            added_by_id BIGINT UNSIGNED,
-                            is_paid BOOLEAN DEFAULT FALSE
-                        );
+                            assigned_pr_id BIGINT UNSIGNED DEFAULT NULL,
+                            assigned_at TIMESTAMP NULL DEFAULT NULL,
+                            UNIQUE(streamer_name)
+                        )
+                        """
+                    )
 
+                    # Таблица: Настройки
+                    # Настройки для каждой гильдии (каналы, роли, кастомные сообщения)
+                    await cursor.execute(
+                        """
                         CREATE TABLE IF NOT EXISTS settings (
                             guild_id BIGINT UNSIGNED PRIMARY KEY,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
                             monitoring_message_id BIGINT UNSIGNED,
+                            pr_actions_channel_id BIGINT UNSIGNED,
+                            control_panel_channel_id BIGINT UNSIGNED,
+                            control_panel_message_id BIGINT UNSIGNED,
+                            assistant_role_id BIGINT UNSIGNED,
                             template_stream_online VARCHAR(500) NULL,
                             template_stream_offline VARCHAR(500) NULL,
                             template_category_to_gta VARCHAR(500) NULL,
-                            template_category_from_gta VARCHAR(500) NULL
-                        );
-
-                        CREATE TABLE IF NOT EXISTS subscriptions (
-                            guild_id BIGINT UNSIGNED,
-                            streamer_id BIGINT UNSIGNED,
-                            PRIMARY KEY (guild_id, streamer_id),
-                            FOREIGN KEY (streamer_id) REFERENCES streamers(streamer_id) ON DELETE CASCADE
-                        );
-                    """
+                            template_category_from_gta VARCHAR(500) NULL,
+                            p0_rate FLOAT,
+                            p1_rate FLOAT,
+                            p2_rate FLOAT,
+                            p3_rate FLOAT
+                        )
+                        """
                     )
+
+                    # Таблица: Ежедневная статистика
+                    # Агрегированная статистика по дням и приоритетам
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS daily_stats (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            pr_id BIGINT UNSIGNED NOT NULL,
+                            date DATE NOT NULL,
+                            p0_seconds INT DEFAULT 0,
+                            p1_seconds INT DEFAULT 0,
+                            p2_seconds INT DEFAULT 0,
+                            p3_seconds INT DEFAULT 0,
+                            total_points FLOAT DEFAULT 0,
+                            UNIQUE KEY unique_pr_date (pr_id, date)
+                        )
+                        """
+                    )
+                    
+                    # Таблица: Ассистенты (Глобальная статистика)
+                    # Долгосрочная статистика
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistants (
+                            pr_id BIGINT UNSIGNED PRIMARY KEY,
+                            total_spec_seconds BIGINT DEFAULT 0,
+                            session_count INT DEFAULT 0,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+
+                    # Таблица: События
+                    # Специальные события/мероприятия
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS events (
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            guild_id BIGINT UNSIGNED NOT NULL,
+                            name VARCHAR(255) NOT NULL,
+                            description TEXT,
+                            channel_id BIGINT UNSIGNED,
+                            message_id BIGINT UNSIGNED,
+                            created_by BIGINT UNSIGNED,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            start_time TIMESTAMP NULL DEFAULT NULL,
+                            end_time TIMESTAMP NULL DEFAULT NULL,
+                            is_active BOOLEAN DEFAULT TRUE,
+                            required_pr_count INT DEFAULT 0,
+                            notification_sent BOOLEAN DEFAULT FALSE
+                        )
+                        """
+                    )
+
+                    # Таблица: Участники событий
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS event_participants (
+                            event_id INT UNSIGNED,
+                            user_id BIGINT UNSIGNED,
+                            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            left_at TIMESTAMP NULL DEFAULT NULL,
+                            PRIMARY KEY (event_id, user_id, joined_at),
+                            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+                        )
+                        """
+                    )
+
+                    # Таблица: Логи спека (сессии)
+                    # Детальный лог каждой сессии спека
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS specs (
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            pr_id BIGINT UNSIGNED NOT NULL,
+                            streamer_id BIGINT UNSIGNED NOT NULL,
+                            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            ended_at TIMESTAMP NULL DEFAULT NULL,
+                            duration_seconds INT UNSIGNED,
+                            end_reason VARCHAR(50)
+                        )
+                        """
+                    )
+
+                    await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
-            self.logger.debug("✓ Database tables initialized")
+                    self.logger.info("Database initialized successfully")
         except Exception as e:
-            self.logger.error(f"Failed to initialize tables: {e}", exc_info=True)
+            self.logger.error(f"Failed to initialize database: {e}", exc_info=True)
             raise
 
     # =========================================================================
@@ -189,21 +293,23 @@ class Database:
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
     ) -> None:
-        """Create or update a streamer in the database.
+        """
+        Создание или обновление стримера в базе данных.
 
         Args:
-            streamer_id: Twitch user ID
-            streamer_name: Twitch username
-            is_online: Current online status
-            started_at: Stream start timestamp
-            priority: Display priority
-            added_by_id: Discord user ID who added this streamer
-            is_paid: Whether this is a paid promotion
-            game_id: Current game/category ID
-            game_name: Current game/category name
-            stream_title: Current stream title
-            stream_thumbnail_url: URL of the stream thumbnail
+            streamer_id: Twitch ID стримера
+            streamer_name: Имя пользователя Twitch
+            is_online: Статус онлайн
+            started_at: Время начала стрима
+            priority: Приоритет (0-3)
+            added_by_id: ID пользователя Discord, добавившего стримера
+            is_paid: Оплачиваемый ли стример
+            game_id: ID игры на Twitch
+            game_name: Название игры
+            stream_title: Название стрима
+            stream_thumbnail_url: URL превью стрима
         """
+
         try:
             self.logger.debug(
                 f"Creating/updating streamer: {streamer_name} (ID: {streamer_id})"
@@ -253,13 +359,14 @@ class Database:
 
     @db_retry()
     async def get_streamer(self, streamer_id: int) -> Optional[Dict[str, Any]]:
-        """Get streamer information by ID.
+        """
+        Получение информации о стримере по ID.
 
         Args:
-            streamer_id: Twitch user ID
+            streamer_id: Twitch ID
 
         Returns:
-            Streamer data dict or None if not found
+            Словарь с данными или None
         """
         try:
             async with self.pool.acquire() as conn:
@@ -286,17 +393,19 @@ class Database:
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
     ) -> None:
-        """Update streamer's online status and stream info.
+        """
+        Обновление статуса стримера.
 
         Args:
-            streamer_id: Twitch user ID
-            is_online: Current online status
-            started_at: Stream start timestamp
-            game_id: Current game/category ID
-            game_name: Current game/category name
-            stream_title: Current stream title
-            stream_thumbnail_url: URL of the stream thumbnail
+            streamer_id: Twitch ID стримера
+            is_online: Новый статус
+            started_at: Время начала (если онлайн)
+            game_id: Текущая игра
+            game_name: Название игры
+            stream_title: Название стрима
+            stream_thumbnail_url: Превью
         """
+
         try:
             self.logger.debug(
                 f"Updating streamer {streamer_id} status: online={is_online}"
@@ -328,11 +437,12 @@ class Database:
             raise
 
     @db_retry()
-    async def delete_streamer(self, streamer_id: int) -> None:
-        """Delete a streamer from the database.
+    async def delete_streamer(self, streamer_id: int) -> bool:
+        """
+        Удаление стримера из базы данных.
 
-        Args:
-            streamer_id: Twitch user ID
+        Returns:
+            True если удален, False если не найден
         """
         try:
             self.logger.debug(f"Deleting streamer {streamer_id}")
@@ -352,13 +462,14 @@ class Database:
 
     @db_retry()
     async def streamer_exists(self, streamer_id: int) -> bool:
-        """Check if a streamer exists in the database.
+        """
+        Проверка существования стримера в базе.
 
         Args:
-            streamer_id: Twitch user ID
+            streamer_id: Twitch ID
 
         Returns:
-            True if streamer exists, False otherwise
+            True если существует, иначе False
         """
         try:
             async with self.pool.acquire() as conn:
@@ -377,10 +488,11 @@ class Database:
 
     @db_retry()
     async def list_all_streamers(self) -> List[Dict[str, Any]]:
-        """Get all streamers from the database.
+        """
+        Получение всех стримеров из базы данных.
 
         Returns:
-            List of all streamer data dicts
+            Список словарей с данными стримеров
         """
         try:
             async with self.pool.acquire() as conn:
@@ -393,10 +505,11 @@ class Database:
 
     @db_retry()
     async def list_online_streamers(self) -> List[Dict[str, Any]]:
-        """Get all currently online streamers.
+        """
+        Получение списка всех онлайн стримеров.
 
         Returns:
-            List of online streamer data dicts
+            Список словарей с данными онлайн стримеров
         """
         try:
             async with self.pool.acquire() as conn:
@@ -407,155 +520,6 @@ class Database:
                     return await cursor.fetchall()
         except Exception as e:
             self.logger.error(f"Failed to list online streamers: {e}", exc_info=True)
-            raise
-
-    # =========================================================================
-    # Subscription Operations
-    # =========================================================================
-
-    async def create_subscription(self, guild_id: int, streamer_id: int) -> None:
-        """Create a subscription (guild follows streamer).
-
-        Args:
-            guild_id: Discord guild ID
-            streamer_id: Twitch user ID
-        """
-        try:
-            self.logger.debug(
-                f"Creating subscription: guild={guild_id}, streamer={streamer_id}"
-            )
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO subscriptions (guild_id, streamer_id)
-                        VALUES (%s, %s)
-                        ON DUPLICATE KEY UPDATE guild_id = guild_id
-                        """,
-                        (guild_id, streamer_id),
-                    )
-                    await conn.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to create subscription: {e}", exc_info=True)
-            raise
-
-    async def delete_subscription(self, guild_id: int, streamer_id: int) -> None:
-        """Delete a subscription.
-
-        Args:
-            guild_id: Discord guild ID
-            streamer_id: Twitch user ID
-        """
-        try:
-            self.logger.debug(
-                f"Deleting subscription: guild={guild_id}, streamer={streamer_id}"
-            )
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "DELETE FROM subscriptions WHERE guild_id = %s AND streamer_id = %s",
-                        (guild_id, streamer_id),
-                    )
-                    await conn.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to delete subscription: {e}", exc_info=True)
-            raise
-
-    async def subscription_exists(self, guild_id: int, streamer_id: int) -> bool:
-        """Check if a subscription exists.
-
-        Args:
-            guild_id: Discord guild ID
-            streamer_id: Twitch user ID
-
-        Returns:
-            True if subscription exists, False otherwise
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT COUNT(*) as count FROM subscriptions WHERE guild_id = %s AND streamer_id = %s",
-                        (guild_id, streamer_id),
-                    )
-                    result = await cursor.fetchone()
-                    return result["count"] > 0
-        except Exception as e:
-            self.logger.error(f"Failed to check subscription: {e}", exc_info=True)
-            raise
-
-    async def list_guild_subscriptions(self, guild_id: int) -> List[int]:
-        """Get all streamer IDs that a guild is subscribed to.
-
-        Args:
-            guild_id: Discord guild ID
-
-        Returns:
-            List of streamer IDs
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT streamer_id FROM subscriptions WHERE guild_id = %s",
-                        (guild_id,),
-                    )
-                    result = await cursor.fetchall()
-                    return [row["streamer_id"] for row in result]
-        except Exception as e:
-            self.logger.error(
-                f"Failed to list guild subscriptions for {guild_id}: {e}", exc_info=True
-            )
-            raise
-
-    async def has_any_subscriptions(self, streamer_id: int) -> bool:
-        """Check if any guild is subscribed to a streamer.
-
-        Used to determine if a streamer can be safely deleted.
-
-        Args:
-            streamer_id: Twitch user ID
-
-        Returns:
-            True if at least one subscription exists, False otherwise
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT COUNT(*) as count FROM subscriptions WHERE streamer_id = %s",
-                        (streamer_id,),
-                    )
-                    result = await cursor.fetchone()
-                    return result["count"] > 0
-        except Exception as e:
-            self.logger.error(
-                f"Failed to check subscriptions for {streamer_id}: {e}", exc_info=True
-            )
-            raise
-
-    async def list_streamer_guilds(self, streamer_id: int) -> List[int]:
-        """Get all guild IDs that are subscribed to a streamer.
-
-        Args:
-            streamer_id: Twitch user ID
-
-        Returns:
-            List of guild IDs
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT guild_id FROM subscriptions WHERE streamer_id = %s",
-                        (streamer_id,),
-                    )
-                    result = await cursor.fetchall()
-                    return [row["guild_id"] for row in result]
-        except Exception as e:
-            self.logger.error(
-                f"Failed to list streamer guilds for {streamer_id}: {e}", exc_info=True
-            )
             raise
 
     # =========================================================================
@@ -681,58 +645,31 @@ class Database:
             )
             raise
 
-    async def list_guild_streamers(self, guild_id: int) -> List[Dict[str, Any]]:
-        """Get all streamer data for streamers a guild is subscribed to.
-
-        Args:
-            guild_id: Discord guild ID
-
-        Returns:
-            List of streamer data dicts
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        SELECT s.* FROM streamers s
-                        INNER JOIN subscriptions sub ON s.streamer_id = sub.streamer_id
-                        WHERE sub.guild_id = %s
-                        """,
-                        (guild_id,),
-                    )
-                    return await cursor.fetchall()
-        except Exception as e:
-            self.logger.error(
-                f"Failed to list streamers for guild {guild_id}: {e}", exc_info=True
-            )
-            raise
-
     # =========================================================================
     # Notification Template Operations
     # =========================================================================
 
-    async def get_notification_template(
-        self, guild_id: int, event_type: str
-    ) -> str:
-        """Get notification template for a specific event.
+    async def get_notification_template(self, guild_id: int, event_type: str) -> str:
+        """
+        Получение шаблона уведомления для события.
 
         Args:
-            guild_id: Discord guild ID
-            event_type: One of 'stream_online', 'stream_offline', 
-                       'category_to_gta', 'category_from_gta'
+            guild_id: ID Discord сервера
+            event_type: Тип события ('stream_online', 'stream_offline' и т.д.)
 
         Returns:
-            Template string with placeholders
-        
+            Строка шаблона с плейсхолдерами
+
         Raises:
-            ValueError: If event_type is not in allowed list
+            ValueError: Если тип события недопустим
         """
         # SQL injection prevention: validate event_type against whitelist
         if event_type not in Config.ALLOWED_EVENT_TYPES:
-            self.logger.error(f"Invalid event_type '{event_type}' - possible SQL injection attempt")
+            self.logger.error(
+                f"Invalid event_type '{event_type}' - possible SQL injection attempt"
+            )
             raise ValueError(f"Invalid event type: {event_type}")
-        
+
         column_name = f"template_{event_type}"
         try:
             async with self.pool.acquire() as conn:
@@ -754,22 +691,21 @@ class Database:
     async def update_notification_template(
         self, guild_id: int, event_type: str, template: str
     ) -> None:
-        """Update notification template for a specific event.
+        """
+        Обновление шаблона уведомления.
 
         Args:
-            guild_id: Discord guild ID
-            event_type: One of 'stream_online', 'stream_offline',
-                       'category_to_gta', 'category_from_gta'
-            template: New template string
-        
-        Raises:
-            ValueError: If event_type is not in allowed list
+            guild_id: ID Discord сервера
+            event_type: Тип события
+            template: Новый шаблон
         """
         # SQL injection prevention: validate event_type against whitelist
         if event_type not in Config.ALLOWED_EVENT_TYPES:
-            self.logger.error(f"Invalid event_type '{event_type}' - possible SQL injection attempt")
+            self.logger.error(
+                f"Invalid event_type '{event_type}' - possible SQL injection attempt"
+            )
             raise ValueError(f"Invalid event type: {event_type}")
-        
+
         column_name = f"template_{event_type}"
         try:
             async with self.pool.acquire() as conn:
@@ -780,7 +716,9 @@ class Database:
                         INSERT INTO settings (guild_id, {column}) 
                         VALUES (%s, %s)
                         ON DUPLICATE KEY UPDATE {column} = %s
-                        """.format(column=column_name),
+                        """.format(
+                            column=column_name
+                        ),
                         (guild_id, template, template),
                     )
                     await conn.commit()
@@ -792,3 +730,1031 @@ class Database:
                 f"Failed to update template for guild {guild_id}: {e}", exc_info=True
             )
             raise
+
+    # =========================================================================
+    # Spec System Operations
+    # =========================================================================
+
+    @db_retry()
+    async def assign_pr_to_streamer(self, streamer_id: int, pr_id: int) -> bool:
+        """
+        Назначение PR-ассистента стримеру.
+
+        Args:
+            streamer_id: Twitch ID стримера
+            pr_id: Discord ID ассистента
+
+        Returns:
+            True если успешно, False если уже назначен
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Check if already assigned
+                    await cursor.execute(
+                        "SELECT assigned_pr_id FROM streamers WHERE streamer_id = %s",
+                        (streamer_id,),
+                    )
+                    result = await cursor.fetchone()
+                    if result and result.get("assigned_pr_id"):
+                        return False  # Already assigned
+
+                    # Assign PR to streamer
+                    await cursor.execute(
+                        """
+                        UPDATE streamers 
+                        SET assigned_pr_id = %s, assigned_at = NOW()
+                        WHERE streamer_id = %s
+                        """,
+                        (pr_id, streamer_id),
+                    )
+
+                    # Create spec log entry
+                    await cursor.execute(
+                        """
+                        INSERT INTO specs (pr_id, streamer_id, started_at)
+                        VALUES (%s, %s, NOW())
+                        """,
+                        (pr_id, streamer_id),
+                    )
+
+                    # Ensure assistant exists in assistants table
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id) VALUES (%s)
+                        ON DUPLICATE KEY UPDATE pr_id = pr_id
+                        """,
+                        (pr_id,),
+                    )
+
+                    await conn.commit()
+                    self.logger.debug(
+                        f"✓ PR {pr_id} assigned to streamer {streamer_id}"
+                    )
+                    return True
+        except Exception as e:
+            self.logger.error(
+                f"Failed to assign PR {pr_id} to streamer {streamer_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def unassign_pr_from_streamer(
+        self, streamer_id: int, end_reason: str = "stream_end"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Снятие PR-ассистента со стримера и обновление статистики.
+
+        Args:
+            streamer_id: Twitch ID стримера
+            end_reason: Причина завершения ('stream_end', 'manual', 'transfer')
+
+        Returns:
+            Словарь с данными сессии или None
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Get current assignment info
+                    await cursor.execute(
+                        """
+                        SELECT assigned_pr_id, assigned_at, streamer_name, priority
+                        FROM streamers WHERE streamer_id = %s
+                        """,
+                        (streamer_id,),
+                    )
+                    result = await cursor.fetchone()
+
+                    if not result or not result.get("assigned_pr_id"):
+                        return None  # No one assigned
+
+                    pr_id = result["assigned_pr_id"]
+                    assigned_at = result["assigned_at"]
+                    streamer_name = result["streamer_name"]
+                    priority = result.get("priority", 0)  # Default to 0 if not set
+
+                    # Calculate duration
+                    await cursor.execute("SELECT NOW() as now")
+                    now_result = await cursor.fetchone()
+                    now = now_result["now"]
+
+                    # Ensure timestamps are aware (UTC) for split logic
+                    if assigned_at and assigned_at.tzinfo is None:
+                         assigned_at = assigned_at.replace(tzinfo=timezone.utc)
+                    if now.tzinfo is None:
+                        now = now.replace(tzinfo=timezone.utc)
+
+                    duration_seconds = 0
+                    if assigned_at:
+                        duration_seconds = int((now - assigned_at).total_seconds())
+
+                    # Update specs - close the session
+                    await cursor.execute(
+                        """
+                        UPDATE specs 
+                        SET ended_at = NOW(), duration_seconds = %s, end_reason = %s
+                        WHERE pr_id = %s AND streamer_id = %s AND ended_at IS NULL
+                        ORDER BY started_at DESC LIMIT 1
+                        """,
+                        (duration_seconds, end_reason, pr_id, streamer_id),
+                    )
+
+                    # Clear assignment from streamer
+                    await cursor.execute(
+                        """
+                        UPDATE streamers 
+                        SET assigned_pr_id = NULL, assigned_at = NULL 
+                        WHERE streamer_id = %s
+                        """,
+                        (streamer_id,),
+                    )
+                    await conn.commit()
+
+            # Record Stats (Outside transaction)
+            if duration_seconds > 0:
+                await self.record_spec_session(
+                    pr_id, Config.GUILD_ID, assigned_at, now, priority
+                )
+
+            return {
+                "pr_id": pr_id,
+                "duration_seconds": duration_seconds,
+                "streamer_name": streamer_name,
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to unassign PR from streamer {streamer_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def get_streamer_assigned_pr(self, streamer_id: int) -> Optional[int]:
+        """
+        Получение назначенного PR-ассистента для стримера.
+
+        Args:
+            streamer_id: Twitch ID стримера
+
+        Returns:
+            Discord ID ассистента или None
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT assigned_pr_id FROM streamers WHERE streamer_id = %s",
+                        (streamer_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("assigned_pr_id") if result else None
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get assigned PR for streamer {streamer_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def get_pr_current_streamer(self, pr_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Получение стримера, которому назначен ассистент.
+
+        Args:
+            pr_id: Discord ID ассистента
+
+        Returns:
+            Словарь с данными стримера или None
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM streamers WHERE assigned_pr_id = %s",
+                        (pr_id,),
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get current streamer for PR {pr_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def get_pr_total_time(self, pr_id: int) -> int:
+        """
+        Получение общего времени спека ассистента.
+
+        Args:
+            pr_id: Discord ID ассистента
+
+        Returns:
+            Общее время в секундах
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("total_spec_seconds", 0) if result else 0
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get total time for PR {pr_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def add_pr_time(self, pr_id: int, seconds: int) -> int:
+        """
+        Добавление времени к статистике ассистента.
+
+        Args:
+            pr_id: Discord ID ассистента
+            seconds: Секунды для добавления
+
+        Returns:
+            Новое общее время
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id, total_spec_seconds)
+                        VALUES (%s, %s)
+                        ON DUPLICATE KEY UPDATE total_spec_seconds = total_spec_seconds + %s
+                        """,
+                        (pr_id, seconds, seconds),
+                    )
+                    await conn.commit()
+
+                    # Get new total
+                    await cursor.execute(
+                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("total_spec_seconds", 0) if result else 0
+        except Exception as e:
+            self.logger.error(f"Failed to add time for PR {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def subtract_pr_time(self, pr_id: int, seconds: int) -> int:
+        """
+        Вычитание времени из статистики ассистента (минимум 0).
+
+        Args:
+            pr_id: Discord ID ассистента
+            seconds: Секунды для вычитания
+
+        Returns:
+            Новое общее время
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE assistants 
+                        SET total_spec_seconds = GREATEST(0, CAST(total_spec_seconds AS SIGNED) - %s)
+                        WHERE pr_id = %s
+                        """,
+                        (seconds, pr_id),
+                    )
+                    await conn.commit()
+
+                    # Get new total
+                    await cursor.execute(
+                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("total_spec_seconds", 0) if result else 0
+        except Exception as e:
+            self.logger.error(
+                f"Failed to subtract time for PR {pr_id}: {e}", exc_info=True
+            )
+            raise
+
+    @db_retry()
+    async def transfer_streamer(
+        self, from_pr_id: int, to_pr_id: int, streamer_id: int
+    ) -> Optional[int]:
+        """
+        Передача стримера от одного ассистента другому.
+
+        Args:
+            from_pr_id: ID текущего ассистента
+            to_pr_id: ID нового ассистента
+            streamer_id: Twitch ID стримера
+
+        Returns:
+            Длительность сессии предыдущего ассистента или None
+        """
+        try:
+            # First unassign current PR with 'transfer' reason
+            result = await self.unassign_pr_from_streamer(streamer_id, "transfer")
+            if not result:
+                return None
+
+            # Инициализация таблиц
+            await self.init_db()
+            await self.assign_pr_to_streamer(streamer_id, to_pr_id)
+
+            return result["duration_seconds"]
+        except Exception as e:
+            self.logger.error(
+                f"Failed to transfer streamer {streamer_id} from {from_pr_id} to {to_pr_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def get_pr_actions_channel(self, guild_id: int) -> Optional[int]:
+        """
+        Получение канала для логов действий PR.
+
+        Args:
+            guild_id: ID Discord сервера
+
+        Returns:
+            ID канала или None
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT pr_actions_channel_id FROM settings WHERE guild_id = %s",
+                        (guild_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("pr_actions_channel_id") if result else None
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get PR actions channel for guild {guild_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def set_pr_actions_channel(self, guild_id: int, channel_id: int) -> None:
+        """
+        Установка канала для логов действий PR.
+
+        Args:
+            guild_id: ID Discord сервера
+            channel_id: ID канала
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO settings (guild_id, pr_actions_channel_id)
+                        VALUES (%s, %s)
+                        ON DUPLICATE KEY UPDATE pr_actions_channel_id = %s
+                        """,
+                        (guild_id, channel_id, channel_id),
+                    )
+                    await conn.commit()
+                    self.logger.debug(
+                        f"✓ Set PR actions channel to {channel_id} for guild {guild_id}"
+                    )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to set PR actions channel for guild {guild_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+    @db_retry()
+    async def get_available_gta_streamers(self) -> list:
+        """
+        Получение списка онлайн стримеров GTA 5 без назначенного ассистента.
+
+        Returns:
+            Список словарей с ID и именем стримера
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT streamer_id, streamer_name
+                        FROM streamers
+                        WHERE is_online = TRUE 
+                        AND game_id = %s
+                        AND assigned_pr_id IS NULL
+                        ORDER BY streamer_name ASC
+                        """,
+                        (Config.GTA5_GAME_ID,),
+                    )
+                    return await cursor.fetchall() or []
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get available GTA streamers: {e}",
+                exc_info=True,
+            )
+            return []
+
+    # =========================================================================
+    # Events Management
+    # =========================================================================
+
+    @db_retry()
+    async def create_event(
+        self,
+        guild_id: int,
+        name: str,
+        description: str,
+        channel_id: int,
+        message_id: int,
+        created_by: int,
+        required_pr_count: int = 0,
+        start_time=None,
+        notification_sent: bool = False,
+    ) -> int:
+        """Создание нового события."""
+        try:
+            if start_time is None:
+                start_time = datetime.now(timezone.utc)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO events (
+                            guild_id, name, description, channel_id, message_id, 
+                            created_by, required_pr_count, start_time, notification_sent
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            guild_id,
+                            name,
+                            description,
+                            channel_id,
+                            message_id,
+                            created_by,
+                            required_pr_count,
+                            start_time,
+                            notification_sent,
+                        ),
+                    )
+                    await conn.commit()
+                    return cursor.lastrowid
+        except Exception as e:
+            self.logger.error(f"Failed to create event: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def get_active_events(self, guild_id: int) -> list:
+        """Получение активных событий гильдии."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT * FROM events 
+                        WHERE guild_id = %s AND is_active = TRUE
+                        ORDER BY start_time ASC
+                        """,
+                        (guild_id,),
+                    )
+                    events = await cursor.fetchall()
+
+                    # For each event, get participant count
+                    for event in events:
+                        await cursor.execute(
+                            """
+                            SELECT COUNT(*) as count 
+                            FROM event_participants 
+                            WHERE event_id = %s AND left_at IS NULL
+                            """,
+                            (event["id"],),
+                        )
+                        result = await cursor.fetchone()
+                        event["current_participants"] = result["count"]
+
+                    return events
+        except Exception as e:
+            self.logger.error(f"Failed to get active events: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def get_event(self, event_id: int) -> dict:
+        """Получение события по ID."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM events WHERE id = %s", (event_id,)
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to get event {event_id}: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def end_event(self, event_id: int) -> list:
+        """Завершение события и возврат списка участников с длительностью участия."""
+        try:
+            now = datetime.now(timezone.utc)
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # 1. Get all active participants to calculate stats
+                    await cursor.execute(
+                        """
+                        SELECT user_id, joined_at
+                        FROM event_participants
+                        WHERE event_id = %s AND left_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+                    participants = await cursor.fetchall()
+
+                    await cursor.execute(
+                        "SELECT start_time, guild_id FROM events WHERE id = %s", (event_id,)
+                    )
+                    event_data = await cursor.fetchone()
+                    if not event_data:
+                        return []
+                        
+                    guild_id = event_data["guild_id"]
+                    event_start_time = event_data["start_time"].replace(tzinfo=timezone.utc) if event_data["start_time"] else now
+
+                    # 2. Mark event as inactive
+                    await cursor.execute(
+                        """
+                        UPDATE events 
+                        SET is_active = FALSE, end_time = %s 
+                        WHERE id = %s
+                        """,
+                        (now, event_id),
+                    )
+
+                    # 3. Mark all active participants as left
+                    await cursor.execute(
+                        """
+                        UPDATE event_participants 
+                        SET left_at = %s 
+                        WHERE event_id = %s AND left_at IS NULL
+                        """,
+                        (now, event_id),
+                    )
+
+                    # 4. Update assistant stats for each participant
+                    results = []
+                    for p in participants:
+                        user_id = p["user_id"]
+                        joined_at = p["joined_at"]
+                        if joined_at.tzinfo is None:
+                            joined_at = joined_at.replace(tzinfo=timezone.utc)
+
+                        # Effective start time is the later of actual event start or user join
+                        # This handles users joining before the scheduled start
+                        effective_start = max(joined_at, event_start_time)
+
+                        duration = int((now - effective_start).total_seconds())
+                        if duration < 0:
+                            duration = 0
+
+                        # Use record_spec_session to handle daily stats splitting and global update
+                        # Priority 0 for Events (Default)
+                        # We need to call this OUTSIDE the transaction loop if record_spec_session manages its own transaction?
+                        # record_spec_session uses `async with self.pool.acquire()`.
+                        # Nesting works with aiomysql usually if valid.
+                        # However, we are holding a cursor on `conn`.
+                        # Ideally we collect data and update after?
+                        # Or `record_spec_session` can handle it.
+                        # `record_spec_session` does `self.pool.acquire()`.
+                        # This creates a NEW connection. It is safe.
+                        
+                        # BUT we are inside `async with self.pool.acquire() as conn` here (Line 1441).
+                        # Calls to other methods that acquire new connections are fine.
+                        
+                        await self.record_spec_session(user_id, guild_id, effective_start, now, priority=0)
+                        
+                        results.append({"user_id": user_id, "duration": duration})
+
+                    await conn.commit()
+                    return results
+        except Exception as e:
+            self.logger.error(f"Failed to end event {event_id}: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def record_daily_stats(self, pr_id: int, date_obj: datetime.date, priority: int, duration_seconds: int, points: float):
+        """Обновление ежедневной статистики для конкретной даты и приоритета."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Construct column name based on priority
+                    # priority is 0-3
+                    col_name = f"p{priority}_seconds"
+                    
+                    await cursor.execute(
+                        f"""
+                        INSERT INTO daily_stats (pr_id, date, {col_name}, total_points)
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                        {col_name} = {col_name} + %s,
+                        total_points = total_points + %s
+                        """,
+                        (pr_id, date_obj, duration_seconds, points, duration_seconds, points)
+                    )
+                    await conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to record daily stats: {e}", exc_info=True)
+
+    @db_retry()
+    async def get_daily_stats(self, pr_id: int = None, date_obj: datetime.date = None, start_date=None, end_date=None) -> list:
+        """Получение ежедневной статистики с фильтрацией."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    query = "SELECT * FROM daily_stats WHERE 1=1"
+                    params = []
+                    
+                    if pr_id:
+                        query += " AND pr_id = %s"
+                        params.append(pr_id)
+                    
+                    if date_obj:
+                        query += " AND date = %s"
+                        params.append(date_obj)
+                    elif start_date:
+                        query += " AND date >= %s"
+                        params.append(start_date)
+                        
+                    if end_date:
+                        query += " AND date <= %s"
+                        params.append(end_date)
+                        
+                    query += " ORDER BY date DESC, total_points DESC LIMIT 100"
+                    
+                    await cursor.execute(query, tuple(params))
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to get daily stats: {e}")
+            return []
+
+    @db_retry()
+    async def update_daily_stats_manual(self, pr_id: int, date_obj: datetime.date, p0: int, p1: int, p2: int, p3: int, total_points: float):
+        """Ручное обновление ежедневной статистики."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Calculate total time
+                    # total_time = p0 + p1 + p2 + p3  # Optional check
+                    
+                    await cursor.execute(
+                        """
+                        INSERT INTO daily_stats (pr_id, date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, total_points)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                        p0_seconds = %s, p1_seconds = %s, p2_seconds = %s, p3_seconds = %s, total_points = %s
+                        """,
+                        (pr_id, date_obj, p0, p1, p2, p3, total_points, p0, p1, p2, p3, total_points)
+                    )
+                    await conn.commit()
+                    return True
+        except Exception as e:
+            self.logger.error(f"Failed to manual update stats: {e}")
+            return False
+
+    @db_retry()
+    async def get_points_config(self, guild_id: int) -> dict:
+        """Получение конфигурации баллов для гильдии."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        "SELECT p0_rate, p1_rate, p2_rate, p3_rate FROM settings WHERE guild_id = %s",
+                        (guild_id,)
+                    )
+                    result = await cursor.fetchone()
+                    if result and result['p0_rate'] is not None:
+                        return {
+                            0: result['p0_rate'],
+                            1: result['p1_rate'],
+                            2: result['p2_rate'],
+                            3: result['p3_rate']
+                        }
+                    
+                    # Return defaults if not found
+                    return {k: v for k, v in Config.DEFAULT_POINTS.items()}
+        except Exception as e:
+             self.logger.error(f"Failed to get points config: {e}")
+             return {k: v for k, v in Config.DEFAULT_POINTS.items()}
+
+    @db_retry()
+    async def set_points_config(self, guild_id: int, rates: dict):
+        """Установка конфигурации баллов."""
+        try:
+             async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE settings 
+                        SET p0_rate = %s, p1_rate = %s, p2_rate = %s, p3_rate = %s
+                        WHERE guild_id = %s
+                        """,
+                        (rates[0], rates[1], rates[2], rates[3], guild_id)
+                    )
+                    await conn.commit()
+        except Exception as e:
+             self.logger.error(f"Failed to set points config: {e}")
+
+
+
+    @db_retry()
+    async def update_streamer_priority(self, streamer_id: int, priority: int):
+        """Обновление приоритета стримера."""
+        try:
+             async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "UPDATE streamers SET priority = %s WHERE streamer_id = %s",
+                        (priority, streamer_id)
+                    )
+                    await conn.commit()
+                    return True
+        except Exception as e:
+            self.logger.error(f"Failed to update streamer {streamer_id}: {e}")
+            return False
+
+    @db_retry()
+    async def record_spec_session(self, pr_id: int, guild_id: int, start_time: datetime, end_time: datetime, priority: int):
+        """Запись сессии спека с разделением по дням и расчетом баллов."""
+        try:
+            # 1. Split time by day
+            chunks = split_time_by_day(start_time, end_time)
+            if not chunks:
+                return
+
+            # 2. Get Point Rates
+            config = await self.get_points_config(guild_id)
+            # Default rate if not found for priority
+            rate_per_hour = config.get(priority, 0.5) 
+
+            # 3. Record each chunk
+            for date_obj, duration in chunks:
+                # Calculate points: (duration / 3600) * rate
+                points = (duration / 3600.0) * rate_per_hour
+                
+                await self.record_daily_stats(pr_id, date_obj, priority, duration, points)
+            
+            # 4. Update Global Assistant Stats (assistants table)
+            total_duration = int((end_time - start_time).total_seconds())
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                     await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id, total_spec_seconds, session_count) 
+                        VALUES (%s, %s, 1) 
+                        ON DUPLICATE KEY UPDATE 
+                        total_spec_seconds = total_spec_seconds + %s, 
+                        session_count = session_count + 1
+                        """,
+                        (pr_id, total_duration, total_duration),
+                    )
+                     await conn.commit()
+
+        except Exception as e:
+            self.logger.error(f"Failed to record spec session: {e}", exc_info=True)
+
+    @db_retry()
+    async def join_event(self, event_id: int, user_id: int) -> bool:
+        """Добавление пользователя в событие."""
+        try:
+            # Check if already joined
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT 1 FROM event_participants 
+                        WHERE event_id = %s AND user_id = %s AND left_at IS NULL
+                        """,
+                        (event_id, user_id),
+                    )
+                    if await cursor.fetchone():
+                        return False  # Already joined
+
+                    now = datetime.now(timezone.utc)
+                    await cursor.execute(
+                        """
+                        INSERT INTO event_participants (event_id, user_id, joined_at)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (event_id, user_id, now),
+                    )
+                    await conn.commit()
+                    return True
+        except Exception as e:
+            self.logger.error(f"Failed to join event: {e}", exc_info=True)
+            return False
+
+    @db_retry()
+    async def leave_event(self, event_id: int, user_id: int) -> int:
+        """Удаление пользователя из события, обновление статистики и возврат длительности."""
+        try:
+            now = datetime.now(timezone.utc)
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # 1. Get joined_at to calculate duration
+                    await cursor.execute(
+                        """
+                        SELECT joined_at 
+                        FROM event_participants 
+                        WHERE event_id = %s AND user_id = %s AND left_at IS NULL
+                        """,
+                        (event_id, user_id),
+                    )
+                    result = await cursor.fetchone()
+
+                    if not result:
+                        return 0
+
+                    joined_at = result["joined_at"]
+                    if joined_at.tzinfo is None:
+                        joined_at = joined_at.replace(tzinfo=timezone.utc)
+
+                    duration = int((now - joined_at).total_seconds())
+                    if duration < 0:
+                        duration = 0
+
+                    # 2. Mark as left
+                    await cursor.execute(
+                        """
+                        UPDATE event_participants 
+                        SET left_at = %s 
+                        WHERE event_id = %s AND user_id = %s AND left_at IS NULL
+                        """,
+                        (now, event_id, user_id),
+                    )
+
+                    # Fetch join time
+                    await cursor.execute(
+                        "SELECT joined_at FROM event_participants WHERE event_id = %s AND user_id = %s AND joined_at < %s ORDER BY joined_at DESC LIMIT 1",
+                        (event_id, user_id, now),
+                    )
+                    res = await cursor.fetchone()
+
+                    if res:
+                        joined_at = res["joined_at"]
+                        if joined_at.tzinfo is None:
+                            joined_at = joined_at.replace(tzinfo=timezone.utc)
+
+                        # Fetch Event Start Time
+                        await cursor.execute(
+                            "SELECT start_time FROM events WHERE id = %s", (event_id,)
+                        )
+                        event_data = await cursor.fetchone()
+                        event_start_time = (
+                            event_data["start_time"].replace(
+                                tzinfo=timezone.utc
+                            )
+                            if event_data
+                            else now
+                        )
+
+                        # Effective Start Calculation
+                        effective_start = max(joined_at, event_start_time)
+                        duration = int((now - effective_start).total_seconds())
+
+                        if duration > 0:
+                            await cursor.execute(
+                                """
+                                INSERT INTO assistants (pr_id, total_spec_seconds, session_count) 
+                                VALUES (%s, %s, 1) 
+                                ON DUPLICATE KEY UPDATE 
+                                total_spec_seconds = total_spec_seconds + %s, 
+                                session_count = session_count + 1
+                                """,
+                                (user_id, duration, duration),
+                            )
+
+                    await conn.commit()
+                    return duration
+        except Exception as e:
+            self.logger.error(f"Failed to leave event {event_id}: {e}", exc_info=True)
+            return 0
+
+    @db_retry()
+    async def set_assistant_role(self, guild_id: int, role_id: int) -> None:
+        """Установка роли ассистента для гильдии."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO settings (guild_id, assistant_role_id)
+                        VALUES (%s, %s) AS new
+                        ON DUPLICATE KEY UPDATE assistant_role_id = new.assistant_role_id
+                        """,
+                        (guild_id, role_id),
+                    )
+                    await conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to set assistant role: {e}", exc_info=True)
+
+    @db_retry()
+    async def mark_event_notification_sent(self, event_id: int) -> None:
+        """Отметка о отправке уведомления о событии."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "UPDATE events SET notification_sent = TRUE WHERE id = %s",
+                        (event_id,),
+                    )
+                    await conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to mark event notif sent: {e}", exc_info=True)
+
+    @db_retry()
+    async def get_user_active_event_participation(self, user_id: int) -> Optional[dict]:
+        """Проверка участия пользователя в активном событии."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT e.id, e.name 
+                        FROM event_participants ep
+                        JOIN events e ON ep.event_id = e.id
+                        WHERE ep.user_id = %s AND ep.left_at IS NULL AND e.is_active = TRUE
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to check user active event: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def get_event_participants(self, event_id: int) -> list:
+        """Получение списка активных участников события."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT user_id, joined_at 
+                        FROM event_participants 
+                        WHERE event_id = %s AND left_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+                    return await cursor.fetchall() or []
+        except Exception as e:
+            self.logger.error(f"Failed to get participants: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def get_top_assistants(self, limit: int = 10) -> list:
+        """Получение топ-PR ассистентов по времени спека."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT pr_id, total_spec_seconds, session_count 
+                        FROM assistants 
+                        ORDER BY total_spec_seconds DESC 
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to get top assistants: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def reset_assistant_stats(self, pr_id: int) -> bool:
+        """Сброс статистики для конкретного ассистента."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE assistants 
+                        SET total_spec_seconds = 0, session_count = 0 
+                        WHERE pr_id = %s
+                        """,
+                        (pr_id,),
+                    )
+                    await conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            self.logger.error(f"Failed to reset assistant stats: {e}", exc_info=True)
+            return False

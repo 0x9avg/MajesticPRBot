@@ -2,6 +2,7 @@
 
 import disnake
 import calendar
+import datetime
 import logging
 import time
 from typing import List, Dict, Any
@@ -12,20 +13,69 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
+def format_spec_duration(seconds: int) -> str:
+    """
+    Форматирование длительности в читаемый вид.
+
+    Args:
+        seconds: Длительность в секундах
+
+    Returns:
+        Строка вида "1ч 30м" или "45м"
+    """
+    if seconds < 60:
+        return f"{seconds}с"
+    
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    
+    if hours > 0:
+        return f"{hours}ч {minutes}м" if minutes > 0 else f"{hours}ч"
+    return f"{minutes}м"
+
+def split_time_by_day(start_dt, end_dt) -> List[tuple]:
+    """
+    Разделение временного интервала по дням.
+    
+    Args:
+        start_dt: Начало (aware datetime)
+        end_dt: Конец (aware datetime)
+        
+    Returns:
+        Список кортежей (date, duration_seconds)
+    """
+    chunks = []
+    current = start_dt
+    
+    while current < end_dt:
+        # Calculate next midnight
+        next_day = (current + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Determine strict end for this chunk
+        chunk_end = min(end_dt, next_day)
+        
+        duration = int((chunk_end - current).total_seconds())
+        if duration > 0:
+            chunks.append((current.date(), duration))
+            
+        current = chunk_end
+        
+    return chunks
 def create_streamers_embed(
     online_streamers: List[Dict[str, Any]],
     subscribed_count: int,
     gta_count: int,
 ) -> disnake.Embed:
-    """Create embed showing online streamers.
+    """
+    Создание эмбеда со списком онлайн стримеров.
 
     Args:
-        online_streamers: List of online streamer data dicts
-        subscribed_count: Total number of subscriptions for the guild
-        gta_count: Number of streamers playing GTA 5
+        online_streamers: Список данных стримеров
+        subscribed_count: Общее количество подписок
+        gta_count: Количество стримеров в GTA 5
 
     Returns:
-        Configured disnake.Embed
+        Объект disnake.Embed
     """
     # Handle empty states
     if subscribed_count == 0:
@@ -87,19 +137,25 @@ def create_streamers_component(
     online_streamers: List[Dict[str, Any]],
     subscribed_count: int,
     gta_count: int,
+    events: List[Dict[str, Any]] = None,
 ) -> disnake.ui.Container:
-    """Create component showing online streamers.
-
-    Args:
-        online_streamers: List of online streamer data dicts
-        subscribed_count: Total number of subscriptions for the guild
-        gta_count: Number of streamers playing GTA 5
-
-    Returns:
-        Configured disnake.ui.Container (pass to components= parameter)
     """
+    Создание компонента со стримерами и событиями.
+    
+    Args:
+        online_streamers: Список стримеров
+        subscribed_count: Всего подписок
+        gta_count: Стримеров в GTA
+        events: Список активных событий
+    
+    Returns:
+        Объект disnake.ui.Container
+    """
+    if events is None:
+        events = []
+
     # Handle empty states
-    if subscribed_count == 0:
+    if subscribed_count == 0 and not events:
         now_unix = int(time.time())
         return disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 📭 Нет подписок"),
@@ -113,7 +169,7 @@ def create_streamers_component(
             disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
         )
 
-    if not online_streamers:
+    if not online_streamers and not events:
         now_unix = int(time.time())
         return disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 😴 Все офлайн"),
@@ -124,7 +180,7 @@ def create_streamers_component(
             disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
         )
 
-    # Sort by priority
+    # Sort streamers by priority
     online_streamers_sorted = sorted(
         online_streamers, key=lambda s: s.get("priority", 0), reverse=True
     )
@@ -140,7 +196,6 @@ def create_streamers_component(
     for streamer in online_streamers_sorted:
         streamer_name = streamer["streamer_name"]
         started_at = streamer.get("started_at")
-        # Convert naive datetime (UTC from DB) to unix timestamp properly
         if started_at:
             started_at_unix = int(calendar.timegm(started_at.timetuple()))
         else:
@@ -154,6 +209,9 @@ def create_streamers_component(
             streamer.get("stream_thumbnail_url")
             or "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
         )
+        assigned_pr_id = streamer.get("assigned_pr_id")
+        
+        pr_line = f"👤 PR: <@{assigned_pr_id}>" if assigned_pr_id else "👤 PR: *свободен*"
 
         components.append(
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
@@ -169,11 +227,48 @@ def create_streamers_component(
         components.append(
             disnake.ui.Section(
                 disnake.ui.TextDisplay(
-                    content=f"🏷 Приоритет: **{priority}**\n🎮 **{game_name}**\n🕒 Стримит: <t:{started_at_unix}:R>\n🔗 https://twitch.tv/{streamer_name}"
+                    content=f"🏷 Приоритет: **{priority}**\n🎮 **{game_name}**\n🕒 Стримит: <t:{started_at_unix}:R>\n{pr_line}\n🔗 https://twitch.tv/{streamer_name}"
                 ),
                 accessory=disnake.ui.Thumbnail(media=thumbnail_url),
             )
         )
+
+    # Add Events Section
+    if events:
+        components.append(
+            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.large)
+        )
+        components.append(
+            disnake.ui.TextDisplay(content="### 🎉 Активные события")
+        )
+        
+        for event in events:
+            # event keys: id, name, description, ... current_participants
+            # event keys: id, name, description, ... current_participants
+            start_unix = int(calendar.timegm(event["start_time"].timetuple()))
+            participant_count = event.get("current_participants", 0)
+            participant_count = event.get("current_participants", 0)
+            required = event.get("required_pr_count", 0)
+            
+            components.append(
+                disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
+            )
+            components.append(
+                disnake.ui.TextDisplay(
+                    content=f"### {event['name']}"
+                )
+            )
+            components.append(
+                disnake.ui.TextDisplay(
+                    content=f"{event['description'][:100]}{'...' if len(event['description'])>100 else ''}"
+                )
+            )
+            components.append(
+                disnake.ui.TextDisplay(
+                    content=f"👥 **Участников:** {participant_count} / {required}\n🕒 **Начало:** <t:{start_unix}:R>"
+                )
+            )
+
 
     # Add last updated timestamp at the bottom
     now_unix = int(time.time())
@@ -184,7 +279,6 @@ def create_streamers_component(
         disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>")
     )
 
-    # Return container directly - pass to components= parameter
     return disnake.ui.Container(*components, accent_colour=disnake.Colour(65358))
 
 
@@ -194,27 +288,33 @@ def create_notification_component(
     stream_title: str,
     game_name: str,
     thumbnail_url: str,
+    streamer_id: int = None,
+    show_claim_button: bool = False,
+    assigned_pr_id: int = None,
+    assigned_pr_name: str = None,
 ) -> list:
-    """Create notification components for stream events.
+    """
+    Создание компонентов для уведомления о стриме.
 
     Args:
-        message: Notification message (with @everyone if needed)
-        streamer_name: Twitch username
-        stream_title: Current stream title
-        game_name: Current game name
-        thumbnail_url: Stream thumbnail URL
+        message: Текст сообщения
+        streamer_name: Имя стримера
+        stream_title: Название стрима
+        game_name: Название игры
+        thumbnail_url: URL превью
+        streamer_id: ID стримера (для кнопки взятия)
+        show_claim_button: Показывать ли кнопку "Взять"
+        assigned_pr_id: ID назначенного PR (если занят)
+        assigned_pr_name: Имя назначенного PR
 
     Returns:
-        List of components [TextDisplay with message, Container with stream info]
+        Список компонентов для отправки
     """
     streamer_link = f"https://twitch.tv/{streamer_name}"
 
     # Use default placeholder if no thumbnail
     if not thumbnail_url:
         thumbnail_url = "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
-
-    # TextDisplay with message goes OUTSIDE container for v2 components
-    text_display = disnake.ui.TextDisplay(content=message)
 
     container = disnake.ui.Container(
         disnake.ui.TextDisplay(content=f"### {streamer_name}"),
@@ -227,7 +327,92 @@ def create_notification_component(
         accent_colour=disnake.Colour.purple(),
     )
 
-    return [text_display, container]
+    # Only include TextDisplay if message is not empty
+    if message:
+        text_display = disnake.ui.TextDisplay(content=message)
+        result = [text_display, container]
+    else:
+        result = [container]
+
+    # Add claim button if requested and we have streamer_id
+    if show_claim_button and streamer_id:
+        if assigned_pr_id:
+            # Already claimed - show who claimed it
+            claim_label = f"✅ Взял: {assigned_pr_name}" if assigned_pr_name else "✅ Взят"
+            result.append(
+                disnake.ui.ActionRow(
+                    disnake.ui.Button(
+                        label=claim_label,
+                        custom_id=f"spec_claimed_{streamer_id}",
+                        style=disnake.ButtonStyle.secondary,
+                        disabled=True,
+                    )
+                )
+            )
+        else:
+            # Not claimed - show claim button
+            result.append(
+                disnake.ui.ActionRow(
+                    disnake.ui.Button(
+                        label="🎯 Взять медиа",
+                        custom_id=f"spec_claim_{streamer_id}",
+                        style=disnake.ButtonStyle.success,
+                    )
+                )
+            )
+
+    return result
+
+
+def create_monitoring_select(available_streamers: list, events: list = None) -> disnake.ui.ActionRow:
+    """Создание выпадающего списка для сообщения мониторинга."""
+    options = []
+    
+    # Add Streamers
+    for s in available_streamers:
+        options.append(
+            disnake.SelectOption(
+                label=s["streamer_name"],
+                value=str(s["streamer_id"]),
+                description="Взять медиа (GTA 5)",
+                emoji="🎯"
+            )
+        )
+        
+    # Add Events
+    if events:
+        for e in events:
+            # Prefix event IDs to distinguish from streamer IDs
+            # Although streamer IDs are big ints and event IDs small ints, let's use prefix "event_"
+            options.append(
+                disnake.SelectOption(
+                    label=e["name"][:100],
+                    value=f"event_{e['id']}",
+                    description=f"Событие (PR: {e.get('current_participants')}/{e.get('required_pr_count')})",
+                    emoji="🎉"
+                )
+            )
+
+    if not options:
+        options.append(
+            disnake.SelectOption(
+                label="Нет доступных медиа/событий",
+                value="none",
+                description="Все занято или пусто",
+                default=True
+            )
+        )
+
+    select = disnake.ui.StringSelect(
+        placeholder="🎯 Взять медиа / 🎉 Событие",
+        min_values=1,
+        max_values=1,
+        options=options[:25],  # Max 25 options
+        custom_id="spec_claim_select",
+        disabled=not options or (len(options) == 1 and options[0].value == "none")
+    )
+    
+    return disnake.ui.ActionRow(select)
 
 
 def format_notification_template(
@@ -236,16 +421,17 @@ def format_notification_template(
     stream_title: str = "",
     game_name: str = "",
 ) -> str:
-    """Format notification template with streamer data.
+    """
+    Форматирование шаблона уведомления.
 
     Args:
-        template: Template string with placeholders
-        streamer_name: Twitch username
-        stream_title: Current stream title
-        game_name: Current game name
+        template: Строка шаблона
+        streamer_name: Имя стримера
+        stream_title: Название стрима
+        game_name: Игра
 
     Returns:
-        Formatted notification message
+        Отформатированное сообщение
     """
     streamer_link = f"https://twitch.tv/{streamer_name}"
 

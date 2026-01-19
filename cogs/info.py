@@ -1,4 +1,4 @@
-"""Cog for bot information commands."""
+"""Ког для информационных команд бота."""
 
 import disnake
 from disnake import ApplicationCommandInteraction, Embed
@@ -12,10 +12,10 @@ class Info(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.slash_command(name="info", description="Shows build/version information")
+    @commands.slash_command(name="info", description="Показать информацию о версии/сборке")
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def info(self, interaction: ApplicationCommandInteraction) -> None:
-        """Display bot version and developer information."""
+        """Отображение информации о версии бота и разработчике."""
         try:
             embed = Embed(
                 title=f"Информация о {self.bot.user.name}",

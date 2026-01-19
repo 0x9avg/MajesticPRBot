@@ -1,5 +1,6 @@
-"""Twitch bot module for PRMajesticBot.
-Handles Twitch EventSub subscriptions and stream events.
+"""
+Модуль Twitch бота для PRMajesticBot.
+Обрабатывает подписки Twitch EventSub и события стримов.
 """
 
 import twitchio
@@ -13,6 +14,8 @@ from utils import (
     create_streamers_component,
     create_notification_component,
     format_notification_template,
+    format_spec_duration,
+    create_monitoring_select,
 )
 
 
@@ -24,7 +27,6 @@ class TwitchBot(AutoClient):
         self.CLIENT_SECRET = client_secret
         self.BOT_ID = bot_id
         self.database = database
-        self._is_ready_ = False
 
         twitchio.utils.setup_logging(level=logging.INFO)
 
@@ -37,7 +39,7 @@ class TwitchBot(AutoClient):
         )
 
     async def get_streamer_id(self, username: str) -> int:
-        """Get Twitch user ID by username."""
+        """Получение ID пользователя Twitch по имени."""
         try:
             self.logger.debug(f"Fetching user ID for: {username}")
             user = await self.fetch_user(login=username)
@@ -53,7 +55,7 @@ class TwitchBot(AutoClient):
             return None
 
     async def sync_streamers(self):
-        """Sync all streamers from database and subscribe to their events."""
+        """Синхронизация стримеров из БД и подписка на их события."""
         try:
             self.logger.debug("Syncing streamers from database...")
             streamers = await self.database.list_all_streamers()
@@ -140,14 +142,20 @@ class TwitchBot(AutoClient):
             raise
 
     async def update_monitoring_messages(self, guild_id: int = None) -> None:
-        """Update monitoring message(s) with current online streamers.
+        """
+        Обновление сообщений мониторинга текущими данными.
 
         Args:
-            guild_id: If specified, update only for this guild.
-                      If None, update for all guilds with monitoring configured.
+            guild_id: Если указан, обновление только для этой гильдии.
+                      Если None, обновление для всех.
         """
 
         try:
+            # Get available streamers for dropdown (Global list)
+            available_streamers = await self.database.get_available_gta_streamers()
+            
+            # select_row is now created per guild to include guild-specific events
+
             if guild_id:
                 # Update for specific guild
                 guild_settings = await self.database.get_guild(guild_id)
@@ -177,9 +185,7 @@ class TwitchBot(AutoClient):
                         continue
 
                     # Get streamer data for this guild (needed for both update and create)
-                    streamers = await self.database.list_guild_streamers(
-                        current_guild_id
-                    )
+                    streamers = await self.database.list_all_streamers()
                     online_streamers = []
                     gta_count = 0
 
@@ -189,10 +195,20 @@ class TwitchBot(AutoClient):
                             if str(streamer.get("game_id")) == Config.GTA5_GAME_ID:
                                 gta_count += 1
 
+                    # Get active events
+                    active_events = await self.database.get_active_events(current_guild_id)
+
                     # Create container
                     container = create_streamers_component(
-                        online_streamers, len(streamers), gta_count
+                        online_streamers, len(streamers), gta_count, active_events
                     )
+                    
+                    # Create Select Row (Streamers + Events)
+                    select_row = create_monitoring_select(available_streamers, active_events)
+                    
+                    # Combine components: Container + Select Menu
+                    # We pass a list of components. Container is treated as one component.
+                    final_components = [container, select_row]
 
                     # Try to get existing message or create new one
                     message = None
@@ -207,14 +223,14 @@ class TwitchBot(AutoClient):
                             message = None
 
                     if message:
-                        # Update existing message
-                        await message.edit(components=container)
+                        # Update existing message with components list
+                        await message.edit(components=final_components)
                         self.logger.debug(
                             f"✓ Updated monitoring message for guild {current_guild_id}"
                         )
                     else:
-                        # Create new monitoring message
-                        new_message = await channel.send(components=container)
+                        # Create new monitoring message with components list
+                        new_message = await channel.send(components=final_components)
                         
                         # Save new message ID to database
                         await self.database.create_or_update_guild(
@@ -237,7 +253,7 @@ class TwitchBot(AutoClient):
             )
 
     async def get_stream_info(self, streamer_id: int):
-        """Get current stream information for a streamer."""
+        """Получение текущей информации о стриме."""
         try:
             self.logger.debug(f"Fetching stream info for streamer ID: {streamer_id}")
             streams = await self.fetch_streams(user_ids=[streamer_id])
@@ -289,10 +305,9 @@ class TwitchBot(AutoClient):
         # Update monitoring messages after syncing all streamers
         await self.update_monitoring_messages()
 
-        self._is_ready_ = True
 
     async def event_stream_online(self, payload: twitchio.StreamOnline) -> None:
-        """Handle stream online event."""
+        """Обработка события начала стрима."""
         self.logger.info(
             f"🔴 Stream ONLINE: {payload.broadcaster.name} (ID: {payload.broadcaster.id})"
         )
@@ -312,53 +327,45 @@ class TwitchBot(AutoClient):
                 stream_thumbnail_url=stream["thumbnail_url"],
             )
 
-            guilds_ids = await self.database.list_streamer_guilds(
-                payload.broadcaster.id
+            # Get guild settings for notifications
+            guild_id = Config.GUILD_ID
+            guild_settings = await self.database.get_guild(guild_id)
+            notification_channel_id = (
+                guild_settings["notification_channel_id"]
+                if guild_settings
+                else None
             )
-            self.logger.debug(f"Notifying {len(guilds_ids)} guilds about stream start")
-
-            for guild_id in guilds_ids:
-                guild_settings = await self.database.get_guild(guild_id)
-                notification_channel_id = (
-                    guild_settings["notification_channel_id"]
-                    if guild_settings
-                    else None
-                )
-                if notification_channel_id is None:
-                    self.logger.warning(
-                        f"No notification channel set for guild {guild_id}"
-                    )
-                    continue
-
+            
+            if notification_channel_id:
                 channel = self.discord_bot.get_channel(notification_channel_id)
-                if channel is None:
-                    self.logger.warning(
-                        f"Channel {notification_channel_id} not found for guild {guild_id}"
+                if channel:
+                    # Get template and format message
+                    template = await self.database.get_notification_template(
+                        guild_id, "stream_online"
                     )
-                    continue
+                    message = format_notification_template(
+                        template,
+                        streamer_name=payload.broadcaster.name,
+                        stream_title=stream["title"] or "",
+                        game_name=stream["game_name"] or "",
+                    )
 
-                # Get template and format message
-                template = await self.database.get_notification_template(
-                    guild_id, "stream_online"
-                )
-                message = format_notification_template(
-                    template,
-                    streamer_name=payload.broadcaster.name,
-                    stream_title=stream["title"] or "",
-                    game_name=stream["game_name"] or "",
-                )
+                    # Check if stream is GTA 5 to show claim button
+                    is_gta = str(stream["game_id"]) == Config.GTA5_GAME_ID if stream["game_id"] else False
+                    
+                    # Create notification components (TextDisplay + Container + optional claim button)
+                    components = create_notification_component(
+                        message=message,
+                        streamer_name=payload.broadcaster.name,
+                        stream_title=stream["title"] or "",
+                        game_name=stream["game_name"] or "",
+                        thumbnail_url=stream["thumbnail_url"] or "",
+                        streamer_id=payload.broadcaster.id if is_gta else None,
+                        show_claim_button=is_gta,
+                    )
 
-                # Create notification components (TextDisplay + Container)
-                components = create_notification_component(
-                    message=message,
-                    streamer_name=payload.broadcaster.name,
-                    stream_title=stream["title"] or "",
-                    game_name=stream["game_name"] or "",
-                    thumbnail_url=stream["thumbnail_url"] or "",
-                )
-
-                await channel.send(components=components)
-                self.logger.debug(f"Sent notification to guild {guild_id}")
+                    await channel.send(components=components)
+                    self.logger.debug(f"Sent notification to guild {guild_id}")
 
             self.logger.debug(
                 f"✓ Stream online event processed for {payload.broadcaster.name}"
@@ -373,38 +380,50 @@ class TwitchBot(AutoClient):
             )
 
     async def event_stream_offline(self, payload: twitchio.StreamOffline) -> None:
-        """Handle stream offline event."""
+        """Обработка события окончания стрима."""
         try:
             self.logger.info("[%s] ended a stream!", payload.broadcaster)
 
-            guilds_ids = await self.database.list_streamer_guilds(
-                payload.broadcaster.id
+            # Handle PR unassignment first (before clearing streamer data)
+            unassign_result = await self.database.unassign_pr_from_streamer(
+                payload.broadcaster.id, "stream_end"
             )
 
-            for guild_id in guilds_ids:
-                guild_settings = await self.database.get_guild(guild_id)
-                notification_channel_id = (
-                    guild_settings["notification_channel_id"]
-                    if guild_settings
-                    else None
-                )
-                if notification_channel_id is None:
-                    continue
-
+            # Get guild settings for notifications
+            guild_id = Config.GUILD_ID
+            guild_settings = await self.database.get_guild(guild_id)
+            notification_channel_id = (
+                guild_settings["notification_channel_id"]
+                if guild_settings
+                else None
+            )
+            
+            # Send stream offline notification
+            if notification_channel_id:
                 channel = self.discord_bot.get_channel(notification_channel_id)
-                if channel is None:
-                    continue
+                if channel:
+                    template = await self.database.get_notification_template(
+                        guild_id, "stream_offline"
+                    )
+                    message = format_notification_template(
+                        template,
+                        streamer_name=payload.broadcaster.name,
+                    )
+                    await channel.send(content=message)
 
-                # Get template and format message
-                template = await self.database.get_notification_template(
-                    guild_id, "stream_offline"
-                )
-                message = format_notification_template(
-                    template,
-                    streamer_name=payload.broadcaster.name,
-                )
-
-                await channel.send(content=message)
+            # Send PR actions log if there was an assigned PR
+            if unassign_result:
+                pr_actions_channel_id = await self.database.get_pr_actions_channel(guild_id)
+                if pr_actions_channel_id:
+                    pr_channel = self.discord_bot.get_channel(pr_actions_channel_id)
+                    if pr_channel:
+                        duration_str = format_spec_duration(unassign_result["duration_seconds"])
+                        await pr_channel.send(
+                            f"⚫ **Стрим завершен**\n"
+                            f"👤 Стример: **{payload.broadcaster.name}**\n"
+                            f"🎯 PR: <@{unassign_result['pr_id']}>\n"
+                            f"⏱️ Спек: **{duration_str}**"
+                        )
 
             await self.database.update_streamer_status(
                 payload.broadcaster.id,
@@ -425,30 +444,29 @@ class TwitchBot(AutoClient):
             )
 
     async def _send_category_notification(self, streamer_id: int, message: str) -> None:
-        """Send notification to all guilds subscribed to a streamer.
+        """
+        Отправка уведомления в целевую гильдию.
 
         Args:
-            streamer_id: Twitch user ID
-            message: Message to send to notification channels
+            streamer_id: Twitch ID
+            message: Текст сообщения
         """
-        guilds_ids = await self.database.list_streamer_guilds(streamer_id)
+        guild_id = Config.GUILD_ID
+        guild_settings = await self.database.get_guild(guild_id)
+        notification_channel_id = (
+            guild_settings["notification_channel_id"] if guild_settings else None
+        )
+        if notification_channel_id is None:
+            return
 
-        for guild_id in guilds_ids:
-            guild_settings = await self.database.get_guild(guild_id)
-            notification_channel_id = (
-                guild_settings["notification_channel_id"] if guild_settings else None
-            )
-            if notification_channel_id is None:
-                continue
+        channel = self.discord_bot.get_channel(notification_channel_id)
+        if channel is None:
+            return
 
-            channel = self.discord_bot.get_channel(notification_channel_id)
-            if channel is None:
-                continue
-
-            await channel.send(message)
+        await channel.send(message)
 
     async def event_channel_update(self, payload: twitchio.ChannelUpdate) -> None:
-        """Handle channel update events (title/category changes)."""
+        """Обработка обновления канала (смена названия/категории)."""
         try:
             self.logger.debug(
                 "Handling channel update for [%s]", payload.broadcaster.name
@@ -509,48 +527,62 @@ class TwitchBot(AutoClient):
                     f"🎮 Category changed {direction} GTA 5: {payload.broadcaster.name}"
                 )
 
-                # Send notification to all subscribed guilds
-                guilds_ids = await self.database.list_streamer_guilds(
-                    payload.broadcaster.id
+                # Send notification to target guild
+                guild_id = Config.GUILD_ID
+                guild_settings = await self.database.get_guild(guild_id)
+                notification_channel_id = (
+                    guild_settings["notification_channel_id"]
+                    if guild_settings
+                    else None
                 )
-                for guild_id in guilds_ids:
-                    guild_settings = await self.database.get_guild(guild_id)
-                    notification_channel_id = (
-                        guild_settings["notification_channel_id"]
-                        if guild_settings
-                        else None
-                    )
-                    if notification_channel_id is None:
-                        continue
-
+                
+                if notification_channel_id:
                     channel = self.discord_bot.get_channel(notification_channel_id)
-                    if channel is None:
-                        continue
-
-                    # Get template and format message
-                    template = await self.database.get_notification_template(
-                        guild_id, event_type
-                    )
-                    message = format_notification_template(
-                        template,
-                        streamer_name=payload.broadcaster.name,
-                        stream_title=new_title or "",
-                        game_name=new_game_name or "",
-                    )
-
-                    # Create component for to_gta only (they started playing GTA)
-                    if switched_to_gta:
-                        components = create_notification_component(
-                            message=message,
+                    if channel:
+                        # Get template and format message
+                        template = await self.database.get_notification_template(
+                            guild_id, event_type
+                        )
+                        message = format_notification_template(
+                            template,
                             streamer_name=payload.broadcaster.name,
                             stream_title=new_title or "",
                             game_name=new_game_name or "",
-                            thumbnail_url=streamer_data_db.get("stream_thumbnail_url")
-                            or "",
                         )
-                        await channel.send(components=components)
-                    else:
-                        await channel.send(content=message)
+
+                        # Create component for to_gta only (they started playing GTA) with claim button
+                        if switched_to_gta:
+                            components = create_notification_component(
+                                message=message,
+                                streamer_name=payload.broadcaster.name,
+                                stream_title=new_title or "",
+                                game_name=new_game_name or "",
+                                thumbnail_url=streamer_data_db.get("stream_thumbnail_url")
+                                or "",
+                                streamer_id=payload.broadcaster.id,
+                                show_claim_button=True,
+                            )
+                            await channel.send(components=components)
+                        else:
+                            await channel.send(content=message)
+
+                # Auto-unassign PR when switching FROM GTA
+                if switched_from_gta:
+                    unassign_result = await self.database.unassign_pr_from_streamer(
+                        payload.broadcaster.id, "stream_end"
+                    )
+                    if unassign_result:
+                        pr_actions_channel_id = await self.database.get_pr_actions_channel(guild_id)
+                        if pr_actions_channel_id:
+                            pr_channel = self.discord_bot.get_channel(pr_actions_channel_id)
+                            if pr_channel:
+                                duration_str = format_spec_duration(unassign_result["duration_seconds"])
+                                await pr_channel.send(
+                                    f"🔄 **Смена категории (выход из GTA)**\n"
+                                    f"👤 Стример: **{payload.broadcaster.name}**\n"
+                                    f"🎯 PR: <@{unassign_result['pr_id']}>\n"
+                                    f"⏱️ Спек: **{duration_str}**"
+                                )
 
             # Always update monitoring messages
             await self.update_monitoring_messages()
@@ -561,10 +593,11 @@ class TwitchBot(AutoClient):
             )
 
     async def remove_subscription(self, streamer_id: str) -> None:
-        """Remove EventSub subscriptions for a streamer.
+        """
+        Удаление подписок EventSub для стримера.
 
         Args:
-            streamer_id: Twitch user ID
+            streamer_id: Twitch ID
         """
         try:
             subscriptions_response = await self.fetch_eventsub_subscriptions(
@@ -582,10 +615,11 @@ class TwitchBot(AutoClient):
             )
 
     async def add_notification(self, streamer_id: int) -> None:
-        """Add EventSub subscriptions for a streamer.
+        """
+        Добавление подписок EventSub для стримера.
 
         Args:
-            streamer_id: Twitch user ID
+            streamer_id: Twitch ID
         """
         if streamer_id == self.BOT_ID:
             return

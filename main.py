@@ -1,34 +1,30 @@
 """
-Main entry point for PRMajesticBot.
-Initializes and runs Discord and Twitch bots with database connection.
+Главный файл запуска PRMajesticBot.
+Инициализирует и запускает ботов Discord и Twitch с подключением к базе данных.
 """
 
 import asyncio
 import logging
 import os
 import sys
-from dotenv import load_dotenv
 
 from config import Config
 from database import Database
 from twitch_bot import TwitchBot
 from discord_bot import DiscordBot
 
-# Load environment variables
-load_dotenv()
-
 
 def main():
-    """Main function to initialize and run the bot."""
+    """Основная функция инициализации и запуска бота."""
     
-    # Setup logging first
+    # Настройка логирования
     logger = Config.setup_logging(__name__)
     
     logger.info("=" * 60)
     logger.info("Starting PRMajesticBot...")
     logger.info("=" * 60)
     
-    # Validate environment variables
+    # Проверка переменных окружения
     logger.debug("Validating environment variables...")
     missing_vars = Config.validate_env_vars()
     if missing_vars:
@@ -37,14 +33,14 @@ def main():
         sys.exit(1)
     logger.info("✓ All environment variables validated")
     
-    # Log current configuration
+    # Логирование текущей конфигурации
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logger.debug(f"Log level: {log_level}")
     logger.debug(f"Logs directory: {Config.LOG_DIR}")
     logger.debug(f"Database host: {os.getenv('DB_HOST')}")
     
     try:
-        # Initialize database
+        # Инициализация базы данных
         logger.debug("Initializing database connection...")
         database = Database(
             db_host=os.getenv("DB_HOST"),
@@ -55,7 +51,7 @@ def main():
         )
         logger.debug("✓ Database initialized")
         
-        # Initialize Twitch bot
+        # Инициализация Twitch бота
         logger.debug("Initializing Twitch bot...")
         twitch_bot = TwitchBot(
             client_id=os.getenv("CLIENT_ID"),
@@ -66,7 +62,7 @@ def main():
         )
         logger.debug("✓ Twitch bot initialized")
         
-        # Initialize Discord bot
+        # Инициализация Discord бота
         logger.debug("Initializing Discord bot...")
         discord_bot = DiscordBot(
             DiscordToken=os.getenv("DISCORD_TOKEN"),
@@ -75,20 +71,20 @@ def main():
         )
         logger.debug("✓ Discord bot initialized")
         
-        # Cross-reference bots
+        # Перекрестные ссылки ботов
         twitch_bot.discord_bot = discord_bot
         discord_bot.twitch_bot = twitch_bot
         logger.debug("Bots cross-referenced successfully")
         
-        # Load cogs AFTER cross-referencing (cogs need twitch_bot reference)
+        # Загрузка когов после добавления ссылок (когам нужен twitch_bot)
         discord_bot.setup_cogs()
         
-        # Setup event loop
+        # Настройка цикла событий
         logger.debug("Starting event loop...")
         loop = asyncio.get_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Create tasks
+        # Создание задач
         task_database = loop.create_task(database.start())
         task_twitch = loop.create_task(twitch_bot.start())
         task_discord = loop.create_task(discord_bot.start())
@@ -99,7 +95,7 @@ def main():
         logger.info("Bot is now running. Press Ctrl+C to stop.")
         logger.info("=" * 60)
         
-        # Run until interrupted
+        # Запуск до прерывания
         loop.run_until_complete(gathered)
         
     except KeyboardInterrupt:
@@ -112,12 +108,12 @@ def main():
         logger.error("=" * 60)
         sys.exit(1)
     finally:
-        # Cleanup
+        # Очистка ресурсов
         logger.debug("Cleaning up resources...")
         try:
             if 'database' in locals() and database.pool:
                 logger.debug("Closing database connection pool...")
-                # CRITICAL FIX: Properly await async close method
+                # ВАЖНО: Правильное ожидание закрытия пула
                 loop.run_until_complete(database.close())
                 logger.debug("✓ Database connection closed")
         except Exception as e:

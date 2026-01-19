@@ -1,26 +1,30 @@
 """
-Centralized configuration for PRMajesticBot.
-Contains constants, settings, and environment variable validation.
+Централизованная конфигурация PRMajesticBot.
+Содержит константы, настройки и валидацию переменных окружения.
 """
 
 import os
 import logging
 from typing import Dict, Optional
 from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+
+# Load environment variables BEFORE accessing them
+load_dotenv()
 
 
 class Config:
-    """Main configuration class for the bot."""
+    """Класс конфигурации бота."""
 
-    # Bot version
-    VERSION = os.getenv("BOT_VERSION", "1.0.0")
-
-    # Twitch Game IDs
+    # ID игр Twitch
     GTA5_GAME_ID = "32982"
 
-    # Monitored games (can be extended)
+    # Баллы в час (По умолчанию)
+    DEFAULT_POINTS = {0: 0.25, 1: 0.4, 2: 0.5, 3: 0.6}
+
+    # Отслеживаемые игры (можно расширить)
     MONITORED_GAMES: Dict[str, str] = {
-        "GTA5": GTA5_GAME_ID,
+        "Grand Theft Auto V": GTA5_GAME_ID,
     }
 
     EVENT_TYPE_LABELS = {
@@ -30,7 +34,7 @@ class Config:
         "category_from_gta": "🎮 Смена категории с GTA 5 на другую",
     }
 
-    # Default notification templates
+    # Шаблоны уведомлений по умолчанию
     TEMPLATE_DEFAULTS = {
         "stream_online": "@everyone 🔴 {streamer_name} начал стрим!",
         "stream_offline": "⚫ {streamer_name} закончил стрим",
@@ -38,7 +42,7 @@ class Config:
         "category_from_gta": "🎮 {streamer_name} сменил категорию с GTA 5 на другую",
     }
 
-    # Allowed event types for notification templates (SQL injection prevention)
+    # Разрешенные типы событий (защита от SQL-инъекций)
     ALLOWED_EVENT_TYPES = [
         "stream_online",
         "stream_offline",
@@ -48,22 +52,25 @@ class Config:
 
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-    # Logging configuration
+    GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+
+    # Настройка логирования
     LOG_DIR = "logs"
     LOG_FILE = "bot.log"
     LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
     LOG_BACKUP_COUNT = 5
 
-    # Log format
+    # Формат логов
     LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-    # Required environment variables
+    # Обязательные переменные окружения
     REQUIRED_ENV_VARS = [
         "CLIENT_ID",
         "CLIENT_SECRET",
         "BOT_ID",
         "DISCORD_TOKEN",
+        "GUILD_ID",
         "DB_HOST",
         "DB_USER",
         "DB_PASSWORD",
@@ -73,10 +80,10 @@ class Config:
     @staticmethod
     def validate_env_vars() -> Optional[list[str]]:
         """
-        Validate that all required environment variables are set.
+        Проверка наличия всех обязательных переменных окружения.
 
         Returns:
-            List of missing variables, or None if all are present.
+            Список отсутствующих переменных или None.
         """
         missing = [var for var in Config.REQUIRED_ENV_VARS if not os.getenv(var)]
         return missing if missing else None
@@ -84,10 +91,10 @@ class Config:
     @staticmethod
     def get_log_level() -> int:
         """
-        Get logging level from environment.
+        Получение уровня логирования из окружения.
 
         Returns:
-            Logging level (DEBUG, INFO, WARNING, ERROR).
+            Уровень логирования (DEBUG, INFO, WARNING, ERROR).
         """
         level_str = os.getenv("LOG_LEVEL", "INFO").upper()
         level_map = {
@@ -101,31 +108,31 @@ class Config:
     @staticmethod
     def setup_logging(logger_name: str = None) -> logging.Logger:
         """
-        Setup logging configuration for the bot.
+        Настройка конфигурации логирования.
 
         Args:
-            logger_name: Name of the logger. If None, returns root logger.
+            logger_name: Имя логгера. Если None, возвращает root логгер.
 
         Returns:
-            Configured logger instance.
+            Настроенный экземпляр логгера.
         """
-        # Create logs directory if it doesn't exist
+        # Создаем папку логов, если нет
         os.makedirs(Config.LOG_DIR, exist_ok=True)
 
         log_level = Config.get_log_level()
 
-        # Get or create logger
+        # Получаем или создаем логгер
         logger = logging.getLogger(logger_name)
         logger.setLevel(log_level)
 
-        # Avoid adding handlers multiple times
+        # Не добавляем обработчики повторно
         if logger.handlers:
             return logger
 
-        # Create formatters
+        # Создаем форматеры
         formatter = logging.Formatter(Config.LOG_FORMAT, datefmt=Config.LOG_DATE_FORMAT)
 
-        # File handler with rotation
+        # Файловый обработчик с ротацией
         log_path = os.path.join(Config.LOG_DIR, Config.LOG_FILE)
         file_handler = RotatingFileHandler(
             log_path,
@@ -133,19 +140,19 @@ class Config:
             backupCount=Config.LOG_BACKUP_COUNT,
             encoding="utf-8",
         )
-        file_handler.setLevel(logging.DEBUG)  # Always log everything to file
+        file_handler.setLevel(logging.DEBUG)  # Всегда пишем все в файл
         file_handler.setFormatter(formatter)
 
-        # Console handler (respects log level)
+        # Консольный обработчик (учитывает уровень логов)
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
 
-        # Add handlers
+        # Добавляем обработчики
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
 
-        # Prevent propagation to avoid duplicate logs from parent loggers
+        # Запрещаем распространение, чтобы избежать дублей
         logger.propagate = False
 
         return logger

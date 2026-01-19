@@ -1,4 +1,4 @@
-"""Cog for managing streamers - add, remove, and list."""
+"""Ког для управления стримерами - добавление, удаление и список."""
 
 import disnake
 from disnake import ApplicationCommandInteraction, MessageInteraction, Embed
@@ -16,8 +16,9 @@ class ManageStreamers(commands.Cog):
         self.twitch_bot = bot.twitch_bot
 
     @commands.slash_command(
-        name="add_streamer", description="Add new streamer to the database"
+        name="add_streamer", description="Добавить нового стримера в базу данных"
     )
+    @commands.has_permissions(administrator=True)
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def add_streamer(
         self,
@@ -69,13 +70,12 @@ class ManageStreamers(commands.Cog):
                     is_paid=is_paid,
                 )
 
-            await self.database.create_subscription(interaction.guild_id, streamer_id)
             self.bot.logger.debug(
-                f"✓ Streamer {username} added for guild {interaction.guild_id}"
+                f"✓ Streamer {username} added"
             )
 
-            # Update monitoring message for this guild
-            await self.twitch_bot.update_monitoring_messages(interaction.guild_id)
+            # Update monitoring message
+            await self.twitch_bot.update_monitoring_messages()
 
             await interaction.followup.send(
                 f"Streamer {username} added to the database.", ephemeral=True
@@ -87,12 +87,21 @@ class ManageStreamers(commands.Cog):
             )
 
     @commands.slash_command(
-        name="remove_streamer", description="Remove a streamer from the database"
+        name="remove_streamer", description="Удалить стримера из базы данных"
     )
+    @commands.has_permissions(administrator=True)
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def remove_streamer(
         self, interaction: ApplicationCommandInteraction, url: str
     ) -> None:
+        try:
+            await interaction.response.defer()
+        except disnake.errors.NotFound:
+            # Interaction expired before we could respond (3 second timeout)
+            self.bot.logger.warning(
+                f"Interaction expired for /streamers command from user {interaction.user}"
+            )
+            return
         try:
             self.bot.logger.debug(
                 f"User {interaction.user} ({interaction.user.id}) removing streamer: {url}"
@@ -105,47 +114,37 @@ class ManageStreamers(commands.Cog):
 
             streamer_id = await self.twitch_bot.get_streamer_id(username)
             if streamer_id is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Streamer {username} not found on Twitch.", ephemeral=True
                 )
                 return
 
-            if await self.database.subscription_exists(
-                interaction.guild_id, streamer_id
-            ):
-                await interaction.response.defer(ephemeral=False)
-                await self.database.delete_subscription(
-                    interaction.guild_id, streamer_id
-                )
+            # Check if streamer exists and delete
+            if await self.database.streamer_exists(streamer_id):
+                await self.database.delete_streamer(streamer_id)
+                await self.twitch_bot.remove_subscription(streamer_id)
                 self.bot.logger.debug(
-                    f"✓ Removed subscription to {username} for guild {interaction.guild_id}"
+                    f"✓ Removed streamer {username}"
                 )
 
-                # Update monitoring message for this guild
-                await self.twitch_bot.update_monitoring_messages(interaction.guild_id)
+                # Update monitoring message
+                await self.twitch_bot.update_monitoring_messages()
 
                 await interaction.followup.send(
                     f"Streamer {username} removed from the database.", ephemeral=True
                 )
             else:
                 self.bot.logger.warning(
-                    f"No subscription found for {username} on guild {interaction.guild_id}"
+                    f"Streamer {username} not found in database"
                 )
-                await interaction.response.send_message(
-                    f"You are not followed to {username}.", ephemeral=True
+                await interaction.followup.send(
+                    f"Streamer {username} not found in database.", ephemeral=True
                 )
                 return
 
-            if not await self.database.has_any_subscriptions(streamer_id):
-                self.bot.logger.debug(
-                    f"Removing streamer {username} from database (no more subscriptions)"
-                )
-                await self.database.delete_streamer(streamer_id)
-                await self.twitch_bot.remove_subscription(streamer_id)
-
         except Exception as e:
             self.bot.logger.error(f"Error removing streamer {url}: {e}", exc_info=True)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"An error occurred while removing the streamer: {str(e)}",
                 ephemeral=True,
             )
@@ -156,7 +155,7 @@ class ManageStreamers(commands.Cog):
     )
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def streamers(self, interaction: ApplicationCommandInteraction) -> None:
-        """Display online streamers that the guild is subscribed to."""
+        """Отображение онлайн стримеров, на которых подписан сервер."""
         try:
             await interaction.response.defer()
         except disnake.errors.NotFound:
@@ -167,25 +166,22 @@ class ManageStreamers(commands.Cog):
             return
 
         try:
-            # Get subscribed streamer IDs for this guild
-            subscribed_ids = await self.database.list_guild_subscriptions(
-                interaction.guild_id
-            )
+            # Get all streamers
+            streamers = await self.database.list_all_streamers()
 
-            # Get streamer info and filter only online ones
+            # Filter only online ones
             online_streamers = []
             gta_count = 0
 
-            for streamer_id in subscribed_ids:
-                streamer = await self.database.get_streamer(streamer_id)
-                if streamer and streamer.get("is_online"):
+            for streamer in streamers:
+                if streamer.get("is_online"):
                     online_streamers.append(streamer)
                     if str(streamer.get("game_id")) == Config.GTA5_GAME_ID:
                         gta_count += 1
 
             # Use shared component generator
             container = create_streamers_component(
-                online_streamers, len(subscribed_ids), gta_count
+                online_streamers, len(streamers), gta_count
             )
             await interaction.followup.send(components=container)
 

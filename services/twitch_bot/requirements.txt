@@ -1,0 +1,13 @@
+# Twitch Bot Microservice Requirements
+
+# Twitch
+twitchio>=2.10.0
+
+# HTTP Client
+aiohttp>=3.9.0
+
+# Message Broker
+aio-pika>=9.3.0
+
+# Environment
+python-dotenv>=1.0.0

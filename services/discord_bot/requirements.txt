@@ -1,0 +1,13 @@
+# Discord Bot Microservice Requirements
+
+# Discord
+disnake>=2.9.0
+
+# HTTP Client
+aiohttp>=3.9.0
+
+# Message Broker
+aio-pika>=9.3.0
+
+# Environment
+python-dotenv>=1.0.0

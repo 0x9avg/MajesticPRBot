@@ -1,238 +1,116 @@
 # PRMajesticBot
 
-Discord and Twitch integration bot for monitoring streamers and sending notifications to Discord channels.
+Интеграционный бот Discord и Twitch для мониторинга стримеров и отправки уведомлений в каналы Discord.
 
-## 🎯 Features
+## 🎯 Возможности
 
-- **Stream Monitoring**: Automatically tracks when streamers go live or offline
-- **Smart Notifications**: Sends Discord notifications when:
-  - Streamer goes online
-  - Streamer goes offline
-  - Streamer changes category (special handling for GTA 5)
-- **Multi-Server Support**: One bot can serve multiple Discord servers
-- **Priority System**: Organize streamers by priority level
-- **Database Persistence**: All data stored in MySQL database
+- **Мониторинг стримов**: Автоматическое отслеживание запуска и окончания трансляций, а также смену категории.
+- **Умные уведомления**: Отправка сообщений в Discord, когда:
+  - Стример выходит в эфир
+  - Стример заканчивает трансляцию
+  - Стример меняет категорию (специальная обработка для GTA 5)
+- **Система приоритетов**: Организация стримеров по уровням приоритета
+- **База данных**: Все данные хранятся в базе данных MySQL
 
-## 📋 Requirements
+## 📋 Требования
 
-- Python 3.10+
-- MySQL 5.7+ or MariaDB 10.3+
-- Discord Bot Token
-- Twitch Application (Client ID, Client Secret)
+Перед запуском проекта убедитесь, что у вас установлено следующее:
 
-## 🚀 Installation
+- **Python 3.10+**: Основной язык для бэкенд-сервисов
+- **RabbitMQ**: Брокер сообщений для межсервисного взаимодействия
+- **MySQL 5.7+ / MariaDB 10.3+**: База данных для постоянного хранения
+- **Node.js 18+ & npm**: Для сборки веб-панели (Dashboard)
 
-### 1. Clone the repository
+### Обзор архитектуры
+
+Для детального понимания архитектуры системы и взаимодействия микросервисов, пожалуйста, прочитайте [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## 🚀 Установка и настройка
+
+### 1. Клонирование репозитория
 
 ```bash
 git clone <repository-url>
 cd PRMajesticBot
 ```
 
-### 2. Create virtual environment
+### 2. Настройка переменных окружения
 
+Каждый сервис требует собственной конфигурации. Скопируйте файлы примеров и заполните свои данные:
+
+**API Service:**
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+cp services/api/example.env services/api/.env
+nano services/api/.env
 ```
 
-### 3. Install dependencies
-
+**Discord Bot Service:**
 ```bash
-pip install -r requirements.txt
+cp services/discord_bot/example.env services/discord_bot/.env
+nano services/discord_bot/.env
 ```
 
-### 4. Configure environment variables
-
-Create a `.env` file in the project root:
-
-```env
-# Twitch Configuration
-CLIENT_ID=your_twitch_client_id
-CLIENT_SECRET=your_twitch_client_secret
-BOT_ID=your_twitch_bot_user_id
-
-# Discord Configuration
-DISCORD_TOKEN=your_discord_bot_token
-
-# Database Configuration
-DB_HOST=localhost
-DB_USER=your_db_user
-DB_PASSWORD=your_db_password
-DB_NAME=prmajesticbot
-
-# Logging Configuration (optional)
-LOG_LEVEL=INFO  # Options: DEBUG, INFO, WARNING, ERROR
-```
-
-### 5. Setup MySQL Database
-
-Create the database:
-
-```sql
-CREATE DATABASE prmajesticbot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-The bot will automatically create required tables on first run.
-
-### 6. Run the bot
-
+**Twitch Bot Service:**
 ```bash
-python main.py
+cp services/twitch_bot/example.env services/twitch_bot/.env
+nano services/twitch_bot/.env
 ```
 
-## 🎮 Discord Commands
+### 3. Запуск сервисов
 
-All commands are slash commands (use `/` prefix):
+Вам нужно запустить каждый сервис в отдельном окне терминала/screen.
 
-### `/info`
-Display bot version and developer information.
-
-### `/add_streamer <url> [priority] [is_paid]`
-Add a streamer to monitor.
-- `url`: Twitch channel URL or username
-- `priority` (optional): Priority level (default: 0)
-- `is_paid` (optional): Whether streamer is paid/sponsored (default: false)
-
-**Example:**
-```
-/add_streamer https://www.twitch.tv/shroud priority:5 is_paid:false
+**Терминал 1: API Service**
+```bash
+cd services/api
+pip3 install -r requirements.txt
+uvicorn api.main:app --reload
 ```
 
-### `/remove_streamer <url>`
-Remove a streamer from monitoring.
-- `url`: Twitch channel URL or username
-
-**Example:**
-```
-/remove_streamer shroud
+**Терминал 2: Discord Bot**
+```bash
+cd services/discord_bot
+pip3 install -r requirements.txt
+python3 main.py
 ```
 
-### `/streamers`
-Display all monitored streamers for this server with their current status, game, and stream title.
-
-### `/settings`
-Configure server settings (Admin only).
-- Set notification channel for stream alerts
-
-## 📊 Database Structure
-
-### Tables
-
-**streamers**
-- Stores all unique streamers across all servers
-- Tracks online status, game, title, priority, etc.
-
-**subscriptions**
-- Links servers to streamers (many-to-many relationship)
-- Automatically cleaned up when last server unsubscribes
-
-**settings**
-- Server-specific configuration
-- Notification channel ID
-
-## 🔧 Configuration
-
-### Logging Levels
-
-Set `LOG_LEVEL` in `.env` to control logging verbosity:
-
-- **DEBUG**: Detailed information for debugging (recommended for development)
-  - Shows all database queries
-  - Tracks all API calls
-  - Logs every event
-  
-- **INFO**: General information (recommended for production)
-  - Important events
-  - User actions
-  - Startup/shutdown messages
-  
-- **WARNING**: Warning messages only
-  - Configuration issues
-  - API errors
-  
-- **ERROR**: Error messages only
-  - Critical failures
-
-### Log Files
-
-Logs are stored in the `logs/` directory:
-- Filename: `bot.log`
-- Rotation: Automatic at 10MB
-- Backups: 5 files kept
-- Encoding: UTF-8
-
-### GTA 5 Monitoring
-
-The bot has special handling for GTA 5 category changes. This is configurable in `config.py`:
-
-```python
-GTA5_GAME_ID = "32982"
+**Терминал 3: Twitch Bot**
+```bash
+cd services/twitch_bot
+pip3 install -r requirements.txt
+python3 main.py
 ```
 
-## 🛠️ Development
-
-### Running in DEBUG mode
-
-Set in `.env`:
-```env
-LOG_LEVEL=DEBUG
+**Терминал 4: Web Panel (Разработка)**
+```bash
+cd web
+npm install
+npm run dev
+# В настоящее время в разработке. Будущие версии будут использовать контейнеры.
 ```
 
-This will provide verbose logging for development and troubleshooting.
+## 🏗️ Структура проекта
 
-### Project Structure
+Проект разделен на микросервисы:
 
 ```
 PRMajesticBot/
-├── main.py              # Entry point
-├── config.py            # Configuration and logging
-├── database.py          # Database operations
-├── twitch_bot.py        # Twitch integration
-├── discord_bot.py       # Discord integration
-├── cogs/                # Discord command modules
-│   ├── info.py         # /info command
-│   ├── manage_streamers.py  # Streamer management
-│   └── settings.py     # Server settings
-├── requirements.txt     # Dependencies
-├── .env                # Environment variables (create this)
-└── logs/               # Log files (auto-created)
+├── services/
+│   ├── api/            # Центральный REST API и База данных
+│   ├── discord_bot/    # Взаимодействие с Discord и UI
+│   └── twitch_bot/     # Мониторинг Twitch и брокер событий
+├── web/                # Веб-панель (React/Vite)
+└── README.md
 ```
 
-## ❗ Troubleshooting
+## 🔧 Устранение неполадок
 
-### Bot doesn't start
+### Сервисы не подключаются
+Убедитесь, что RabbitMQ запущен и правильно настроен во всех файлах `.env`. Сервисы полагаются на RabbitMQ для общения.
 
-1. **Check environment variables**: Ensure all required variables in `.env` are set
-2. **Check database connection**: Verify MySQL is running and credentials are correct
-3. **Check logs**: Look at `logs/bot.log` for error details
+### Ошибки базы данных
+Убедитесь, что в `services/api/.env` указаны правильные учетные данные базы данных. Сервис API автоматически обрабатывает миграции базы данных при запуске.
 
-### No notifications in Discord
+## 📝 Лицензия
 
-1. **Check notification channel**: Use `/settings` to configure the channel
-2. **Check bot permissions**: Bot needs permission to send messages in the channel
-3. **Check streamer subscription**: Use `/streamers` to verify streamer is added
-
-### Database errors
-
-1. **Check character set**: Database should use `utf8mb4`
-2. **Check user permissions**: DB user needs CREATE, INSERT, UPDATE, DELETE, SELECT
-3. **Check connection**: Verify `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-
-### Twitch API errors
-
-1. **Verify credentials**: Check `CLIENT_ID` and `CLIENT_SECRET`
-2. **Check BOT_ID**: Must be a valid Twitch user ID (not username)
-3. **Check rate limits**: Twitch API has rate limits
-
-## 📝 License
-
-This project is private/proprietary.
-
-## 👨‍💻 Developer
-
-Developed by 9avg
-
-## 🔄 Version
-
-Current version: TEST BUILD (in development)
+Этот проект является частным/проприетарным.

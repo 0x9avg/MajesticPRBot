@@ -210,19 +210,24 @@ class TwitchBot(AutoClient):
         self.logger.info(f"⚫ Stream OFFLINE: {payload.broadcaster.name}")
         
         try:
-            # Auto-unclaim via API
-            result = await self.api.unclaim_streamer(payload.broadcaster.id, "stream_end")
+            # Check if claimed
+            streamer = await self.api.get_streamer(payload.broadcaster.id)
             
-            # Publish unclaim event if there was an assignment
-            if result and result.get("status") == "unclaimed" and self.broker:
-                await self.broker.emit_spec_unclaimed(
-                    streamer_id=payload.broadcaster.id,
-                    streamer_name=payload.broadcaster.name,
-                    pr_id=result.get("pr_id", 0),
-                    duration_seconds=result.get("duration_seconds", 0),
-                    reason="stream_end",
-                    guild_id=Config.GUILD_ID,
-                )
+            result = None
+            if streamer and streamer.get("assigned_pr_id"):
+                # Auto-unclaim via API
+                result = await self.api.unclaim_streamer(payload.broadcaster.id, "stream_end")
+            
+                # Publish unclaim event if there was an assignment
+                if result and result.get("status") == "unclaimed" and self.broker:
+                    await self.broker.emit_spec_unclaimed(
+                        streamer_id=payload.broadcaster.id,
+                        streamer_name=payload.broadcaster.name,
+                        pr_id=result.get("pr_id", 0),
+                        duration_seconds=result.get("duration_seconds", 0),
+                        reason="stream_end",
+                        guild_id=Config.GUILD_ID,
+                    )
             
             # Update status via API
             await self.api.update_streamer_status(
@@ -282,7 +287,7 @@ class TwitchBot(AutoClient):
                 self.logger.info(f"🎮 Category change: {payload.broadcaster.name} {'→' if switched_to_gta else '←'} GTA 5")
                 
                 # Auto-unclaim on leaving GTA
-                if switched_from_gta:
+                if switched_from_gta and streamer.get("assigned_pr_id"):
                     result = await self.api.unclaim_streamer(payload.broadcaster.id, "category_change")
                     if result and result.get("status") == "unclaimed" and self.broker:
                         await self.broker.emit_spec_unclaimed(

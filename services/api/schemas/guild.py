@@ -53,8 +53,4 @@ class GuildSettingsResponse(BaseModel):
 
 
 # Broker event
-class GuildEvent(BaseModel):
-    """Event published when guild settings change."""
-    event_type: str  # "settings_updated", "templates_updated"
-    guild_id: int
-    data: Optional[dict] = None
+

@@ -12,7 +12,6 @@ from schemas.streamer import (
     StreamerUpdate,
     StreamerResponse,
     StreamerListResponse,
-    StreamerEvent,
 )
 
 # Assistants
@@ -29,7 +28,6 @@ from schemas.guild import (
     GuildTemplatesUpdate,
     GuildRatesUpdate,
     GuildSettingsResponse,
-    GuildEvent,
 )
 
 # Spec
@@ -39,11 +37,10 @@ from schemas.spec import (
     SpecTransferRequest,
     SpecSessionResponse,
     ActiveSpecResponse,
-    SpecEvent,
 )
 
 # Monitoring
-from schemas.monitoring import MonitoringRefreshRequest, DashboardStatusResponse
+from schemas.monitoring import MonitoringRefreshRequest
 
 __all__ = [
     # Auth
@@ -56,7 +53,6 @@ __all__ = [
     "StreamerUpdate",
     "StreamerResponse",
     "StreamerListResponse",
-    "StreamerEvent",
     # Assistants
     "AssistantBase",
     "AssistantCreate",
@@ -67,15 +63,12 @@ __all__ = [
     "GuildTemplatesUpdate",
     "GuildRatesUpdate",
     "GuildSettingsResponse",
-    "GuildEvent",
     # Spec
     "SpecClaimRequest",
     "SpecUnclaimRequest",
     "SpecTransferRequest",
     "SpecSessionResponse",
     "ActiveSpecResponse",
-    "SpecEvent",
     # Monitoring
     "MonitoringRefreshRequest",
-    "DashboardStatusResponse",
 ]

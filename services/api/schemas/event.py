@@ -22,9 +22,7 @@ class EventResponse(EventBase):
     notification_sent: bool
     current_participants: int = 0  # To be filled by query count
 
-class EventParticipant(BaseModel):
-    user_id: int
-    joined_at: datetime
+
 
 class EventJoinRequest(BaseModel):
     user_id: int

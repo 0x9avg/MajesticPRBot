@@ -91,20 +91,6 @@ async def delete_assistant(user_id: int, db=Depends(get_db)):
     return None
 
 
-@router.post("/{user_id}/add-time")
-async def add_assistant_time(user_id: int, seconds: int, db=Depends(get_db)):
-    """Add time to assistant's total."""
-    result = await db.add_pr_time(user_id, seconds)
-    return {"total_spec_seconds": result, "added_seconds": seconds}
-
-
-@router.post("/{user_id}/subtract-time")
-async def subtract_assistant_time(user_id: int, seconds: int, db=Depends(get_db)):
-    """Subtract time from assistant's total."""
-    new_total = await db.subtract_pr_time(user_id, seconds)
-    return {"total_spec_seconds": new_total, "subtracted_seconds": seconds}
-
-
 @router.post("/{user_id}/reset")
 async def reset_assistant_stats(user_id: int, db=Depends(get_db)):
     """Reset assistant statistics."""
@@ -114,28 +100,4 @@ async def reset_assistant_stats(user_id: int, db=Depends(get_db)):
     return {"status": "reset", "user_id": user_id}
 
 
-@router.put("/{user_id}/daily-stats")
-async def update_daily_stats_manual(
-    user_id: int,
-    date: str,
-    p0_seconds: int,
-    p1_seconds: int,
-    p2_seconds: int,
-    p3_seconds: int,
-    total_points: float,
-    db=Depends(get_db),
-):
-    """Manually update daily stats for a PR."""
-    from datetime import datetime
 
-    try:
-        date_obj = datetime.strptime(date, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(
-            status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
-        )
-
-    await db.update_daily_stats_manual(
-        user_id, date_obj, p0_seconds, p1_seconds, p2_seconds, p3_seconds, total_points
-    )
-    return {"status": "updated", "user_id": user_id, "date": date}

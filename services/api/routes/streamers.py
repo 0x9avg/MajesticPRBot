@@ -53,18 +53,7 @@ async def list_streamers(
     )
 
 
-@router.get("/online", response_model=List[StreamerResponse])
-async def list_online_streamers(db=Depends(get_db)):
-    """Get only online streamers."""
-    streamers = await db.list_online_streamers()
-    return [StreamerResponse(**s) for s in streamers]
 
-
-@router.get("/available-gta", response_model=List[StreamerResponse])
-async def get_available_gta_streamers(db=Depends(get_db)):
-    """Get online GTA 5 streamers without assigned PR."""
-    streamers = await db.get_available_gta_streamers()
-    return [StreamerResponse(**s) for s in streamers]
 
 
 @router.get("/{twitch_id}", response_model=StreamerResponse)

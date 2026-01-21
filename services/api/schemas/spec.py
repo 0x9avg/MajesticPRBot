@@ -45,10 +45,4 @@ class ActiveSpecResponse(BaseModel):
 
 
 # Broker event
-class SpecEvent(BaseModel):
-    """Event published when spec action happens."""
-    event_type: str  # "claimed", "unclaimed", "transferred"
-    streamer_id: int
-    streamer_name: str
-    pr_id: int
-    data: Optional[dict] = None
+

@@ -53,9 +53,4 @@ class StreamerListResponse(BaseModel):
 
 
 # Broker event
-class StreamerEvent(BaseModel):
-    """Event published when streamer data changes."""
-    event_type: str  # "added", "removed", "updated", "status_changed"
-    streamer_id: int
-    streamer_name: str
-    data: Optional[dict] = None
+

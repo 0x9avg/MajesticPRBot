@@ -8,20 +8,20 @@ PRMajesticBot следует микросервисной архитектуре
 
 ```mermaid
 graph TD
-    User((Пользователь))
-    Twitch((Twitch API))
-    Discord((Discord API))
+    User(("Пользователь"))
+    Twitch(("Twitch API"))
+    Discord(("Discord API"))
     
     subgraph "Фронтенд"
-        Web[Веб-панель (React)]
+        Web["Веб-панель (React)"]
     end
     
     subgraph "Бэкенд Сервисы"
-        API[API Сервис (FastAPI)]
-        DB[(MySQL База данных)]
-        DiscordBot[Discord Бот Сервис]
-        TwitchBot[Twitch Бот Сервис]
-        RabbitMQ{RabbitMQ Брокер}
+        API["API Сервис (FastAPI)"]
+        DB[("MySQL База данных")]
+        DiscordBot["Discord Бот Сервис"]
+        TwitchBot["Twitch Бот Сервис"]
+        RabbitMQ{"RabbitMQ Брокер"}
     end
     
     User -->|HTTP| Web
@@ -54,7 +54,7 @@ graph TD
 **Роль:** Взаимодействие с пользователем и уведомления
 - **Стек технологий:** Python 3.12, Disnake (обертка Discord API).
 - **Обязанности:**
-  - Обрабатывает слэш-команды (`/dashboard`, `/add_streamer` и т.д.). (Команды будут убраны в будущем, за исключением `/setup`)
+  - Обрабатывает слэш-команды (`/setup`, `/add_streamer` и т.д.). (Команды будут убраны в будущем, за исключением `/setup`)
   - Рендерит UI компоненты (Кнопки, Модальные окна, Эмбеды).
   - Прослушивает события от RabbitMQ (например, конкретный стример вышел в эфир) и отправляет уведомления в каналы Discord.
   - Общается с API сервисом для получения/сохранения данных.

@@ -12,6 +12,7 @@ import {
   AdminPanel,
   BotDashboard
 } from './pages/Placeholders'
+import UserProfile from './pages/UserProfile'
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<MainLayout />}>
             <Route path="/hub" element={<MainHub />} />
+            <Route path="/profile" element={<UserProfile />} />
             <Route path="/media" element={<MediaList />} />
             <Route path="/pr-stats" element={<PRStats />} />
             <Route path="/logs" element={<SpectateLogs />} />

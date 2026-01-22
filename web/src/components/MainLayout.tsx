@@ -24,15 +24,18 @@ export default function MainLayout() {
                 </div>
 
                 <div className="flex items-center gap-6">
-                    <div className="hidden md:flex items-center gap-3 text-sm">
+                    <button
+                        onClick={() => navigate('/profile')}
+                        className="hidden md:flex items-center gap-3 text-sm hover:bg-white/5 p-2 rounded-xl transition-all group cursor-pointer"
+                    >
                         <div className="text-right">
-                            <p className="font-medium text-white">Wayne</p>
+                            <p className="font-medium text-white group-hover:text-[#3b82f6] transition-colors">Wayne</p>
                             <p className="text-xs text-white/40">{userRole}</p>
                         </div>
-                        <div className="w-10 h-10 rounded-full bg-[#242424] border border-white/10 flex items-center justify-center">
-                            <User className="w-5 h-5 text-white/60" />
+                        <div className="w-10 h-10 rounded-full bg-[#242424] border border-white/10 flex items-center justify-center group-hover:border-[#3b82f6]/50 transition-colors">
+                            <User className="w-5 h-5 text-white/60 group-hover:text-[#3b82f6] transition-colors" />
                         </div>
-                    </div>
+                    </button>
 
                     <button
                         onClick={handleLogout}

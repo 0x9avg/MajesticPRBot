@@ -202,15 +202,24 @@ class Database:
                         """
                     )
                     
-                    # Таблица: Ассистенты (Глобальная статистика)
-                    # Долгосрочная статистика
+                    # Таблица: Ассистенты (PR Staff)
+                    # Информация о сотрудниках PR-отдела и их статистика
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS assistants (
                             pr_id BIGINT UNSIGNED PRIMARY KEY,
+                            nickname VARCHAR(100) NOT NULL,
+                            role ENUM('employee', 'senior_employee', 'manager') NOT NULL,
+                            experience_days INT DEFAULT 0,
+                            status ENUM('free', 'assigned') DEFAULT 'free',
+                            assigned_to_type ENUM('streamer', 'event') NULL,
+                            assigned_to_id BIGINT UNSIGNED NULL,
+                            assigned_to_name VARCHAR(255) NULL,
                             total_spec_seconds BIGINT DEFAULT 0,
                             session_count INT DEFAULT 0,
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_status (status),
+                            INDEX idx_role (role)
                         )
                         """
                     )
@@ -263,6 +272,20 @@ class Database:
                             ended_at TIMESTAMP NULL DEFAULT NULL,
                             duration_seconds INT UNSIGNED,
                             end_reason VARCHAR(50)
+                        )
+                        """
+                    )
+
+                    # Таблица: Логи действий ассистентов (закрепления)
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_logs (
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            pr_id BIGINT UNSIGNED NOT NULL,
+                            action VARCHAR(50) NOT NULL,
+                            target VARCHAR(255) NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_pr (pr_id)
                         )
                         """
                     )
@@ -2482,3 +2505,243 @@ class Database:
                     await conn.commit()
         except Exception as e:
             self.logger.error(f"Failed to log auth event: {e}", exc_info=True)
+
+    # =========================================================================
+    # Assistants (PR Staff) Operations
+    # =========================================================================
+
+    @db_retry()
+    async def create_or_update_assistant(
+        self,
+        pr_id: int,
+        nickname: str,
+        role: str,
+        experience_days: int = 0,
+    ) -> None:
+        """Create or update a PR staff member."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id, nickname, role, experience_days)
+                        VALUES (%s, %s, %s, %s) AS new_data
+                        ON DUPLICATE KEY UPDATE
+                            nickname = new_data.nickname,
+                            role = new_data.role,
+                            experience_days = new_data.experience_days
+                        """,
+                        (pr_id, nickname, role, experience_days),
+                    )
+                    await conn.commit()
+            self.logger.debug(f"✓ Assistant {nickname} (ID: {pr_id}) saved")
+        except Exception as e:
+            self.logger.error(f"Failed to create/update assistant {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def get_assistant(self, pr_id: int) -> Optional[Dict[str, Any]]:
+        """Get assistant by PR ID."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to get assistant {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def get_all_assistants(self) -> List[Dict[str, Any]]:
+        """Get all PR staff members with their statistics."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT 
+                            pr_id,
+                            nickname,
+                            role,
+                            experience_days,
+                            status,
+                            assigned_to_type,
+                            assigned_to_id,
+                            assigned_to_name,
+                            total_spec_seconds,
+                            session_count,
+                            added_at
+                        FROM assistants
+                        ORDER BY role DESC, nickname ASC
+                        """
+                    )
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to get all assistants: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def update_assistant_assignment(
+        self,
+        pr_id: int,
+        assigned_to_type: Optional[str],
+        assigned_to_id: Optional[int],
+        assigned_to_name: Optional[str],
+    ) -> bool:
+        """Update assistant assignment status."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    status = 'assigned' if assigned_to_type else 'free'
+                    await cursor.execute(
+                        """
+                        UPDATE assistants 
+                        SET status = %s,
+                            assigned_to_type = %s,
+                            assigned_to_id = %s,
+                            assigned_to_name = %s
+                        WHERE pr_id = %s
+                        """,
+                        (status, assigned_to_type, assigned_to_id, assigned_to_name, pr_id),
+                    )
+                    
+                    # Log the action if the update was successful
+                    updated = cursor.rowcount > 0
+                    if updated:
+                        action = "Unassigned"
+                        target = None
+                        
+                        if assigned_to_type:
+                            if assigned_to_type == 'streamer':
+                                action = "Assigned to Streamer"
+                            else:
+                                action = "Assigned to Event"
+                            target = assigned_to_name
+                        
+                        # Only log if action is meaningful (e.g. creating logs for initial state logging if needed, or just changes)
+                        # Here we log every method call that results in update
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistant_logs (pr_id, action, target)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (pr_id, action, target)
+                        )
+                    
+                    await conn.commit()
+                    return updated
+        except Exception as e:
+            self.logger.error(f"Failed to update assistant assignment {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def increment_assistant_stats(
+        self, pr_id: int, spec_seconds: int
+    ) -> None:
+        """Increment assistant statistics after a spec session."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE assistants 
+                        SET total_spec_seconds = total_spec_seconds + %s,
+                            session_count = session_count + 1
+                        WHERE pr_id = %s
+                        """,
+                        (spec_seconds, pr_id),
+                    )
+                    await conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to increment stats for assistant {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def delete_assistant(self, pr_id: int) -> bool:
+        """Delete an assistant."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "DELETE FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    await conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            self.logger.error(f"Failed to delete assistant {pr_id}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def get_dashboard_stats(self) -> Dict[str, int]:
+        """Get aggregated statistics for the main dashboard."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # 1. Count assigned PR assistants
+                    await cursor.execute(
+                        "SELECT COUNT(*) as count FROM assistants WHERE status = 'assigned'"
+                    )
+                    assigned_pr_count = (await cursor.fetchone())['count']
+
+                    # 2. Count unassigned streamers (helpers needed)
+                    # We check if streamers table exists first to avoid errors on fresh install
+                    try:
+                        await cursor.execute(
+                            "SELECT COUNT(*) as count FROM streamers WHERE assigned_pr_id IS NULL"
+                        )
+                        result = await cursor.fetchone()
+                        unassigned_media_count = result['count'] if result else 0
+                    except Exception:
+                        unassigned_media_count = 0
+
+                    # 3. Count events for today
+                    try:
+                        await cursor.execute(
+                            """
+                            SELECT COUNT(*) as count FROM events 
+                            WHERE DATE(start_time) = CURDATE() OR (start_time IS NULL AND DATE(created_at) = CURDATE())
+                            """
+                        )
+                        result = await cursor.fetchone()
+                        events_today_count = result['count'] if result else 0
+                    except Exception:
+                        events_today_count = 0
+
+                    return {
+                        "assigned_pr_count": assigned_pr_count,
+                        "unassigned_media_count": unassigned_media_count,
+                        "events_today_count": events_today_count
+                    }
+        except Exception as e:
+            self.logger.error(f"Failed to get dashboard stats: {e}", exc_info=True)
+            return {
+                "assigned_pr_count": 0,
+                "unassigned_media_count": 0,
+                "events_today_count": 0
+            }
+
+    @db_retry()
+    async def get_assistant_logs(self, pr_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get activity logs for a specific assistant."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, action, target, created_at
+                        FROM assistant_logs
+                        WHERE pr_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                        """,
+                        (pr_id, limit),
+                    )
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to fetch logs for assistant {pr_id}: {e}", exc_info=True)
+            return []
+

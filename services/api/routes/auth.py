@@ -4,6 +4,7 @@ Handles login, logout, and user info.
 """
 
 from datetime import datetime
+from jose import JWTError
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -140,8 +141,15 @@ async def get_current_user(
     auth=Depends(get_auth),
 ):
     """Get current authenticated user info."""
-    token = credentials.credentials
-    payload = auth.verify_token(token)
+    try:
+        token = credentials.credentials
+        payload = auth.verify_token(token)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Невалидный токен или срок действия истек",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     user = await db.get_user_by_id(payload["user_id"])
     if not user:
@@ -149,6 +157,7 @@ async def get_current_user(
     
     return UserResponse(
         id=user["id"],
+        discord_id=user["discord_id"],
         username=user["username"],
         nickname=user["nickname"],
         role=user["role"],

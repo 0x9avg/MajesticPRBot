@@ -1,14 +1,8 @@
-"""
-Assistants routes for API.
-CRUD operations for PR assistants.
-Refactored to use database methods.
-"""
+"""API routes for PR staff (assistants) management."""
 
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-
-from schemas.assistant import AssistantCreate, AssistantResponse, AssistantStatsResponse
-from config import Config
+from fastapi import APIRouter, HTTPException, Request, Depends
+from typing import List, Optional
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/assistants", tags=["Assistants"])
 
@@ -18,86 +12,157 @@ def get_db(request: Request):
     return request.app.state.database
 
 
-def format_spec_duration(seconds: int) -> str:
-    """Format duration in seconds to human readable string."""
-    if seconds < 60:
-        return f"{seconds}с"
-
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-
-    if hours > 0:
-        return f"{hours}ч {minutes}м" if minutes > 0 else f"{hours}ч"
-    return f"{minutes}м"
+class AssistantCreate(BaseModel):
+    """Schema for creating/updating an assistant."""
+    pr_id: int
+    nickname: str
+    role: str  # 'employee', 'senior_employee', 'manager', 'developer'
+    experience_days: int = 0
 
 
-@router.get("", response_model=List[AssistantResponse])
-async def list_assistants(db=Depends(get_db)):
-    """Get all assistants."""
-    assistants = await db.get_all_assistants()
-    return [AssistantResponse(**a) for a in assistants]
+class AssistantAssignment(BaseModel):
+    """Schema for updating assistant assignment."""
+    assigned_to_type: Optional[str] = None  # 'streamer', 'event', or None
+    assigned_to_id: Optional[int] = None
+    assigned_to_name: Optional[str] = None
 
 
-@router.get("/top")
-async def get_top_assistants(limit: int = 10, db=Depends(get_db)):
-    """Get top assistants by spec time."""
-    assistants = await db.get_top_assistants(limit)
-    return assistants
+@router.get("")
+async def get_all_assistants(db=Depends(get_db)):
+    """Get all PR staff members with their statistics."""
+    try:
+        assistants = await db.get_all_assistants()
+        
+        # Convert total_spec_seconds to hours for frontend
+        for assistant in assistants:
+            assistant['total_spec_hours'] = round(assistant['total_spec_seconds'] / 3600, 2)
+        
+        return {
+            "success": True,
+            "data": assistants,
+            "count": len(assistants)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch assistants: {str(e)}")
 
 
-@router.get("/{user_id}", response_model=AssistantResponse)
-async def get_assistant(user_id: int, db=Depends(get_db)):
-    """Get a specific assistant by Discord user ID."""
-    assistant = await db.get_assistant(user_id)
-    if not assistant:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-    return AssistantResponse(**assistant)
+@router.get("/{pr_id}")
+async def get_assistant(pr_id: int, db=Depends(get_db)):
+    """Get a specific assistant by PR ID."""
+    try:
+        assistant = await db.get_assistant(pr_id)
+        
+        if not assistant:
+            raise HTTPException(status_code=404, detail=f"Assistant with ID {pr_id} not found")
+        
+        # Convert total_spec_seconds to hours
+        assistant['total_spec_hours'] = round(assistant['total_spec_seconds'] / 3600, 2)
+        
+        return {
+            "success": True,
+            "data": assistant
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch assistant: {str(e)}")
 
 
-@router.get("/{user_id}/stats", response_model=AssistantStatsResponse)
-async def get_assistant_stats(user_id: int, db=Depends(get_db)):
-    """Get detailed stats for an assistant."""
-    stats = await db.get_assistant_stats(user_id)
-    if not stats:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-
-    return AssistantStatsResponse(
-        pr_id=stats["pr_id"],
-        total_spec_seconds=stats["total_spec_seconds"],
-        total_spec_formatted=format_spec_duration(stats["total_spec_seconds"]),
-        session_count=stats["session_count"],
-        daily_stats=[dict(d) for d in stats.get("daily_stats", [])],
-    )
-
-
-@router.post("", response_model=AssistantResponse, status_code=status.HTTP_201_CREATED)
-async def create_assistant(data: AssistantCreate, db=Depends(get_db)):
-    """Add a new assistant."""
-    assistant = await db.create_assistant(data.user_id)
-    if not assistant:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Ассистент уже существует",
+@router.post("")
+async def create_or_update_assistant(assistant: AssistantCreate, db=Depends(get_db)):
+    """Create or update a PR staff member."""
+    try:
+        # Validate role
+        valid_roles = ['employee', 'senior_employee', 'manager', 'developer']
+        if assistant.role not in valid_roles:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}"
+            )
+        
+        await db.create_or_update_assistant(
+            pr_id=assistant.pr_id,
+            nickname=assistant.nickname,
+            role=assistant.role,
+            experience_days=assistant.experience_days
         )
-    return AssistantResponse(**assistant)
+        
+        return {
+            "success": True,
+            "message": f"Assistant {assistant.nickname} saved successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save assistant: {str(e)}")
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_assistant(user_id: int, db=Depends(get_db)):
+@router.put("/{pr_id}/assign")
+async def update_assignment(pr_id: int, assignment: AssistantAssignment, db=Depends(get_db)):
+    """Update assistant assignment to a streamer or event."""
+    try:
+        # Validate assignment type
+        if assignment.assigned_to_type and assignment.assigned_to_type not in ['streamer', 'event']:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid assignment type. Must be 'streamer', 'event', or null"
+            )
+        
+        # Check if assistant exists
+        assistant = await db.get_assistant(pr_id)
+        if not assistant:
+            raise HTTPException(status_code=404, detail=f"Assistant with ID {pr_id} not found")
+        
+        # Update assignment
+        success = await db.update_assistant_assignment(
+            pr_id=pr_id,
+            assigned_to_type=assignment.assigned_to_type,
+            assigned_to_id=assignment.assigned_to_id,
+            assigned_to_name=assignment.assigned_to_name
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update assignment")
+        
+        status_msg = "freed" if not assignment.assigned_to_type else f"assigned to {assignment.assigned_to_name}"
+        
+        return {
+            "success": True,
+            "message": f"Assistant {assistant['nickname']} {status_msg}"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update assignment: {str(e)}")
+
+
+@router.delete("/{pr_id}")
+async def delete_assistant(pr_id: int, db=Depends(get_db)):
     """Delete an assistant."""
-    success = await db.delete_assistant(user_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-    return None
+    try:
+        success = await db.delete_assistant(pr_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Assistant with ID {pr_id} not found")
+        
+        return {
+            "success": True,
+            "message": f"Assistant {pr_id} deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete assistant: {str(e)}")
 
 
-@router.post("/{user_id}/reset")
-async def reset_assistant_stats(user_id: int, db=Depends(get_db)):
-    """Reset assistant statistics."""
-    success = await db.reset_assistant_stats(user_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-    return {"status": "reset", "user_id": user_id}
-
-
-
+@router.get("/{pr_id}/logs")
+async def get_assistant_logs(pr_id: int, db=Depends(get_db)):
+    """Get activity logs for a specific assistant."""
+    try:
+        logs = await db.get_assistant_logs(pr_id)
+        return {
+            "success": True,
+            "data": logs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {str(e)}")

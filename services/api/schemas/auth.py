@@ -18,6 +18,7 @@ class TokenResponse(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
+    discord_id: int
     username: str
     nickname: str
     role: str

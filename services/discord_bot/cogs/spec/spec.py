@@ -8,7 +8,7 @@ from disnake.ext import commands
 from typing import Optional
 
 from config import Config
-from utils import format_spec_duration, create_notification_component
+from utils import format_spec_duration, create_notification_component, send_pr_action_log
 
 
 class Spec(commands.Cog):
@@ -109,46 +109,30 @@ class Spec(commands.Cog):
             result = await self.api.claim_streamer(streamer_id, pr_id)
 
             if result and result.get("status") == "claimed":
-                # Success
                 streamer_name = result.get("streamer_name")
                 
-                # Try to edit the button to "Claimed"
+                # Update notification message to show "Claimed by X"
                 try:
-                    new_components = create_notification_component(
-                        message="", 
-                        streamer_name=streamer_name,
-                        stream_title=result.get("stream_title", ""), # These fields might be missing in claim response, assume API sends enough
-                        # Actually claim response is minimal. We might not have stream_title.
-                        # We should ideally refetch streamer or trust UI doesn't need full rebuild if component logic handles defaults.
-                        # `create_notification_component` needs data.
-                        # If we can't rebuild perfect UI, maybe just send ephemeral?
-                        # Existing logic attempts UI update. 
-                        # I'll rely on what's available or defaults.
-                        game_name="GTA 5", # Assumption
-                        thumbnail_url="",
-                        streamer_id=streamer_id,
-                        show_claim_button=True,
-                        assigned_pr_id=pr_id,
-                        assigned_pr_name=interaction.user.display_name
-                    )
-                    # This is risky if data missing. Just skip UI update if risky?
-                    # Or fetch streamer?
-                    # streamer = await self.api.get_streamer(streamer_id)
-                    # Refetching is safer.
-                except Exception:
-                    pass
+                    # Fetch full streamer data for proper UI rebuild
+                    streamer = await self.api.get_streamer(streamer_id)
+                    if streamer:
+                        new_components = create_notification_component(
+                            message="",
+                            streamer_name=streamer.get("streamer_name", streamer_name),
+                            stream_title=streamer.get("stream_title", ""),
+                            game_name=streamer.get("game_name", "GTA 5"),
+                            thumbnail_url=streamer.get("stream_thumbnail_url", ""),
+                            streamer_id=streamer_id,
+                            show_claim_button=True,
+                            assigned_pr_id=pr_id,
+                            assigned_pr_name=interaction.user.display_name
+                        )
+                        await interaction.message.edit(components=new_components)
+                except Exception as e:
+                    self.logger.warning(f"Could not update notification message: {e}")
 
                 await interaction.followup.send(f"✅ Успешно закреплен: **{streamer_name}**", ephemeral=True)
-
-                # Log
-                await self._send_pr_action(
-                    interaction.guild_id,
-                    f"📥 **Закрепление**\n"
-                    f"👤 Стример: **{streamer_name}**\n"
-                    f"🎯 PR: {interaction.user.mention}",
-                )
-                
-                # Update monitoring
+                # PR actions log handled by broker_handlers via spec.claimed event
                 await self.api.refresh_monitoring()
             else:
                 error = result.get("detail", "Ошибка") if result else "API Error"
@@ -178,16 +162,7 @@ class Spec(commands.Cog):
                     f"⏱️ Время спека: **{duration_str}**",
                     ephemeral=True,
                 )
-
-                await self._send_pr_action(
-                    interaction.guild_id,
-                    f"📤 **Открепление (ручное)**\n"
-                    f"👤 Стример: **{result.get('streamer_name')}**\n"
-                    f"🎯 PR: {interaction.user.mention}\n"
-                    f"⏱️ Спек: **{duration_str}**",
-                )
-
-                # Update monitoring
+                # PR actions log handled by broker_handlers via spec.unclaimed event
                 await self.api.refresh_monitoring()
             else:
                 error = result.get("detail", "Ошибка") if result else "API Error"
@@ -227,36 +202,54 @@ class Spec(commands.Cog):
 
             await interaction.response.defer()
 
-            result = await self.api.transfer_streamer(
-                transfer_data["streamer_id"],
-                from_pr_id,
-                interaction.user.id
-            )
-
-            if result and result.get("status") == "transferred":
-                await interaction.followup.edit_message(
-                    message_id=interaction.message.id,
-                    content=f"✅ Ты принял стримера **{result.get('streamer_name')}**!",
-                    components=[]
-                )
+            # Check if this is a swap (both PRs have streamers) or a one-way transfer
+            target_streamer_id = transfer_data.get("target_streamer_id")
+            
+            if target_streamer_id:
+                # This is a SWAP (both have streamers)
+                result = await self.api.swap_streamers(from_pr_id, interaction.user.id)
                 
-                # Log
-                await self._send_pr_action(
-                    transfer_data.get("guild_id"),
-                    f"📤 **Открепление (передача)**\n👤 Стример: **{result.get('streamer_name')}**\n🎯 PR: <@{from_pr_id}>"
-                )
-                await self._send_pr_action(
-                    transfer_data.get("guild_id"),
-                    f"📥 **Закрепление (передача)**\n👤 Стример: **{result.get('streamer_name')}**\n🎯 PR: {interaction.user.mention}"
+                if result and result.get("status") == "swapped":
+                    await interaction.followup.edit_message(
+                        message_id=interaction.message.id,
+                        content=(
+                            f"✅ Обмен завершён!\n"
+                            f"• Ты получил: **{result.get('pr2_new_streamer')}**\n"
+                            f"• Он получил: **{result.get('pr1_new_streamer')}**"
+                        ),
+                        components=[]
+                    )
+                    await self.api.refresh_monitoring()
+                else:
+                    error_msg = result.get("detail", "Неизвестная ошибка") if result else "Ошибка API"
+                    await interaction.followup.edit_message(
+                        message_id=interaction.message.id,
+                        content=f"❌ Не удалось обменяться: {error_msg}", 
+                        components=[]
+                    )
+            else:
+                # This is a one-way TRANSFER
+                result = await self.api.transfer_streamer(
+                    transfer_data["streamer_id"],
+                    from_pr_id,
+                    interaction.user.id
                 )
 
-                # Update Monitoring
-                await self.api.refresh_monitoring()
-            else:
-                 await interaction.followup.edit_message(
-                    message_id=interaction.message.id,
-                    content="❌ Не удалось передать.", components=[]
-                )
+                if result and result.get("status") == "transferred":
+                    await interaction.followup.edit_message(
+                        message_id=interaction.message.id,
+                        content=f"✅ Ты принял стримера **{result.get('streamer_name')}**!",
+                        components=[]
+                    )
+                    # PR actions log handled by broker_handlers via spec.transferred event
+                    await self.api.refresh_monitoring()
+                else:
+                    error_msg = result.get("detail", "Неизвестная ошибка") if result else "Ошибка API"
+                    await interaction.followup.edit_message(
+                        message_id=interaction.message.id,
+                        content=f"❌ Не удалось передать: {error_msg}", 
+                        components=[]
+                    )
 
         except Exception as e:
             self.logger.error(f"Transfer error: {e}")
@@ -469,7 +462,7 @@ class Spec(commands.Cog):
             }
 
             # Create accept/decline buttons
-            view = disnake.ui.View(timeout=120)
+            view = disnake.ui.View(timeout=None)
             view.add_item(
                 disnake.ui.Button(
                     label="✅ Принять",
@@ -508,10 +501,65 @@ class Spec(commands.Cog):
 
     # Helper
     async def _send_pr_action(self, guild_id, message):
-        settings = await self.api.get_guild_settings()
-        if settings and settings.get("pr_actions_channel_id"):
-            channel = self.bot.get_channel(settings["pr_actions_channel_id"])
-            if channel: await channel.send(message)
+        """Send message to PR actions log channel."""
+        await send_pr_action_log(self.bot, message)
+
+    async def update_monitoring(self):
+        """Update monitoring message with current streamer statuses."""
+        try:
+            from utils import create_streamers_component, create_monitoring_select
+            
+            settings = await self.api.get_guild_settings()
+            if not settings:
+                return
+            
+            monitoring_channel_id = settings.get("monitoring_channel_id")
+            monitoring_message_id = settings.get("monitoring_message_id")
+            
+            if not monitoring_channel_id:
+                return
+            
+            channel = self.bot.get_channel(int(monitoring_channel_id))
+            if not channel:
+                self.bot.logger.warning(f"Monitoring channel not found")
+                return
+            
+            # Get streamers
+            streamers = await self.api.list_all_streamers()
+            online_streamers = []
+            available_streamers = []
+            gta_count = 0
+            
+            for s in streamers:
+                if s.get("is_online"):
+                    online_streamers.append(s)
+                    is_gta = str(s.get("game_id")) == Config.GTA5_GAME_ID
+                    if is_gta:
+                        gta_count += 1
+                        if not s.get("assigned_pr_id"):
+                            available_streamers.append(s)
+            
+            # Build components
+            container = create_streamers_component(online_streamers, len(streamers), gta_count)
+            select_row = create_monitoring_select(available_streamers, [])
+            final_components = [container, select_row]
+            
+            # Edit or create message
+            message = None
+            if monitoring_message_id:
+                try:
+                    message = await channel.fetch_message(int(monitoring_message_id))
+                except Exception:
+                    message = None
+            
+            if message:
+                await message.edit(components=final_components)
+            else:
+                new_message = await channel.send(components=final_components)
+                await self.api.update_guild_settings(monitoring_message_id=new_message.id)
+                
+        except Exception as e:
+            self.bot.logger.error(f"Error updating monitoring: {e}", exc_info=True)
 
 def setup(bot: commands.Bot) -> None:
     bot.add_cog(Spec(bot))

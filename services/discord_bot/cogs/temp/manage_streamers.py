@@ -27,7 +27,6 @@ class ManageStreamers(commands.Cog):
         interaction: ApplicationCommandInteraction,
         url: str,
         priority: int = 0,
-        is_paid: bool = False,
     ) -> None:
 
         try:
@@ -49,33 +48,27 @@ class ManageStreamers(commands.Cog):
             # Note: Validation of Twitch existence happens asynchronously in this new architecture
             # unless API service implements it synchronously.
             result = await self.api.add_streamer(
-                twitch_url=username,
-                priority=priority,
-                is_paid=is_paid,
-                added_by_id=interaction.user.id
+                twitch_url=username, priority=priority, added_by_id=interaction.user.id
             )
-            
+
             if result:
                 if result.get("status") == "pending_verification":
                     await interaction.followup.send(
                         f"⏳ Запрос на добавление стримера **{username}** принят.\n"
                         "Бот проверяет существование канала...",
-                        ephemeral=True
+                        ephemeral=True,
                     )
                 elif "error" not in result:
-                     await interaction.followup.send(
-                        f"✅ Стример **{username}** добавлен.",
-                        ephemeral=True
+                    await interaction.followup.send(
+                        f"✅ Стример **{username}** добавлен.", ephemeral=True
                     )
                 else:
-                     error_msg = result.get("detail", "Unknown error")
-                     await interaction.followup.send(
+                    error_msg = result.get("detail", "Unknown error")
+                    await interaction.followup.send(
                         f"❌ Ошибка при добавлении: {error_msg}", ephemeral=True
                     )
             else:
-                 await interaction.followup.send(
-                    f"❌ Ошибка API.", ephemeral=True
-                )
+                await interaction.followup.send(f"❌ Ошибка API.", ephemeral=True)
 
         except Exception as e:
             self.bot.logger.error(f"Error adding streamer {url}: {e}", exc_info=True)
@@ -95,7 +88,7 @@ class ManageStreamers(commands.Cog):
             await interaction.response.defer()
         except disnake.errors.NotFound:
             return
-            
+
         try:
             # Parse username to be safe, though this command takes URL usually
             username = url
@@ -103,7 +96,7 @@ class ManageStreamers(commands.Cog):
                 username = url.replace("https://www.twitch.tv/", "").rstrip("/")
             else:
                 username = url.rstrip("/")
-            
+
             # Need ID to delete via API.
             # First, search for streamer by name?
             # API endpoint delete_streamer takes ID.
@@ -115,7 +108,7 @@ class ManageStreamers(commands.Cog):
                 if s["streamer_name"].lower() == username.lower():
                     target_id = s["streamer_id"]
                     break
-            
+
             if target_id:
                 success = await self.api.delete_streamer(target_id)
                 if success:
@@ -128,7 +121,7 @@ class ManageStreamers(commands.Cog):
                     )
             else:
                 await interaction.followup.send(
-                     f"❌ Стример **{username}** не найден в базе.", ephemeral=True
+                    f"❌ Стример **{username}** не найден в базе.", ephemeral=True
                 )
 
         except Exception as e:

@@ -37,7 +37,7 @@ export default function UserProfile() {
                 let assistantData = null;
 
                 try {
-                    const assistantRes = await fetch(`/ api / assistants / ${authUser.discord_id} `);
+                    const assistantRes = await fetch(`/api/assistants/${authUser.discord_id}`);
                     if (assistantRes.ok) {
                         const json = await assistantRes.json();
                         assistantData = json.data;
@@ -58,7 +58,7 @@ export default function UserProfile() {
                 if (assistantData) {
                     setUser(assistantData);
                     // 3. Fetch Logs
-                    const logsRes = await fetch(`/ api / assistants / ${assistantData.pr_id}/logs`);
+                    const logsRes = await fetch(`/api/assistants/${assistantData.pr_id}/logs`);
                     const logsJson = await logsRes.json();
                     if (logsJson.success) setLogs(logsJson.data);
                 } else {

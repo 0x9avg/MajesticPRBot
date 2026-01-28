@@ -10,7 +10,7 @@ import logging
 
 class APIClient:
     """HTTP client for API communication."""
-    
+
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
@@ -21,7 +21,7 @@ class APIClient:
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.logger = logger or logging.getLogger(__name__)
         self._session: Optional[aiohttp.ClientSession] = None
-    
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
@@ -29,11 +29,11 @@ class APIClient:
                 headers={"Content-Type": "application/json"},
             )
         return self._session
-    
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
-    
+
     async def _request(
         self,
         method: str,
@@ -43,7 +43,7 @@ class APIClient:
     ) -> Optional[Dict]:
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
-        
+
         try:
             async with session.request(method, url, json=data, params=params) as resp:
                 if resp.status == 204:
@@ -59,22 +59,22 @@ class APIClient:
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
             return None
-    
+
     # =========================================================================
     # Streamers API
     # =========================================================================
-    
+
     async def list_all_streamers(self) -> List[Dict]:
         """Get all streamers."""
         result = await self._request("GET", "/streamers")
         if result and "streamers" in result:
             return result["streamers"]
         return result if isinstance(result, list) else []
-    
+
     async def get_streamer(self, twitch_id: int) -> Optional[Dict]:
         """Get a specific streamer."""
         return await self._request("GET", f"/streamers/{twitch_id}")
-    
+
     async def create_streamer_full(
         self,
         streamer_id: int,
@@ -82,7 +82,6 @@ class APIClient:
         is_online: bool = False,
         started_at: str = None,
         priority: int = 0,
-        is_paid: bool = False,
         added_by_id: int = 0,
         game_id: int = None,
         game_name: str = None,
@@ -95,7 +94,6 @@ class APIClient:
             "streamer_name": streamer_name,
             "is_online": str(is_online).lower(),
             "priority": str(priority),
-            "is_paid": str(is_paid).lower(),
             "added_by_id": str(added_by_id),
         }
         if started_at:
@@ -108,9 +106,9 @@ class APIClient:
             params["stream_title"] = stream_title
         if stream_thumbnail_url:
             params["stream_thumbnail_url"] = stream_thumbnail_url
-        
+
         return await self._request("POST", "/streamers/full", params=params)
-    
+
     async def update_streamer_status(
         self,
         twitch_id: int,
@@ -134,35 +132,61 @@ class APIClient:
             params["stream_title"] = stream_title
         if stream_thumbnail_url is not None:
             params["stream_thumbnail_url"] = stream_thumbnail_url
-        
-        result = await self._request("PATCH", f"/streamers/{twitch_id}/status", params=params)
+
+        result = await self._request(
+            "PATCH", f"/streamers/{twitch_id}/status", params=params
+        )
         return result is not None
-    
+
     # =========================================================================
     # Guild Settings API
     # =========================================================================
-    
+
     async def get_guild_settings(self) -> Optional[Dict]:
         """Get guild settings."""
         return await self._request("GET", "/guild")
-    
+
     async def get_notification_template(self, event_type: str) -> str:
         """Get notification template."""
         result = await self._request("GET", f"/guild/templates/{event_type}")
         return result.get("template", "") if result else ""
-    
+
     # =========================================================================
     # Spec System API
     # =========================================================================
-    
-    async def unclaim_streamer(self, streamer_id: int, reason: str = "stream_end") -> Optional[Dict]:
+
+    async def unclaim_streamer(
+        self, streamer_id: int, reason: str = "stream_end"
+    ) -> Optional[Dict]:
         """Unclaim a streamer (auto-unclaim on stream end)."""
-        return await self._request("POST", "/spec/unclaim", data={
-            "streamer_id": streamer_id,
-            "reason": reason,
-        })
-    
+        return await self._request(
+            "POST",
+            "/spec/unclaim",
+            data={
+                "streamer_id": streamer_id,
+                "reason": reason,
+            },
+        )
+
     async def get_available_gta_streamers(self) -> List[Dict]:
         """Get available GTA streamers for claiming."""
         result = await self._request("GET", "/streamers/available-gta")
         return result if isinstance(result, list) else []
+
+    async def sync_streamers_status_bulk(self, updates: List[Dict]) -> int:
+        """
+        Bulk update streamer statuses.
+        
+        Args:
+            updates: List of dicts with streamer status info
+            
+        Returns:
+            Number of streamers updated
+        """
+        if not updates:
+            return 0
+            
+        result = await self._request("POST", "/streamers/sync_status", data=updates)
+        if result:
+            return result.get("updated_count", 0)
+        return 0

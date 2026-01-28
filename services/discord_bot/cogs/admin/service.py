@@ -1,0 +1,231 @@
+"""Admin Service - System Tools.
+Force sync, refresh monitoring, recreate panels, bot status.
+"""
+
+import disnake
+from disnake import MessageInteraction
+from disnake.ext import commands
+from datetime import datetime
+
+from .core import AdminMainView, get_main_embed
+
+
+# =============================================================================
+# Service Embed
+# =============================================================================
+
+
+async def get_service_embed(bot) -> disnake.Embed:
+    """Create embed showing bot status."""
+    ping = round(bot.latency * 1000)
+    
+    # Calculate uptime if available
+    uptime_str = "N/A"
+    if hasattr(bot, "_start_time"):
+        delta = datetime.now() - bot._start_time
+        days = delta.days
+        hours, rem = divmod(delta.seconds, 3600)
+        minutes = rem // 60
+        uptime_str = f"{days}д {hours}ч {minutes}м"
+
+    # Get stats
+    try:
+        streamers = await bot.api_client.list_all_streamers()
+        streamer_count = len(streamers)
+        sessions = await bot.api_client.get_active_sessions()
+        session_count = len(sessions) if sessions else 0
+    except Exception:
+        streamer_count, session_count = "?", "?"
+
+    embed = disnake.Embed(
+        title="🛠️ Сервисное Меню",
+        description=(
+            f"**Статус бота:**\n"
+            f"📶 Пинг API: `{ping}ms`\n"
+            f"⏱️ Uptime: `{uptime_str}`\n"
+            f"🎥 Стримеров: `{streamer_count}`\n"
+            f"📌 Активных сессий: `{session_count}`"
+        ),
+        color=0x607D8B,
+    )
+    return embed
+
+
+# =============================================================================
+# Service View
+# =============================================================================
+
+
+class ServiceView(disnake.ui.View):
+    """View for system tools."""
+
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @disnake.ui.button(
+        label="🔄 Синхронизация Twitch",
+        custom_id="admin_svc_sync",
+        style=disnake.ButtonStyle.primary,
+        row=0,
+    )
+    async def sync_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+        """Force sync streamers with Twitch."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            # Trigger sync via API
+            await self.bot.api_client.sync_streamers()
+            await interaction.followup.send(
+                "✅ Синхронизация запущена! Стримеры будут обновлены.", ephemeral=True
+            )
+        except Exception as e:
+            self.bot.logger.error(f"Sync error: {e}")
+            await interaction.followup.send("❌ Ошибка синхронизации", ephemeral=True)
+
+    @disnake.ui.button(
+        label="🔄 Обновить мониторинг",
+        custom_id="admin_svc_refresh",
+        style=disnake.ButtonStyle.secondary,
+        row=0,
+    )
+    async def refresh_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+        """Refresh monitoring message."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.bot.api_client.refresh_monitoring()
+            await interaction.followup.send("✅ Мониторинг обновлен!", ephemeral=True)
+        except Exception as e:
+            self.bot.logger.error(f"Refresh error: {e}")
+            await interaction.followup.send("❌ Ошибка обновления", ephemeral=True)
+
+    @disnake.ui.button(
+        label="🔄 Пересоздать панели",
+        custom_id="admin_svc_respawn",
+        style=disnake.ButtonStyle.secondary,
+        row=1,
+    )
+    async def respawn_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+        """Recreate control panel and monitoring messages."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            settings = await self.bot.api_client.get_guild_settings()
+            if not settings:
+                await interaction.followup.send("❌ Настройки не найдены", ephemeral=True)
+                return
+
+            messages_recreated = []
+
+            # Recreate Control Panel
+            cp_channel_id = settings.get("control_panel_channel_id")
+            if cp_channel_id:
+                channel = self.bot.get_channel(int(cp_channel_id))
+                if channel:
+                    # Delete old message
+                    old_msg_id = settings.get("control_panel_message_id")
+                    if old_msg_id:
+                        try:
+                            old_msg = await channel.fetch_message(int(old_msg_id))
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                    
+                    # Create new panel
+                    embed = get_main_embed()
+                    msg = await channel.send(embed=embed, view=AdminMainView(self.bot))
+                    await self.bot.api_client.update_guild_settings(
+                        control_panel_message_id=msg.id
+                    )
+                    messages_recreated.append("Панель управления")
+
+            # Recreate Monitoring
+            mon_channel_id = settings.get("monitoring_channel_id")
+            if mon_channel_id:
+                channel = self.bot.get_channel(int(mon_channel_id))
+                if channel:
+                    old_msg_id = settings.get("monitoring_message_id")
+                    if old_msg_id:
+                        try:
+                            old_msg = await channel.fetch_message(int(old_msg_id))
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                    
+                    # Trigger monitoring refresh
+                    await self.bot.api_client.refresh_monitoring()
+                    messages_recreated.append("Мониторинг")
+
+            if messages_recreated:
+                await interaction.followup.send(
+                    f"✅ Пересозданы: {', '.join(messages_recreated)}", ephemeral=True
+                )
+            else:
+                await interaction.followup.send("ℹ️ Нечего пересоздавать", ephemeral=True)
+
+        except Exception as e:
+            self.bot.logger.error(f"Respawn error: {e}")
+            await interaction.followup.send("❌ Ошибка", ephemeral=True)
+
+    @disnake.ui.button(
+        label="📊 Статистика API",
+        custom_id="admin_svc_api_stats",
+        style=disnake.ButtonStyle.secondary,
+        row=1,
+    )
+    async def api_stats_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+        """Show API stats."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            stats = await self.bot.api_client.get_health()
+            embed = disnake.Embed(title="📊 Статистика API", color=0x00BCD4)
+            
+            for key, value in stats.items():
+                embed.add_field(name=key, value=str(value), inline=True)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            self.bot.logger.error(f"API stats error: {e}")
+            await interaction.followup.send("❌ Ошибка получения статистики", ephemeral=True)
+
+    @disnake.ui.button(
+        label="Назад",
+        custom_id="admin_svc_back",
+        style=disnake.ButtonStyle.secondary,
+        emoji="🔙",
+        row=2,
+    )
+    async def back_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+        await interaction.response.edit_message(
+            embed=get_main_embed(), view=AdminMainView(self.bot)
+        )
+
+
+# =============================================================================
+# Admin Service Cog
+# =============================================================================
+
+
+class AdminService(commands.Cog):
+    """System tools and maintenance."""
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.api = bot.api_client
+        # Record start time for uptime
+        if not hasattr(bot, "_start_time"):
+            bot._start_time = datetime.now()
+
+    @commands.Cog.listener("on_button_click")
+    async def on_service_button(self, interaction: MessageInteraction):
+        """Handle admin_service navigation."""
+        if interaction.component.custom_id != "admin_service":
+            return
+
+        await interaction.response.defer()
+        embed = await get_service_embed(self.bot)
+        await interaction.edit_original_response(
+            embed=embed, view=ServiceView(self.bot)
+        )
+
+
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(AdminService(bot))

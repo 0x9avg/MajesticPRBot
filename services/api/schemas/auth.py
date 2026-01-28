@@ -3,6 +3,7 @@ Auth schemas for API requests and responses.
 """
 
 from pydantic import BaseModel
+from schemas.common import Snowflake
 
 
 class LoginRequest(BaseModel):
@@ -18,7 +19,7 @@ class TokenResponse(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-    discord_id: int
+    discord_id: Snowflake
     username: str
     nickname: str
     role: str

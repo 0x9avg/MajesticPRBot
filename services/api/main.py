@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import Config
 
+import sys
+
 logger = Config.setup_logging("API")
 
 
@@ -18,6 +20,16 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown."""
     # Startup
     logger.info(f"Starting {Config.APP_NAME}...")
+
+    missing_vars = Config.validate_env_vars()
+    if missing_vars:
+        logger.error(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
+        sys.exit(1)
+
+    logger.info("✓ Environment variables validated")
 
     # Initialize database
     from database import Database
@@ -106,6 +118,5 @@ if __name__ == "__main__":
         "main:app",
         host=Config.API_HOST,
         port=Config.API_PORT,
-        reload=Config.DEBUG,
         log_level=Config.LOG_LEVEL.lower(),
     )

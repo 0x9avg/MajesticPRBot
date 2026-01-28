@@ -19,8 +19,6 @@ class Config:
     # Application Settings
     # ==========================================================================
     APP_NAME = "PRMajesticBot API"
-    ENV = os.getenv("ENV", "development")
-    DEBUG = ENV == "development"
 
     API_HOST = os.getenv("API_HOST", "0.0.0.0")
     API_PORT = int(os.getenv("API_PORT", "8000"))
@@ -77,7 +75,7 @@ class Config:
     # ==========================================================================
     # Guild Settings (Single-tenant mode)
     # ==========================================================================
-    GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+    GUILD_ID = str(os.getenv("GUILD_ID", "0"))
 
     # ==========================================================================
     # Game IDs
@@ -125,6 +123,7 @@ class Config:
         "DB_HOST",
         "DB_USER",
         "DB_NAME",
+        "GUILD_ID",
     ]
 
     @classmethod

@@ -44,7 +44,9 @@ class BrokerConsumer:
 
     @property
     def url(self) -> str:
-        return f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
+        return (
+            f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
+        )
 
     async def connect(self) -> None:
         """Connect to RabbitMQ and start consuming."""
@@ -52,7 +54,7 @@ class BrokerConsumer:
             self.logger.info(f"Connecting to RabbitMQ at {self.host}...")
             self.connection = await aio_pika.connect_robust(self.url)
             self.channel = await self.connection.channel()
-            
+
             # Set QoS to 1 to process one message at a time per consumer
             await self.channel.set_qos(prefetch_count=1)
 
@@ -62,9 +64,7 @@ class BrokerConsumer:
             )
 
             # Declare durable queue for this service
-            self.queue = await self.channel.declare_queue(
-                self.queue_name, durable=True
-            )
+            self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
 
             # Bind queue to relevant keys
             # We want to know when streamers are added/removed/updated
@@ -79,7 +79,7 @@ class BrokerConsumer:
 
         except Exception as e:
             self.logger.error(f"Failed to connect consumer: {e}")
-            # Don't raise, just log. Retry logic via robust connection handles reconnects? 
+            # Don't raise, just log. Retry logic via robust connection handles reconnects?
             # Ideally retry logic here too.
             await asyncio.sleep(5)
             # Recursion risky without limit, but RobustConnection handles network disconnects.
@@ -97,7 +97,7 @@ class BrokerConsumer:
                 data = json.loads(message.body.decode())
                 routing_key = message.routing_key
                 self.logger.debug(f"Received event: {routing_key}")
-                
+
                 await self.handle_event(routing_key, data)
 
             except Exception as e:
@@ -115,7 +115,7 @@ class BrokerConsumer:
             username = data.get("username")
             added_by = data.get("added_by", {})
             self.logger.info(f"Verifying streamer: {username}")
-            
+
             try:
                 # Parse URL if needed (support twitch.tv/shroud, https://twitch.tv/shroud, etc.)
                 if username:
@@ -125,80 +125,97 @@ class BrokerConsumer:
                         username = username.split("twitch.tv/")[-1]
                     # Remove query params and trailing slashes
                     username = username.split("?")[0].split("/")[0].strip()
-                
+
                 if not username:
                     self.logger.warning("Empty username after parsing")
                     return
-                
+
                 self.logger.debug(f"Parsed username: {username}")
-                
+
                 # 1. Resolve Twitch ID
                 twitch_id = await self.bot.get_streamer_id(username)
-                
+
                 if twitch_id:
                     self.logger.info(f"Resolved {username} -> ID {twitch_id}")
-                    
+
                     # 2. Get stream info for initial state
                     stream_info = await self.bot.get_stream_info(twitch_id)
                     is_online = stream_info.get("is_online", False)
-                    
+
                     # 3. Create full streamer in API (which inserts to DB)
                     await self.bot.api.create_streamer_full(
                         streamer_id=twitch_id,
                         streamer_name=username,
                         is_online=is_online,
-                        started_at=str(stream_info.get("started_at")) if stream_info.get("started_at") else None,
+                        started_at=(
+                            str(stream_info.get("started_at"))
+                            if stream_info.get("started_at")
+                            else None
+                        ),
                         priority=added_by.get("priority", 0),
-                        is_paid=added_by.get("is_paid", False),
                         added_by_id=added_by.get("added_by_id", 0),
                         game_id=stream_info.get("game_id"),
                         game_name=stream_info.get("game_name"),
                         stream_title=stream_info.get("title"),
-                        stream_thumbnail_url=stream_info.get("thumbnail_url")
+                        stream_thumbnail_url=stream_info.get("thumbnail_url"),
                     )
-                    
-                    self.logger.info(f"Created streamer {username} ({twitch_id}) via API")
-                    
+
+                    self.logger.info(
+                        f"Created streamer {username} ({twitch_id}) via API"
+                    )
+
                     # 4. Do NOT subscribe here.
                     # The API will emit 'streamer.added', which we handle below.
                     # This avoids duplicate subscription attempts.
                     # await self.bot.add_notification(twitch_id)
-                    
+
                 else:
-                    self.logger.warning(f"Could not resolve Twitch ID for user: {username}")
+                    self.logger.warning(
+                        f"Could not resolve Twitch ID for user: {username}"
+                    )
                     # Optional: Emit failure event to notify Discord User
-            
+
             except Exception as e:
-                self.logger.error(f"Error verifying streamer {username}: {e}", exc_info=True)
+                self.logger.error(
+                    f"Error verifying streamer {username}: {e}", exc_info=True
+                )
 
         elif key == "streamer.added":
             streamer_id = data.get("streamer_id")
             if streamer_id:
-                self.logger.info(f"Processing streamer.added: {data.get('streamer_name')} ({streamer_id})")
+                self.logger.info(
+                    f"Processing streamer.added: {data.get('streamer_name')} ({streamer_id})"
+                )
                 await self.bot.add_notification(streamer_id)
                 # Also force update status immediately
                 # But fetch_streamer from API or just check online status?
                 # bot.sync_streamers() is too heavy.
                 # Just add sub is enough, event sub will trigger online/offline.
-                
+
                 # Check status once?
                 try:
-                   stream_info = await self.bot.get_stream_info(streamer_id)
-                   is_online = stream_info.get("is_online", False)
-                   await self.bot.api.update_streamer_status(
+                    stream_info = await self.bot.get_stream_info(streamer_id)
+                    is_online = stream_info.get("is_online", False)
+                    await self.bot.api.update_streamer_status(
                         streamer_id,
                         is_online,
-                        started_at=str(stream_info.get("started_at")) if stream_info.get("started_at") else None,
+                        started_at=(
+                            str(stream_info.get("started_at"))
+                            if stream_info.get("started_at")
+                            else None
+                        ),
                         game_id=stream_info.get("game_id"),
                         game_name=stream_info.get("game_name"),
                         stream_title=stream_info.get("title"),
-                        stream_thumbnail_url=stream_info.get("thumbnail_url")
-                   )
+                        stream_thumbnail_url=stream_info.get("thumbnail_url"),
+                    )
                 except Exception as e:
                     self.logger.warning(f"Initial status check failed: {e}")
 
         elif key == "streamer.removed":
             streamer_id = data.get("streamer_id")
             if streamer_id:
-                 self.logger.info(f"Processing streamer.removed: {data.get('streamer_name')} ({streamer_id})")
-                 await self.bot.remove_subscription(streamer_id)
+                self.logger.info(
+                    f"Processing streamer.removed: {data.get('streamer_name')} ({streamer_id})"
+                )
+                await self.bot.remove_subscription(streamer_id)

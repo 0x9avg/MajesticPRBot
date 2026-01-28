@@ -35,9 +35,9 @@ async def reset():
         
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                await cursor.execute("UPDATE users SET failed_login_attempts = 0")
+                await cursor.execute("UPDATE web_auth SET failed_login_attempts = 0")
                 await conn.commit()
-                print("✅ SUCCESS: Reset failed_login_attempts for all users.")
+                print("✅ SUCCESS: Reset failed_login_attempts for all users (web_auth).")
     except Exception as e:
         print(f"❌ ERROR: {e}")
     finally:

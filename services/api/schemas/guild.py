@@ -4,16 +4,17 @@ Guild schemas for API requests and responses.
 
 from typing import Optional
 from pydantic import BaseModel
+from schemas.common import Snowflake
 
 
 class GuildSettingsUpdate(BaseModel):
-    notification_channel_id: Optional[int] = None
-    monitoring_channel_id: Optional[int] = None
-    monitoring_message_id: Optional[int] = None
-    pr_actions_channel_id: Optional[int] = None
-    control_panel_channel_id: Optional[int] = None
-    control_panel_message_id: Optional[int] = None
-    assistant_role_id: Optional[int] = None
+    notification_channel_id: Optional[Snowflake] = None
+    monitoring_channel_id: Optional[Snowflake] = None
+    monitoring_message_id: Optional[Snowflake] = None
+    pr_actions_channel_id: Optional[Snowflake] = None
+    control_panel_channel_id: Optional[Snowflake] = None
+    control_panel_message_id: Optional[Snowflake] = None
+    assistant_role_id: Optional[Snowflake] = None
 
 
 class GuildTemplatesUpdate(BaseModel):
@@ -31,14 +32,14 @@ class GuildRatesUpdate(BaseModel):
 
 
 class GuildSettingsResponse(BaseModel):
-    guild_id: int
-    notification_channel_id: Optional[int] = None
-    monitoring_channel_id: Optional[int] = None
-    monitoring_message_id: Optional[int] = None
-    pr_actions_channel_id: Optional[int] = None
-    control_panel_channel_id: Optional[int] = None
-    control_panel_message_id: Optional[int] = None
-    assistant_role_id: Optional[int] = None
+    guild_id: Snowflake
+    notification_channel_id: Optional[Snowflake] = None
+    monitoring_channel_id: Optional[Snowflake] = None
+    monitoring_message_id: Optional[Snowflake] = None
+    pr_actions_channel_id: Optional[Snowflake] = None
+    control_panel_channel_id: Optional[Snowflake] = None
+    control_panel_message_id: Optional[Snowflake] = None
+    assistant_role_id: Optional[Snowflake] = None
     template_stream_online: Optional[str] = None
     template_stream_offline: Optional[str] = None
     template_category_to_gta: Optional[str] = None
@@ -53,4 +54,3 @@ class GuildSettingsResponse(BaseModel):
 
 
 # Broker event
-

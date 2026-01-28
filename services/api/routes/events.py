@@ -59,7 +59,7 @@ async def create_event(
 
 @router.get("/active", response_model=List[EventResponse])
 async def get_active_events(
-    guild_id: int,
+    guild_id: str,
     db=Depends(get_db)
 ):
     """Get active events for a guild."""

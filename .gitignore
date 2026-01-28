@@ -237,3 +237,4 @@ services/*/.env
 services/*/__pycache__/
 services/*/venv/
 services/*/logs/
+db_schema.txt

@@ -157,7 +157,7 @@ async def get_current_user(
     
     return UserResponse(
         id=user["id"],
-        discord_id=user["discord_id"],
+        discord_id=str(user["discord_id"]),
         username=user["username"],
         nickname=user["nickname"],
         role=user["role"],

@@ -5,10 +5,11 @@ Assistant schemas for API requests and responses.
 from datetime import datetime
 from typing import List
 from pydantic import BaseModel, Field
+from schemas.common import Snowflake
 
 
 class AssistantBase(BaseModel):
-    user_id: int = Field(..., description="Discord user ID")
+    user_id: str = Field(..., description="Discord user ID")
 
 
 class AssistantCreate(AssistantBase):
@@ -16,7 +17,7 @@ class AssistantCreate(AssistantBase):
 
 
 class AssistantResponse(BaseModel):
-    pr_id: int
+    pr_id: Snowflake
     total_spec_seconds: int
     session_count: int
     added_at: datetime
@@ -26,7 +27,7 @@ class AssistantResponse(BaseModel):
 
 
 class AssistantStatsResponse(BaseModel):
-    pr_id: int
+    pr_id: Snowflake
     total_spec_seconds: int
     total_spec_formatted: str
     session_count: int

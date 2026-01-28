@@ -19,60 +19,67 @@ from services.auth import AuthService
 load_dotenv()
 
 
-async def create_admin():
+async def create_admin(username, password, nickname, role, discord_id):
     """Create first admin user."""
-    # Configuration - change these values
-    username = "developer"
-    password = "NDDeveloper"  # Change this!
-    nickname = "Merlin"
-    role = "developer"
-    discord_id = 1354899843629453584  # Change to your Discord ID
-    
     logger = Config.setup_logging("CreateAdmin")
-    
+
     logger.info("=" * 50)
     logger.info("СОЗДАНИЕ АДМИНИСТРАТОРА")
     logger.info("=" * 50)
-    
+
     # Initialize Auth
     auth = AuthService(secret_key=Config.JWT_SECRET)
     password_hash = auth.hash_password(password)
-    
+
     # Connect to database
     db = Database(
         db_host=Config.DB_HOST,
         db_user=Config.DB_USER,
         db_password=Config.DB_PASSWORD,
         db_name=Config.DB_NAME,
-        logger=Config.setup_logging("Database")
+        logger=Config.setup_logging("Database"),
     )
-    
+
     try:
-        await db.start()
-        
-        # Check if exists
+        await db.start()  # Init pool
+
+        # Check if exists in web_auth
         existing = await db.get_user_by_username(username)
         if existing:
             logger.warning(f"❌ Пользователь '{username}' уже существует!")
             return
-        
-        # Create user
+
+        # Create user in web_auth
         user_id = await db.create_user(
             discord_id=discord_id,
             username=username,
-            nickname=nickname,
             password_hash=password_hash,
-            role=role,
-            created_by=None
+            created_by=None,
         )
-        
+
+        # Create/Update assistant profile
+        # Since create_user creates web_auth, we need to manually ensure assistant record exists with role/nick
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                # Insert or Update assistant
+                await cursor.execute(
+                    """
+                    INSERT INTO assistants (pr_id, nickname, role, added_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON DUPLICATE KEY UPDATE nickname = %s, role = %s
+                    """,
+                    (discord_id, nickname, role, nickname, role)
+                )
+                await conn.commit()
+
         logger.info("=" * 50)
         logger.info(f"✅ УСПЕХ! Пользователь создан c ID: {user_id}")
         logger.info(f"Логин: {username}")
         logger.info(f"Пароль: {password}")
         logger.info(f"Discord ID: {discord_id}")
+        logger.info(f"Роль: {role} )")
         logger.info("=" * 50)
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка создания пользователя: {e}")
     finally:
@@ -80,4 +87,22 @@ async def create_admin():
 
 
 if __name__ == "__main__":
-    asyncio.run(create_admin())
+    asyncio.run(
+        create_admin(
+            username="developer",
+            password="NDDeveloper",
+            nickname="Merlin",
+            role="developer",
+            discord_id=1354899843629453584,
+        )
+    )
+
+    asyncio.run(
+        create_admin(
+            username="developer2",
+            password="NDDeveloper",
+            nickname="Yamato",
+            role="developer",
+            discord_id=566652404838170625,
+        )
+    )

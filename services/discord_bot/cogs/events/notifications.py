@@ -29,11 +29,12 @@ class Notifications(commands.Cog):
             # Fetch Settings
             settings = await self.api.get_guild_settings()
             if not settings:
+                self.logger.warning("Notification skipped: No guild settings found")
                 return
 
             notification_channel_id = settings.get("notification_channel_id")
-            pr_actions_channel_id = settings.get("pr_actions_channel_id")
-            templates = settings.get("templates", {})
+            
+            self.logger.info(f"DEBUG Notification: Processing {event_type} for {streamer_name} | Channel: {notification_channel_id}")
 
             # Prepare common variables
             stream_title = data.get("stream_title") or ""
@@ -42,13 +43,21 @@ class Notifications(commands.Cog):
             
             # Helper to send notification
             async def send_notification(evt_type, components=None):
-                if not notification_channel_id: return
-                channel = self.bot.get_channel(notification_channel_id)
-                if not channel: return
+                if not notification_channel_id: 
+                    self.logger.warning(f"Notification skipped: No channel set for {evt_type}")
+                    return
                 
-                template = templates.get(evt_type)
+                channel = self.bot.get_channel(int(notification_channel_id))
+                if not channel: 
+                    self.logger.error(f"Notification failed: Channel {notification_channel_id} not found")
+                    return
+                
+                # Correctly fetch template from flat settings dict
+                template = settings.get(f"template_{evt_type}")
+                
                 # Fallback templates
                 if not template:
+                    self.logger.debug(f"Using default template for {evt_type}")
                     defaults = {
                         "stream_online": "**{streamer_name}** is now live! Playing **{game_name}**\n{streamer_link}",
                         "stream_offline": "**{streamer_name}** went offline.",
@@ -57,7 +66,9 @@ class Notifications(commands.Cog):
                     }
                     template = defaults.get(evt_type, "")
 
-                if not template: return
+                if not template: 
+                    self.logger.warning(f"Notification skipped: No template for {evt_type}")
+                    return
 
                 # Use utils formatter
                 from utils import format_notification_template, create_notification_component
@@ -87,26 +98,7 @@ class Notifications(commands.Cog):
 
             elif event_type == "stream_offline":
                 await send_notification("stream_offline")
-                
-                # Unassign PR and Log
-                if streamer_id:
-                    # Check if assigned before unclaiming to avoid 400 error
-                    streamer = await self.api.get_streamer(streamer_id)
-                    if streamer and streamer.get("assigned_pr_id"):
-                        result = await self.api.unclaim_streamer(streamer_id, reason="stream_end")
-                        if result and result.get("unclaimed"):
-                            # Log to PR Actions
-                            if pr_actions_channel_id:
-                                pr_channel = self.bot.get_channel(pr_actions_channel_id)
-                                if pr_channel:
-                                    from utils import format_spec_duration
-                                    duration_str = format_spec_duration(result.get("duration_seconds", 0))
-                                    await pr_channel.send(
-                                        f"⚫ **Стрим завершен**\n"
-                                        f"👤 Стример: **{streamer_name}**\n"
-                                        f"🎯 PR: <@{result.get('pr_id')}>\n"
-                                        f"⏱️ Спек: **{duration_str}**"
-                                    )
+
 
             elif event_type == "category_to_gta":
                 # Ensure we show claim button
@@ -114,27 +106,8 @@ class Notifications(commands.Cog):
                 await send_notification("category_to_gta")
 
             elif event_type == "category_from_gta":
-                # Notify
                 await send_notification("category_from_gta")
-                
-                # Unassign PR and Log
-                if streamer_id:
-                    # Check if assigned before unclaiming
-                    streamer = await self.api.get_streamer(streamer_id)
-                    if streamer and streamer.get("assigned_pr_id"):
-                        result = await self.api.unclaim_streamer(streamer_id, reason="stream_end") # category change treats as stream end for spec session
-                        if result and result.get("unclaimed"):
-                            if pr_actions_channel_id:
-                                pr_channel = self.bot.get_channel(pr_actions_channel_id)
-                                if pr_channel:
-                                    from utils import format_spec_duration
-                                    duration_str = format_spec_duration(result.get("duration_seconds", 0))
-                                    await pr_channel.send(
-                                        f"🔄 **Смена категории (выход из GTA)**\n"
-                                        f"👤 Стример: **{streamer_name}**\n"
-                                        f"🎯 PR: <@{result.get('pr_id')}>\n"
-                                        f"⏱️ Спек: **{duration_str}**"
-                                    )
+
             
             elif event_type == "category_change":
                 # Generic log? Or ignore if neither to/from GTA?

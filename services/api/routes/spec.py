@@ -11,6 +11,7 @@ from schemas.spec import (
     SpecClaimRequest,
     SpecUnclaimRequest,
     SpecTransferRequest,
+    SpecSwapRequest,
     SpecSessionResponse,
     ActiveSpecResponse,
 )
@@ -186,6 +187,42 @@ async def transfer_streamer(
         "streamer_name": streamer["streamer_name"],
         "from_pr_id": data.from_pr_id,
         "to_pr_id": data.to_pr_id,
+    }
+
+
+@router.post("/swap")
+async def swap_streamers(
+    data: SpecSwapRequest,
+    db=Depends(get_db),
+    broker=Depends(get_broker),
+):
+    """Swap streamers between two PR assistants."""
+    if data.pr1_id == data.pr2_id:
+        raise HTTPException(status_code=400, detail="Нельзя обменяться с самим собой")
+    
+    try:
+        result = await db.swap_pr_streamers(data.pr1_id, data.pr2_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    if broker:
+        await broker.publish(
+            "spec.swapped",
+            {
+                "event": "spec.swapped",
+                "pr1_id": data.pr1_id,
+                "pr2_id": data.pr2_id,
+                "pr1_new_streamer": result["pr1_new_streamer"]["streamer_name"],
+                "pr2_new_streamer": result["pr2_new_streamer"]["streamer_name"],
+            },
+        )
+    
+    return {
+        "status": "swapped",
+        "pr1_id": data.pr1_id,
+        "pr1_new_streamer": result["pr1_new_streamer"]["streamer_name"],
+        "pr2_id": data.pr2_id,
+        "pr2_new_streamer": result["pr2_new_streamer"]["streamer_name"],
     }
 
 

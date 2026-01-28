@@ -1,31 +1,35 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
+from schemas.common import Snowflake
+
 
 class EventBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: str = Field(..., max_length=1000)
-    required_pr_count: int = Field(..., gt=0)
+    required_pr_count: int = Field(default=1, gt=0)
     start_time: Optional[datetime] = None
-    channel_id: int
+    channel_id: Optional[Snowflake] = None
+
 
 class EventCreate(EventBase):
-    created_by: int
-    guild_id: int
+    created_by: Snowflake
+    guild_id: Snowflake
+
 
 class EventResponse(EventBase):
     id: int
     is_active: bool
     created_at: datetime
-    created_by: int
-    message_id: Optional[int] = None
+    created_by: Optional[Snowflake] = None
+    message_id: Optional[Snowflake] = None
     notification_sent: bool
     current_participants: int = 0  # To be filled by query count
 
 
-
 class EventJoinRequest(BaseModel):
-    user_id: int
+    user_id: Snowflake
+
 
 class EventEndResponse(BaseModel):
     status: str

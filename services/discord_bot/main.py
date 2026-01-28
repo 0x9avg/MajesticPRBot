@@ -15,15 +15,17 @@ from discord_bot import DiscordBot
 async def main():
     """Main entry point."""
     logger = Config.setup_logging("Main")
-    
+
     # Validate config
-    missing = Config.validate()
+    missing = Config.validate_env_vars()
     if missing:
-        logger.error(f"Missing required config: {', '.join(missing)}")
+        logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
-    
+
+    logger.info("✓ Environment variables validated")
+
     logger.info("Starting Discord Bot microservice...")
-    
+
     # Initialize API client
     api_client = APIClient(
         base_url=Config.API_BASE_URL,
@@ -31,7 +33,7 @@ async def main():
         logger=Config.setup_logging("APIClient"),
     )
     logger.info(f"✓ API client configured: {Config.API_BASE_URL}")
-    
+
     # Initialize broker consumer (optional)
     broker = None
     try:
@@ -45,20 +47,22 @@ async def main():
             queue_name=Config.RABBITMQ_QUEUE,
             logger=Config.setup_logging("Broker"),
         )
-        logger.info(f"✓ Broker configured: {Config.RABBITMQ_HOST}:{Config.RABBITMQ_PORT}")
+        logger.info(
+            f"✓ Broker configured: {Config.RABBITMQ_HOST}:{Config.RABBITMQ_PORT}"
+        )
     except Exception as e:
         logger.warning(f"Broker configuration failed, running without: {e}")
-    
+
     # Create and start bot
     bot = DiscordBot(
         api_client=api_client,
         broker_consumer=broker,
         logger=Config.setup_logging("DiscordBot"),
     )
-    
+
     # Load cogs
     bot.setup_cogs()
-    
+
     # Run
     try:
         await bot.start_bot()

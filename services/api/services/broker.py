@@ -176,7 +176,7 @@ class BrokerService:
             "reason": reason,
         })
     
-    async def emit_guild_settings_updated(self, guild_id: int, data: dict = None) -> bool:
+    async def emit_guild_settings_updated(self, guild_id: str, data: dict = None) -> bool:
         """Emit guild.settings.updated event."""
         return await self.publish("guild.settings.updated", {
             "event": "guild.settings.updated",
@@ -191,3 +191,77 @@ class BrokerService:
             "username": username,
             "added_by": added_by_data or {},
         })
+
+    # =========================================================================
+    # Stream State Events (called from update_streamer_status)
+    # =========================================================================
+
+    async def emit_stream_online(
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        game_id: int = None,
+        game_name: str = None,
+        stream_title: str = None,
+        thumbnail_url: str = None,
+        guild_id: str = None,
+    ) -> bool:
+        """Emit stream.state.online event."""
+        return await self.publish("stream.state.online", {
+            "event": "online",
+            "streamer_id": streamer_id,
+            "streamer_name": streamer_name,
+            "is_online": True,
+            "game_id": game_id,
+            "game_name": game_name,
+            "stream_title": stream_title,
+            "thumbnail_url": thumbnail_url,
+            "guild_id": guild_id,
+        })
+
+    async def emit_stream_offline(
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        guild_id: str = None,
+    ) -> bool:
+        """Emit stream.state.offline event."""
+        return await self.publish("stream.state.offline", {
+            "event": "offline",
+            "streamer_id": streamer_id,
+            "streamer_name": streamer_name,
+            "is_online": False,
+            "guild_id": guild_id,
+        })
+
+    async def emit_category_change(
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        old_game_id: str,
+        new_game_id: str,
+        new_game_name: str,
+        stream_title: str = None,
+        thumbnail_url: str = None,
+        guild_id: str = None,
+    ) -> bool:
+        """Emit stream.state.category event."""
+        return await self.publish("stream.state.category", {
+            "event": "category_change",
+            "streamer_id": streamer_id,
+            "streamer_name": streamer_name,
+            "old_game_id": old_game_id,
+            "new_game_id": new_game_id,
+            "new_game_name": new_game_name,
+            "stream_title": stream_title,
+            "thumbnail_url": thumbnail_url,
+            "guild_id": guild_id,
+        })
+
+    async def emit_monitoring_refresh(self, guild_id: str = None) -> bool:
+        """Request monitoring refresh."""
+        return await self.publish("monitoring.refresh", {
+            "event": "refresh",
+            "guild_id": guild_id,
+        })
+

@@ -1,6 +1,7 @@
 """Utility functions for Discord Bot (Ported from Legacy)."""
 
 import disnake
+from disnake.ext import commands
 import calendar
 import datetime
 import logging
@@ -24,6 +25,37 @@ def format_spec_duration(seconds: int) -> str:
     if hours > 0:
         return f"{hours}ч {minutes}м" if minutes > 0 else f"{hours}ч"
     return f"{minutes}м"
+
+async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
+    """
+    Send message to the PR actions log channel.
+    
+    Args:
+        bot: The Discord bot instance (must have api_client)
+        message: The formatted message to send
+        
+    Returns:
+        True if message was sent successfully, False otherwise
+    """
+    try:
+        settings = await bot.api_client.get_guild_settings()
+        if not settings:
+            return False
+        
+        channel_id = settings.get("pr_actions_channel_id")
+        if not channel_id:
+            return False
+        
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            return False
+        
+        await channel.send(message)
+        return True
+        
+    except Exception as e:
+        bot.logger.error(f"Failed to send PR action log: {e}")
+        return False
 
 
 def create_streamers_embed(

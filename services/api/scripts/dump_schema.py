@@ -35,10 +35,10 @@ def format_table(headers, rows):
 
 async def dump_schema():
     db = Database(
-        db_host=Config.DB_HOST,
-        db_user=Config.DB_USER,
-        db_password=Config.DB_PASSWORD,
-        db_name=Config.DB_NAME,
+        db_host=Config.db_host,
+        db_user=Config.db_user,
+        db_password=Config.db_password,
+        db_name=Config.db_name,
         logger=Config.setup_logging("FixEventsSchema")
     )
     
@@ -54,7 +54,7 @@ async def dump_schema():
                 table_names = [list(t.values())[0] for t in tables]
                 
                 with open(output_file, "w", encoding="utf-8") as f:
-                    f.write(f"DATABASE SCHEMA: {Config.DB_NAME}\n")
+                    f.write(f"DATABASE SCHEMA: {Config.db_name}\n")
                     f.write("=" * 50 + "\n\n")
                     
                     for table in table_names:

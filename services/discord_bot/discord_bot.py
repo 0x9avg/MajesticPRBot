@@ -55,7 +55,7 @@ class DiscordBot(commands.Bot):
 
     async def start_bot(self):
         """Start the bot with token from config."""
-        await self.start(Config.DISCORD_TOKEN)
+        await self.start(Config.discord_token)
 
     async def on_ready(self):
         """Called when bot is ready."""
@@ -63,11 +63,11 @@ class DiscordBot(commands.Bot):
         self.logger.info(f"Bot ID: {self.user.id}, Guilds: {len(self.guilds)}")
 
         # Check target guild
-        guild = self.get_guild(int(Config.GUILD_ID))
+        guild = self.get_guild(int(Config.guild_id))
         if guild:
             self.logger.info(f"✓ Connected to target guild: {guild.name}")
         else:
-            self.logger.error(f"⚠ Bot is NOT in target guild {Config.GUILD_ID}!")
+            self.logger.error(f"⚠ Bot is NOT in target guild {Config.guild_id}!")
 
         # Start broker consumer if available
         if self.broker:

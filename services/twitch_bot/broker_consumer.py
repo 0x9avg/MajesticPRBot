@@ -19,12 +19,12 @@ class BrokerConsumer:
     def __init__(
         self,
         bot=None,
-        host: str = Config.RABBITMQ_HOST,
-        port: int = Config.RABBITMQ_PORT,
-        user: str = Config.RABBITMQ_USER,
-        password: str = Config.RABBITMQ_PASSWORD,
-        vhost: str = Config.RABBITMQ_VHOST,
-        exchange_name: str = Config.RABBITMQ_EXCHANGE,
+        host: str = Config.rabbitmq_host,
+        port: int = Config.rabbitmq_port,
+        user: str = Config.rabbitmq_user,
+        password: str = Config.rabbitmq_password,
+        vhost: str = Config.rabbitmq_vhost,
+        exchange_name: str = Config.rabbitmq_exchange,
         logger: Optional[logging.Logger] = None,
     ):
         self.bot = bot
@@ -143,7 +143,7 @@ class BrokerConsumer:
                     is_online = stream_info.get("is_online", False)
 
                     # 3. Create full streamer in API (which inserts to DB)
-                    await self.bot.api.create_streamer_full(
+                    await self.bot.api.create_streamer(
                         streamer_id=twitch_id,
                         streamer_name=username,
                         is_online=is_online,

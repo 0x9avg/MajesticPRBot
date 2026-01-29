@@ -40,7 +40,7 @@ from schemas.spec import (
 )
 
 # Monitoring
-from schemas.monitoring import MonitoringRefreshRequest
+from schemas.monitoring import MonitoringRefreshResponse
 
 __all__ = [
     # Auth
@@ -70,5 +70,5 @@ __all__ = [
     "SpecSessionResponse",
     "ActiveSpecResponse",
     # Monitoring
-    "MonitoringRefreshRequest",
+    "MonitoringRefreshResponse",
 ]

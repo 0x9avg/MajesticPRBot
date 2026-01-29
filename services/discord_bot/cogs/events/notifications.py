@@ -80,7 +80,7 @@ class Notifications(commands.Cog):
                 if components is None:
                     # Logic to decide if claim button needed
                     # Only for online/to_gta AND if game is GTA 5
-                    is_gta = str(data.get("new_game_id") or data.get("game_id")) == Config.GTA5_GAME_ID
+                    is_gta = str(data.get("new_game_id") or data.get("game_id")) == Config.gta5_game_id
                     show_claim = is_gta and (evt_type in ["stream_online", "category_to_gta"])
                     
                     components = create_notification_component(

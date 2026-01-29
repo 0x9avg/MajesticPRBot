@@ -436,6 +436,27 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
+                        "SELECT streamer_id FROM streamers WHERE streamer_name = %s", 
+                        (streamer_name,)
+                    )
+                    existing_by_name = await cursor.fetchone()
+                    
+                    if existing_by_name and existing_by_name['streamer_id'] != streamer_id:
+                        # Conflict! Name exists but ID is different.
+                        # This happens if a streamer channel was recycled or ID changed.
+                        old_id = existing_by_name['streamer_id']
+                        # Rename old record to free the name
+                        new_name_old = f"old_{old_id}"
+                        self.logger.warning(
+                            f"Streamer Name Collision: '{streamer_name}' is taken by ID {old_id}. "
+                            f"Renaming {old_id} to '{new_name_old}' to insert new ID {streamer_id}."
+                        )
+                        await cursor.execute(
+                            "UPDATE streamers SET streamer_name = %s WHERE streamer_id = %s",
+                            (new_name_old, old_id)
+                        )
+                    
+                    await cursor.execute(
                         """
                         INSERT INTO streamers (
                             streamer_id, streamer_name, is_online, stream_started_at, priority, 
@@ -904,7 +925,7 @@ class Database:
             ValueError: Если тип события недопустим
         """
         # SQL injection prevention: validate event_type against whitelist
-        if event_type not in Config.ALLOWED_EVENT_TYPES:
+        if event_type not in Config.allowed_event_types:
             self.logger.error(
                 f"Invalid event_type '{event_type}' - possible SQL injection attempt"
             )
@@ -921,12 +942,12 @@ class Database:
                     result = await cursor.fetchone()
                     if result and result.get(column_name):
                         return result[column_name]
-                    return Config.TEMPLATE_DEFAULTS.get(event_type, "")
+                    return Config.template_defaults.get(event_type, "")
         except Exception as e:
             self.logger.error(
                 f"Failed to get template for guild {guild_id}: {e}", exc_info=True
             )
-            return Config.TEMPLATE_DEFAULTS.get(event_type, "")
+            return Config.template_defaults.get(event_type, "")
 
     async def update_notification_template(
         self, guild_id: str, event_type: str, template: str
@@ -940,7 +961,7 @@ class Database:
             template: Новый шаблон
         """
         # SQL injection prevention: validate event_type against whitelist
-        if event_type not in Config.ALLOWED_EVENT_TYPES:
+        if event_type not in Config.allowed_event_types:
             self.logger.error(
                 f"Invalid event_type '{event_type}' - possible SQL injection attempt"
             )
@@ -1110,7 +1131,7 @@ class Database:
             # Record Stats (Outside transaction)
             if duration_seconds > 0:
                 await self.record_spec_session(
-                    pr_id, Config.GUILD_ID, started_at, now, priority
+                    pr_id, Config.guild_id, started_at, now, priority
                 )
 
             return {
@@ -1511,7 +1532,7 @@ class Database:
                         AND assigned_pr_id IS NULL
                         ORDER BY streamer_name ASC
                         """,
-                        (Config.GTA5_GAME_ID,),
+                        (Config.gta5_game_id,),
                     )
                     results = await cursor.fetchall() or []
                     for r in results:
@@ -1538,6 +1559,8 @@ class Database:
         message_id: int,
         created_by: int,
         start_time=None,
+        required_pr_count=1,
+        notification_sent=False,
     ) -> int:
         """Создание нового события."""
         try:
@@ -1549,17 +1572,19 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO events (
-                             name, description, channel_id, message_id, 
-                            created_by, start_time
-                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                             name, description, channel_id, message_id, required_pr_count,
+                            created_by, start_time, notification_sent
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             name,
                             description,
                             channel_id,
                             message_id,
+                            required_pr_count,
                             created_by,
                             start_time,
+                            notification_sent,
                         ),
                     )
                     await conn.commit()
@@ -1693,7 +1718,7 @@ class Database:
                             duration = 0
 
                         await self.record_spec_session(
-                            user_id, Config.GUILD_ID, effective_start, now, priority=0
+                            user_id, Config.guild_id, effective_start, now, priority=0
                         )
 
                         results.append({"user_id": user_id, "duration": duration})
@@ -1850,10 +1875,10 @@ class Database:
                         }
 
                     # Return defaults if not found
-                    return {k: v for k, v in Config.DEFAULT_POINTS.items()}
+                    return {k: v for k, v in Config.default_points.items()}
         except Exception as e:
             self.logger.error(f"Failed to get points config: {e}")
-            return {k: v for k, v in Config.DEFAULT_POINTS.items()}
+            return {k: v for k, v in Config.default_points.items()}
 
     @db_retry()
     async def set_points_config(self, guild_id: str, rates: dict):
@@ -2040,7 +2065,7 @@ class Database:
                         effective_start = max(started_at, event_start_time)
 
                         await self.record_spec_session(
-                            user_id, Config.GUILD_ID, effective_start, now, priority=0
+                            user_id, Config.guild_id, effective_start, now, priority=0
                         )
 
                     await conn.commit()
@@ -2362,32 +2387,6 @@ class Database:
                 f"Failed to delete assistant {user_id}: {e}", exc_info=True
             )
             return False
-
-    @db_retry()
-    async def subtract_pr_time(self, user_id: int, seconds: int) -> int:
-        """Вычитание времени из total_spec_seconds ассистента."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Get current
-                    await cursor.execute(
-                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
-                        (user_id,),
-                    )
-                    result = await cursor.fetchone()
-                    current = result["total_spec_seconds"] if result else 0
-                    new_total = max(0, current - seconds)
-
-                    # Update
-                    await cursor.execute(
-                        "UPDATE assistants SET total_spec_seconds = %s WHERE pr_id = %s",
-                        (new_total, user_id),
-                    )
-                    await conn.commit()
-                    return new_total
-        except Exception as e:
-            self.logger.error(f"Failed to subtract PR time: {e}", exc_info=True)
-            return 0
 
     # =========================================================================
     # Guild Extended Settings (for routes refactoring)

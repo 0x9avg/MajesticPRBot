@@ -60,6 +60,8 @@ class APIClient:
                     return {"status": "success"}
 
                 result = await resp.json()
+                if not isinstance(result, (dict, list)) and result is not None:
+                    self.logger.warning(f"API returned non-structured JSON: {type(result)} val: {result} for {url}")
 
                 if resp.status >= 400:
                     # 4xx = expected business logic (conflict, not found, etc.)
@@ -330,19 +332,17 @@ class APIClient:
         result = await self._request("GET", "/events/scheduled")
         return result if isinstance(result, list) else []
 
-    async def join_event(self, event_id: int, user_id: int) -> bool:
+    async def join_event(self, event_id: int, user_id: int) -> Optional[Dict]:
         """Join an event."""
-        result = await self._request(
+        return await self._request(
             "POST", f"/events/{event_id}/join", data={"user_id": user_id}
         )
-        return result is not None and result.get("status") == "joined"
 
-    async def leave_event(self, event_id: int, user_id: int) -> int:
-        """Leave an event. Returns duration."""
-        result = await self._request(
+    async def leave_event(self, event_id: int, user_id: int) -> Optional[Dict]:
+        """Leave an event."""
+        return await self._request(
             "POST", f"/events/{event_id}/leave", data={"user_id": user_id}
         )
-        return result.get("duration", 0) if result else 0
 
     async def end_event(self, event_id: int) -> Optional[Dict]:
         """End an event."""

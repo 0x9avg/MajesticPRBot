@@ -51,10 +51,10 @@ EVENTS_LIST = [
 
 async def create_test_data():
     db = Database(
-        db_host=Config.DB_HOST,
-        db_user=Config.DB_USER,
-        db_password=Config.DB_PASSWORD,
-        db_name=Config.DB_NAME,
+        db_host=Config.db_host,
+        db_user=Config.db_user,
+        db_password=Config.db_password,
+        db_name=Config.db_name,
         logger=logger
     )
 

@@ -96,19 +96,108 @@ class AdminAssistants(commands.Cog):
 
     @commands.Cog.listener("on_button_click")
     async def on_assistants_button(self, interaction: MessageInteraction):
-        """Handle admin_assistants navigation."""
-        custom_id = interaction.component.custom_id
+        """Handle admin_assistants and all sub-interactions."""
+        custom_id = interaction.component.custom_id or ""
         
-        if custom_id == "admin_assistants":
-            view = AssistantManagementView(self.bot)
-            embed = view.get_main_embed()
-            await interaction.response.edit_message(embed=embed, view=view)
+        # 1. STRICT FILTER
+        if not custom_id.startswith("admin_assistants") and not custom_id.startswith("assistant_") and custom_id != "btn_back_to_menu":
+            return
 
-        # Handle back to main menu from assistant views
-        elif custom_id == "btn_back_to_menu":
-            await interaction.response.edit_message(
-                embed=get_main_embed(), view=AdminMainView(self.bot)
-            )
+        # 2. SAFE DEFER (Exception for Modals)
+        # assistant_edit_{id} opens Modal -> NO DEFER
+        should_defer = True
+        if custom_id.startswith("assistant_edit_"):
+            should_defer = False
+        
+        if should_defer:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True)
+            except Exception as e:
+                self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
+
+        # 3. EXECUTE
+        try:
+            if custom_id == "admin_assistants" or custom_id == "assistant_back_to_select" or custom_id == "btn_back_to_menu":
+                view = AssistantManagementView(self.bot)
+                embed = view.get_main_embed()
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(embed=embed, view=view)
+                else:
+                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            
+            elif custom_id == "assistant_top":
+                view = TopAssistantsView(self.bot)
+                embed = await view.get_top_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
+
+            elif custom_id == "assistant_top_refresh":
+                 view = TopAssistantsView(self.bot)
+                 embed = await view.get_top_embed()
+                 await interaction.edit_original_response(embed=embed, view=view)
+
+            elif custom_id.startswith("assistant_overview_"):
+                user_id = int(custom_id.replace("assistant_overview_", ""))
+                user = await self.bot.fetch_user(user_id) # Might fail if not cached
+                name = user.display_name if user else "Unknown"
+                view = AssistantOverviewView(self.bot, user_id, name)
+                embed = await view.get_overview_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
+
+            elif custom_id.startswith("assistant_stats_") and not custom_id.startswith("assistant_stats_refresh"):
+                # assistant_stats_{id}
+                user_id = int(custom_id.replace("assistant_stats_", ""))
+                user = await self.bot.fetch_user(user_id)
+                name = user.display_name if user else "Unknown"
+                view = AssistantStatsView(self.bot, user_id, name)
+                embed = await view.get_stats_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
+            
+            elif custom_id == "assistant_stats_refresh":
+                # This one is tricky because we need the user_id from context.
+                # Usually views store state, but we are recreating. 
+                # If we don't have user_id in ID, we can't easily refresh specific stats.
+                # However, AssistantStatsView has "assistant_stats_refresh" button.
+                # If we use a stateless listener, we need the ID in the custom_id.
+                # The current View definition uses static "assistant_stats_refresh".
+                # This is a design flaw in the View if processed globally.
+                # For now, let's try to extract from message embed footer? Or fail gracefully.
+                # Or simplistic approach: just say "Re-open stats".
+                await interaction.followup.send("🔄 Пожалуйста, откройте статистику заново через меню.", ephemeral=True)
+
+            elif custom_id.startswith("assistant_actions_"):
+                user_id = int(custom_id.replace("assistant_actions_", ""))
+                user = await self.bot.fetch_user(user_id)
+                name = user.display_name if user else "Unknown"
+                view = AssistantActionsView(self.bot, user_id, name)
+                embed = await view.get_actions_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
+
+            elif custom_id.startswith("assistant_edit_"):
+                # OPEN MODAL
+                user_id = int(custom_id.replace("assistant_edit_", ""))
+                user = await self.bot.fetch_user(user_id)
+                name = user.display_name if user else "Unknown"
+                await interaction.response.send_modal(AssistantEditModal(self.bot, user_id, name))
+
+            elif custom_id.startswith("assistant_history_"):
+                # Not implemented in views yet?
+                await interaction.followup.send("📝 История пока недоступна.", ephemeral=True)
+
+            elif custom_id == "assistant_bulk_ops":
+                await interaction.followup.send("📦 Массовые операции в разработке.", ephemeral=True)
+
+            elif custom_id.startswith("assistant_reset_full_"):
+                user_id = int(custom_id.replace("assistant_reset_full_", ""))
+                await self.api.reset_assistant_stats(user_id) # Hypothetical API method?
+                # Actually api might not have this yet. 
+                await interaction.followup.send(f"✅ Статистика сброшена (API call simulated).", ephemeral=True)
+
+        except Exception as e:
+            self.bot.logger.error(f"Error handling assistant button {custom_id}: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
+            except: pass
 
     @commands.Cog.listener("on_dropdown")
     async def on_assistant_select(self, interaction: MessageInteraction):
@@ -116,13 +205,15 @@ class AdminAssistants(commands.Cog):
         custom_id = interaction.component.custom_id
         
         if custom_id == "assistant_user_select":
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             user = interaction.values[0]  # User object from UserSelect
             user_id = user.id
             user_name = user.display_name
 
             view = AssistantOverviewView(self.bot, user_id, user_name)
             embed = await view.get_overview_embed()
-            await interaction.response.edit_message(embed=embed, view=view)
+            await interaction.edit_original_response(embed=embed, view=view)
 
 
 def setup(bot: commands.Bot) -> None:

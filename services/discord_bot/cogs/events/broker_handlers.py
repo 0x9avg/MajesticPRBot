@@ -57,15 +57,15 @@ class BrokerHandlers(commands.Cog):
             new_id = data.get("new_game_id")
             
             self.logger.info(
-                f"DEBUG Handler: {data.get('streamer_name')} | Old: {old_id} | New: {new_id} | GTA: {Config.GTA5_GAME_ID} | NewName: {data.get('new_game_name')}"
+                f"DEBUG Handler: {data.get('streamer_name')} | Old: {old_id} | New: {new_id} | GTA: {Config.gta5_game_id} | NewName: {data.get('new_game_name')}"
             )
             
             await self._refresh_monitoring()
 
-            if str(new_id) == Config.GTA5_GAME_ID and str(old_id) != Config.GTA5_GAME_ID:
+            if str(new_id) == Config.gta5_game_id and str(old_id) != Config.gta5_game_id:
                 self.logger.info("-> Sending category_to_gta")
                 await self._handle_notification("category_to_gta", data)
-            elif str(old_id) == Config.GTA5_GAME_ID and str(new_id) != Config.GTA5_GAME_ID:
+            elif str(old_id) == Config.gta5_game_id and str(new_id) != Config.gta5_game_id:
                 self.logger.info("-> Sending category_from_gta")
                 await self._handle_notification("category_from_gta", data)
 

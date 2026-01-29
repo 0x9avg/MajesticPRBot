@@ -33,9 +33,9 @@ class TwitchBot(AutoClient):
         twitchio.utils.setup_logging(level=logging.INFO)
         
         super().__init__(
-            client_id=Config.TWITCH_CLIENT_ID,
-            client_secret=Config.TWITCH_CLIENT_SECRET,
-            bot_id=Config.TWITCH_BOT_ID,
+            client_id=Config.twitch_client_id,
+            client_secret=Config.twitch_client_secret,
+            bot_id=Config.twitch_bot_id,
             subscriptions=self.subs,
             force_subscribe=True,
         )
@@ -90,7 +90,7 @@ class TwitchBot(AutoClient):
             
             streamer_ids = [
                 s["streamer_id"] for s in streamers 
-                if s["streamer_id"] != Config.TWITCH_BOT_ID
+                if s["streamer_id"] != Config.twitch_bot_id
             ]
             
             # Batch fetch online status
@@ -110,7 +110,7 @@ class TwitchBot(AutoClient):
             for streamer in streamers:
                 streamer_id = streamer["streamer_id"]
                 
-                if streamer_id == Config.TWITCH_BOT_ID:
+                if streamer_id == Config.twitch_bot_id:
                     continue
                 
                 # Add to subscription list
@@ -124,7 +124,7 @@ class TwitchBot(AutoClient):
             status_updates = []
             for streamer in streamers:
                 streamer_id = streamer["streamer_id"]
-                if streamer_id == Config.TWITCH_BOT_ID:
+                if streamer_id == Config.twitch_bot_id:
                     continue
                     
                 stream = online_streams.get(str(streamer_id))
@@ -265,7 +265,7 @@ class TwitchBot(AutoClient):
                 return
             
             # Check for GTA category changes BEFORE updating
-            switched_from_gta = old_game_id == Config.GTA5_GAME_ID and new_game_id != Config.GTA5_GAME_ID
+            switched_from_gta = old_game_id == Config.gta5_game_id and new_game_id != Config.gta5_game_id
             
             # Auto-unclaim on leaving GTA (API will emit spec.unclaimed)
             if switched_from_gta and streamer_db.get("assigned_pr_id"):
@@ -283,7 +283,7 @@ class TwitchBot(AutoClient):
                 stream_thumbnail_url=stream_info.get("thumbnail_url"),
             )
             
-            switched_to_gta = new_game_id == Config.GTA5_GAME_ID and (old_game_id is None or old_game_id != Config.GTA5_GAME_ID)
+            switched_to_gta = new_game_id == Config.gta5_game_id and (old_game_id is None or old_game_id != Config.gta5_game_id)
             if switched_to_gta or switched_from_gta:
                 self.logger.info(f"🎮 Category change: {payload.broadcaster.name} {'→' if switched_to_gta else '←'} GTA 5")
                 
@@ -292,7 +292,7 @@ class TwitchBot(AutoClient):
     
     async def add_notification(self, streamer_id: int) -> None:
         """Add EventSub subscriptions for a streamer."""
-        if streamer_id == Config.TWITCH_BOT_ID:
+        if streamer_id == Config.twitch_bot_id:
             return
         
         try:

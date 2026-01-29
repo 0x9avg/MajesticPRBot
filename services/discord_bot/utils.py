@@ -39,7 +39,7 @@ async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
     """
     try:
         settings = await bot.api_client.get_guild_settings()
-        if not settings:
+        if not settings or not isinstance(settings, dict):
             return False
         
         channel_id = settings.get("pr_actions_channel_id")
@@ -115,7 +115,7 @@ def create_streamers_embed(
         game_name = streamer.get("game_name") or "Не в игре"
         priority = streamer.get("priority", 0)
         game_id = str(streamer.get("game_id", ""))
-        game_emoji = "🟢" if game_id == Config.GTA5_GAME_ID else "🟠"
+        game_emoji = "🟢" if game_id == Config.gta5_game_id else "🟠"
 
         embed.add_field(
             name=f"{game_emoji} {streamer_name}",
@@ -195,7 +195,7 @@ def create_streamers_component(
         game_name = streamer.get("game_name") or "Не в игре"
         priority = streamer.get("priority", 0)
         game_id = str(streamer.get("game_id", ""))
-        game_emoji = "🟢" if game_id == Config.GTA5_GAME_ID else "🟠"
+        game_emoji = "🟢" if game_id == Config.gta5_game_id else "🟠"
         thumbnail_url = (
             streamer.get("stream_thumbnail_url")
             or "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"

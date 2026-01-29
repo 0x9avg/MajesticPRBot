@@ -28,27 +28,27 @@ async def main():
 
     # Initialize API client
     api_client = APIClient(
-        base_url=Config.API_BASE_URL,
-        timeout=Config.API_TIMEOUT,
+        base_url=Config.api_base_url,
+        timeout=Config.api_timeout,
         logger=Config.setup_logging("APIClient"),
     )
-    logger.info(f"✓ API client configured: {Config.API_BASE_URL}")
+    logger.info(f"✓ API client configured: {Config.api_base_url}")
 
     # Initialize broker consumer (optional)
     broker = None
     try:
         broker = BrokerConsumer(
-            host=Config.RABBITMQ_HOST,
-            port=Config.RABBITMQ_PORT,
-            user=Config.RABBITMQ_USER,
-            password=Config.RABBITMQ_PASSWORD,
-            vhost=Config.RABBITMQ_VHOST,
-            exchange_name=Config.RABBITMQ_EXCHANGE,
-            queue_name=Config.RABBITMQ_QUEUE,
+            host=Config.rabbitmq_host,
+            port=Config.rabbitmq_port,
+            user=Config.rabbitmq_user,
+            password=Config.rabbitmq_password,
+            vhost=Config.rabbitmq_vhost,
+            exchange_name=Config.rabbitmq_exchange,
+            queue_name=Config.rabbitmq_queue,
             logger=Config.setup_logging("Broker"),
         )
         logger.info(
-            f"✓ Broker configured: {Config.RABBITMQ_HOST}:{Config.RABBITMQ_PORT}"
+            f"✓ Broker configured: {Config.rabbitmq_host}:{Config.rabbitmq_port}"
         )
     except Exception as e:
         logger.warning(f"Broker configuration failed, running without: {e}")

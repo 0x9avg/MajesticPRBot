@@ -96,7 +96,8 @@ class EventCreateModal(disnake.ui.Modal):
         super().__init__(title="Создание события", components=components)
 
     async def callback(self, interaction: disnake.ModalInteraction):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         try:
             name = interaction.text_values["name"]
             description = interaction.text_values["description"]
@@ -246,7 +247,8 @@ class EventEndSelect(disnake.ui.StringSelect):
         )
 
     async def callback(self, interaction: MessageInteraction):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         event_id = int(self.values[0])
 
         try:
@@ -322,14 +324,17 @@ class EventsView(disnake.ui.View):
     )
     async def end_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
         """Show event select for ending."""
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+            
         events = await self.bot.api_client.get_active_events(self.guild_id)
         if not events:
-            await interaction.response.send_message("Нет активных событий", ephemeral=True)
+            await interaction.followup.send("Нет активных событий", ephemeral=True)
             return
 
         view = disnake.ui.View(timeout=None)
         view.add_item(EventEndSelect(events))
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Выберите событие для завершения:", view=view, ephemeral=True
         )
 
@@ -342,7 +347,11 @@ class EventsView(disnake.ui.View):
     )
     async def back_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
         from cogs.admin.core import AdminMainView, get_main_embed
-        await interaction.response.edit_message(
+        
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+            
+        await interaction.edit_original_response(
             embed=get_main_embed(), view=AdminMainView(self.bot)
         )
 
@@ -401,7 +410,8 @@ class EventsManager(commands.Cog):
         if interaction.component.custom_id != "admin_events":
             return
 
-        await interaction.response.defer()
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         embed = await get_events_embed(self.api, interaction.guild_id)
         await interaction.edit_original_response(
             embed=embed, view=EventsView(self.bot, interaction.guild_id)

@@ -1,104 +1,118 @@
 """
 Конфигурация Twitch Bot микросервиса.
 Полностью независимый от других сервисов.
+Uses pydantic-settings for type validation and .env loading.
 """
 
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, ClassVar
 from logging.handlers import RotatingFileHandler
-from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
-load_dotenv()
 
-
-class Config:
-    """Twitch Bot Service configuration."""
+class Config(BaseSettings):
+    """Twitch Bot Service configuration using pydantic-settings."""
 
     # ==========================================================================
     # Twitch Settings
     # ==========================================================================
-    TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
-    TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
-    TWITCH_BOT_ID = int(os.getenv("TWITCH_BOT_ID", "0"))
+    twitch_client_id: str = Field(default="", alias="TWITCH_CLIENT_ID")
+    twitch_client_secret: str = Field(default="", alias="TWITCH_CLIENT_SECRET")
+    twitch_bot_id: int = Field(default=0, alias="TWITCH_BOT_ID")
 
     # ==========================================================================
     # API Service Connection
     # ==========================================================================
-    API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-    API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
+    api_base_url: str = Field(default="http://localhost:8000", alias="API_BASE_URL")
+    api_timeout: int = Field(default=30, alias="API_TIMEOUT")
 
     # ==========================================================================
     # RabbitMQ Settings
     # ==========================================================================
-    RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
-    RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
-    RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
-    RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
-    RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
-    RABBITMQ_EXCHANGE = "prmajesticbot"
+    rabbitmq_host: str = Field(default="localhost", alias="RABBITMQ_HOST")
+    rabbitmq_port: int = Field(default=5672, alias="RABBITMQ_PORT")
+    rabbitmq_user: str = Field(default="guest", alias="RABBITMQ_USER")
+    rabbitmq_password: str = Field(default="guest", alias="RABBITMQ_PASSWORD")
+    rabbitmq_vhost: str = Field(default="/", alias="RABBITMQ_VHOST")
+    rabbitmq_exchange: str = "prmajesticbot"
 
     # ==========================================================================
     # Game IDs
     # ==========================================================================
-    GTA5_GAME_ID = "32982"
+    gta5_game_id: str = "32982"
 
     # ==========================================================================
     # Guild (for routing events to correct Discord server)
     # ==========================================================================
-    GUILD_ID = str(os.getenv("GUILD_ID", "0"))
+    guild_id: str = Field(default="0", alias="GUILD_ID")
 
     # ==========================================================================
-    # Environment Validation
+    # Logging
     # ==========================================================================
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    
+    # ClassVars are not validated or loaded from env
+    log_dir: ClassVar[str] = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../logs")
+    )
+    log_file: ClassVar[str] = "twitch_bot.log"
+    log_format: ClassVar[str] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-    REQUIRED_ENV_VARS = [
+    # ==========================================================================
+    # Required Environment Variables for Validation
+    # ==========================================================================
+    required_env_vars: ClassVar[List[str]] = [
         "TWITCH_CLIENT_ID",
         "TWITCH_CLIENT_SECRET",
         "TWITCH_BOT_ID",
         "GUILD_ID",
     ]
 
-    @classmethod
-    def validate_env_vars(cls) -> Optional[List[str]]:
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "populate_by_name": True,  # Allow both alias and field name
+        "extra": "ignore",
+    }
+
+    def validate_env_vars(self) -> Optional[List[str]]:
         """Check that all required environment variables are set."""
-        missing = [var for var in cls.REQUIRED_ENV_VARS if not os.getenv(var)]
+        missing = []
+        if not self.twitch_client_id:
+            missing.append("TWITCH_CLIENT_ID")
+        if not self.twitch_client_secret:
+            missing.append("TWITCH_CLIENT_SECRET")
+        if self.twitch_bot_id == 0:
+            missing.append("TWITCH_BOT_ID")
+        if self.guild_id == "0":
+            missing.append("GUILD_ID")
         return missing if missing else None
 
-    # ==========================================================================
-    # Logging
-    # ==========================================================================
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-    # Project root logs directory: services/twitch_bot -> services -> root -> logs
-    LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../logs"))
-    LOG_FILE = "twitch_bot.log"
-    LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-    @classmethod
-    def get_log_level(cls) -> int:
+    def get_log_level(self) -> int:
         level_map = {
             "DEBUG": logging.DEBUG,
             "INFO": logging.INFO,
             "WARNING": logging.WARNING,
             "ERROR": logging.ERROR,
         }
-        return level_map.get(cls.LOG_LEVEL, logging.INFO)
+        return level_map.get(self.log_level.upper(), logging.INFO)
 
-    @classmethod
-    def setup_logging(cls, logger_name: str = None) -> logging.Logger:
+    def setup_logging(self, logger_name: str = None) -> logging.Logger:
         """Configure logging."""
-        os.makedirs(cls.LOG_DIR, exist_ok=True)
+        os.makedirs(self.log_dir, exist_ok=True)
 
         logger = logging.getLogger(logger_name)
-        logger.setLevel(cls.get_log_level())
+        logger.setLevel(self.get_log_level())
 
         if logger.handlers:
             return logger
 
-        formatter = logging.Formatter(cls.LOG_FORMAT)
+        formatter = logging.Formatter(self.log_format)
 
         file_handler = RotatingFileHandler(
-            os.path.join(cls.LOG_DIR, cls.LOG_FILE),
+            os.path.join(self.log_dir, self.log_file),
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",
@@ -113,3 +127,7 @@ class Config:
         logger.propagate = False
 
         return logger
+
+
+# Singleton instance - instantiate once at module load
+Config = Config()

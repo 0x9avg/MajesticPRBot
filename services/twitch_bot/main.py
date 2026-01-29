@@ -22,14 +22,13 @@ async def main():
         sys.exit(1)
 
     logger.info("Starting Twitch Bot microservice...")
-
     # Initialize API client
     api_client = APIClient(
-        base_url=Config.API_BASE_URL,
-        timeout=Config.API_TIMEOUT,
+        base_url=Config.api_base_url,
+        timeout=Config.api_timeout,
         logger=Config.setup_logging("APIClient"),
     )
-    logger.info(f"✓ API client: {Config.API_BASE_URL}")
+    logger.info(f"✓ API client: {Config.api_base_url}")
 
     # Initialize broker consumer (for receiving events like streamer.added)
     consumer = None
@@ -37,16 +36,16 @@ async def main():
         from broker_consumer import BrokerConsumer
 
         consumer = BrokerConsumer(
-            host=Config.RABBITMQ_HOST,
-            port=Config.RABBITMQ_PORT,
-            user=Config.RABBITMQ_USER,
-            password=Config.RABBITMQ_PASSWORD,
-            vhost=Config.RABBITMQ_VHOST,
-            exchange_name=Config.RABBITMQ_EXCHANGE,
+            host=Config.rabbitmq_host,
+            port=Config.rabbitmq_port,
+            user=Config.rabbitmq_user,
+            password=Config.rabbitmq_password,
+            vhost=Config.rabbitmq_vhost,
+            exchange_name=Config.rabbitmq_exchange,
             logger=Config.setup_logging("BrokerConsumer"),
         )
 
-        logger.info(f"✓ Broker consumer configured: {Config.RABBITMQ_HOST}:{Config.RABBITMQ_PORT}")
+        logger.info(f"✓ Broker consumer configured: {Config.rabbitmq_host}:{Config.rabbitmq_port}")
     except Exception as e:
         logger.warning(f"Broker unavailable: {e}")
         consumer = None

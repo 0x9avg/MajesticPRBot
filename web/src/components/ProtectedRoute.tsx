@@ -4,7 +4,7 @@ interface ProtectedRouteProps {
     allowedRoles?: string[];
 }
 
-export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
+export default function ProtectedRoute({ allowedRoles: _allowedRoles }: ProtectedRouteProps) {
     const token = localStorage.getItem('access_token');
 
     if (!token) {

@@ -4,10 +4,10 @@ Monitoring and Dashboard routes for API.
 
 from fastapi import APIRouter, Depends, Request
 
-from schemas.monitoring import MonitoringRefreshRequest
+from schemas.monitoring import MonitoringRefreshResponse
 from config import Config
 
-router = APIRouter(tags=["Monitoring"])
+router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
 
 
 def get_db(request: Request):
@@ -20,9 +20,9 @@ def get_broker(request: Request):
     return request.app.state.broker
 
 
-@router.post("/monitoring/refresh")
+@router.post("/refresh", response_model=MonitoringRefreshResponse)
 async def refresh_monitoring(
-    data: MonitoringRefreshRequest = MonitoringRefreshRequest(),
+    data: MonitoringRefreshResponse,
     db=Depends(get_db),
     broker=Depends(get_broker),
 ):
@@ -33,7 +33,7 @@ async def refresh_monitoring(
     if broker:
         await broker.publish("monitoring.refresh", {
             "event": "monitoring.refresh",
-            "guild_id": Config.GUILD_ID,
+            "guild_id": Config.guild_id,
             "force": data.force,
         })
         return {"status": "refresh_requested", "force": data.force}

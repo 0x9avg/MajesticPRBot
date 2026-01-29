@@ -74,7 +74,8 @@ class TemplateEditModal(disnake.ui.Modal):
         super().__init__(title=title, components=components)
 
     async def callback(self, interaction: disnake.ModalInteraction):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         try:
             new_template = interaction.text_values["template_input"]
             await self.bot.api_client.update_guild_templates(
@@ -112,21 +113,6 @@ class TemplateSelect(disnake.ui.StringSelect):
             options=options,
         )
 
-    async def callback(self, interaction: MessageInteraction):
-        event_type = self.values[0]
-        
-        # Get current template
-        try:
-            settings = await interaction.bot.api_client.get_guild_settings()
-            templates = settings.get("notification_templates", {}) if settings else {}
-            current = templates.get(event_type, "")
-        except Exception:
-            current = ""
-
-        await interaction.response.send_modal(
-            TemplateEditModal(interaction.bot, event_type, current)
-        )
-
 
 # =============================================================================
 # Notifications View
@@ -140,97 +126,29 @@ class NotificationsView(disnake.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
         self.add_item(TemplateSelect())
-
-    @disnake.ui.button(
-        label="Тест 🟢",
-        custom_id="admin_notif_test_on",
-        style=disnake.ButtonStyle.secondary,
-        row=1,
-    )
-    async def test_online(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        """Send test online notification."""
-        await interaction.response.defer(ephemeral=True)
-        try:
-            # Get notification channel
-            settings = await self.bot.api_client.get_guild_settings()
-            channel_id = settings.get("notification_channel_id") if settings else None
-            
-            if not channel_id:
-                await interaction.followup.send("❌ Канал уведомлений не настроен", ephemeral=True)
-                return
-            
-            channel = self.bot.get_channel(int(channel_id))
-            if not channel:
-                await interaction.followup.send("❌ Канал не найден", ephemeral=True)
-                return
-
-            templates = settings.get("notification_templates", {})
-            template = templates.get("stream_online", "🟢 **{streamer_name}** начал стрим!")
-            
-            test_msg = template.format(
-                streamer_name="TestStreamer",
-                stream_title="Тестовый стрим",
-                game_name="Grand Theft Auto V",
-                streamer_link="https://twitch.tv/teststreamer",
-            )
-            
-            await channel.send(f"[ТЕСТ] {test_msg}", delete_after=30)
-            await interaction.followup.send("✅ Тестовое уведомление отправлено!", ephemeral=True)
-            
-        except Exception as e:
-            self.bot.logger.error(f"Test notification error: {e}")
-            await interaction.followup.send("❌ Ошибка", ephemeral=True)
-
-    @disnake.ui.button(
-        label="Тест 🔴",
-        custom_id="admin_notif_test_off",
-        style=disnake.ButtonStyle.secondary,
-        row=1,
-    )
-    async def test_offline(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        """Send test offline notification."""
-        await interaction.response.defer(ephemeral=True)
-        try:
-            settings = await self.bot.api_client.get_guild_settings()
-            channel_id = settings.get("notification_channel_id") if settings else None
-            
-            if not channel_id:
-                await interaction.followup.send("❌ Канал уведомлений не настроен", ephemeral=True)
-                return
-            
-            channel = self.bot.get_channel(int(channel_id))
-            if not channel:
-                await interaction.followup.send("❌ Канал не найден", ephemeral=True)
-                return
-
-            templates = settings.get("notification_templates", {})
-            template = templates.get("stream_offline", "🔴 **{streamer_name}** закончил стрим")
-            
-            test_msg = template.format(
-                streamer_name="TestStreamer",
-                stream_title="Тестовый стрим",
-                game_name="Grand Theft Auto V",
-                streamer_link="https://twitch.tv/teststreamer",
-            )
-            
-            await channel.send(f"[ТЕСТ] {test_msg}", delete_after=30)
-            await interaction.followup.send("✅ Тестовое уведомление отправлено!", ephemeral=True)
-            
-        except Exception as e:
-            self.bot.logger.error(f"Test notification error: {e}")
-            await interaction.followup.send("❌ Ошибка", ephemeral=True)
-
-    @disnake.ui.button(
-        label="Назад",
-        custom_id="admin_notif_back",
-        style=disnake.ButtonStyle.secondary,
-        emoji="🔙",
-        row=2,
-    )
-    async def back_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        await interaction.response.edit_message(
-            embed=get_main_embed(), view=AdminMainView(self.bot)
-        )
+        
+        # Buttons
+        self.add_item(disnake.ui.Button(
+            label="Тест 🟢",
+            custom_id="admin_notif_test_on",
+            style=disnake.ButtonStyle.secondary,
+            row=1
+        ))
+        
+        self.add_item(disnake.ui.Button(
+            label="Тест 🔴",
+            custom_id="admin_notif_test_off",
+            style=disnake.ButtonStyle.secondary,
+            row=1
+        ))
+        
+        self.add_item(disnake.ui.Button(
+            label="Назад",
+            custom_id="admin_notif_back",
+            style=disnake.ButtonStyle.secondary,
+            emoji="🔙",
+            row=2
+        ))
 
 
 # =============================================================================
@@ -247,14 +165,106 @@ class AdminNotifications(commands.Cog):
 
     @commands.Cog.listener("on_button_click")
     async def on_notifications_button(self, interaction: MessageInteraction):
-        """Handle admin_notifications navigation."""
-        if interaction.component.custom_id != "admin_notifications":
+        """Handle admin_notifications and sub-buttons."""
+        custom_id = interaction.component.custom_id or ""
+        
+        # 1. STRICT FILTER
+        if not custom_id.startswith("admin_notifications") and not custom_id.startswith("admin_notif_"):
             return
 
-        await interaction.response.edit_message(
-            embed=get_notifications_embed(),
-            view=NotificationsView(self.bot),
-        )
+        # 2. SAFE DEFER
+        # All buttons currently defer (tests, back, entry). None open modal directly (dropdown does).
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
+
+        # 3. EXECUTE
+        try:
+            if custom_id == "admin_notifications":
+                await interaction.edit_original_response(
+                    embed=get_notifications_embed(),
+                    view=NotificationsView(self.bot),
+                )
+
+            elif custom_id == "admin_notif_back":
+                from .core import AdminMainView, get_main_embed
+                await interaction.edit_original_response(
+                    embed=get_main_embed(), view=AdminMainView(self.bot)
+                )
+
+            elif custom_id in ["admin_notif_test_on", "admin_notif_test_off"]:
+                # Get settings checks logic
+                settings = await self.bot.api_client.get_guild_settings()
+                channel_id = settings.get("notification_channel_id") if settings else None
+                
+                if not channel_id:
+                    await interaction.followup.send("❌ Канал уведомлений не настроен", ephemeral=True)
+                    return
+                
+                channel = self.bot.get_channel(int(channel_id))
+                if not channel:
+                    await interaction.followup.send("❌ Канал не найден", ephemeral=True)
+                    return
+
+                templates = settings.get("notification_templates", {})
+                
+                if custom_id == "admin_notif_test_on":
+                    template = templates.get("stream_online", "🟢 **{streamer_name}** начал стрим!")
+                    event_msg = "начал стрим!"
+                else:
+                    template = templates.get("stream_offline", "🔴 **{streamer_name}** закончил стрим")
+                    event_msg = "закончил стрим"
+
+                test_msg = template.format(
+                    streamer_name="TestStreamer",
+                    stream_title="Тестовый стрим",
+                    game_name="Grand Theft Auto V",
+                    streamer_link="https://twitch.tv/teststreamer",
+                )
+                
+                await channel.send(f"[ТЕСТ] {test_msg}", delete_after=30)
+                await interaction.followup.send("✅ Тестовое уведомление отправлено!", ephemeral=True)
+
+        except Exception as e:
+            self.bot.logger.error(f"Error handling notification button {custom_id}: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
+            except: pass
+
+    @commands.Cog.listener("on_dropdown")
+    async def on_notifications_dropdown(self, interaction: MessageInteraction):
+        """Handle notification template select."""
+        custom_id = interaction.component.custom_id or ""
+        
+        if custom_id != "admin_notif_template_select":
+            return
+            
+        # Select opens MODAL -> NO DEFER
+        
+        try:
+            event_type = interaction.values[0]
+            
+            # Get current template
+            try:
+                settings = await self.bot.api_client.get_guild_settings()
+                templates = settings.get("notification_templates", {}) if settings else {}
+                current = templates.get(event_type, "")
+            except Exception:
+                current = ""
+
+            # Open Modal
+            await interaction.response.send_modal(
+                TemplateEditModal(self.bot, event_type, current)
+            )
+        except Exception as e:
+            self.bot.logger.error(f"Error handling notification dropdown: {e}", exc_info=True)
+            # Cannot reply if modal fail? Or try ephemeral msg
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
+            except: pass
 
 
 def setup(bot: commands.Bot) -> None:

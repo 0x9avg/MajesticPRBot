@@ -26,9 +26,10 @@ export function MainHub() {
         const fetchStats = async () => {
             try {
                 const response = await fetch('/api/stats/dashboard');
-                const result = await response.json();
-                if (result.success) {
-                    setDashboardStats(result.data);
+                if (response.ok) {
+                    const json = await response.json();
+                    const data = json.data || json;
+                    setDashboardStats(data);
                 }
             } catch (error) {
                 console.error('Failed to fetch dashboard stats:', error);
@@ -202,9 +203,10 @@ export function PRStats() {
     const fetchAssistants = async () => {
         try {
             const response = await fetch('/api/assistants');
-            const result = await response.json();
-            if (result.success) {
-                setAssistants(result.data);
+            if (response.ok) {
+                const json = await response.json();
+                const data = json.data || json;
+                setAssistants(Array.isArray(data) ? data : []);
             }
         } catch (error) {
             console.error('Failed to fetch assistants:', error);

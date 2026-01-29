@@ -154,7 +154,7 @@ class ManageStreamers(commands.Cog):
             for streamer in streamers:
                 if streamer.get("is_online"):
                     online_streamers.append(streamer)
-                    if str(streamer.get("game_id")) == Config.GTA5_GAME_ID:
+                    if str(streamer.get("game_id")) == Config.gta5_game_id:
                         gta_count += 1
 
             # Use shared component generator

@@ -78,21 +78,35 @@ class EventsHandlers(commands.Cog):
     @commands.Cog.listener("on_button_click")
     async def on_event_button(self, interaction: MessageInteraction):
         """Handle event join/leave buttons."""
-        custom_id = interaction.component.custom_id
-        if not custom_id or not custom_id.startswith("event_"):
+        custom_id = interaction.component.custom_id or ""
+        
+        # 1. STRICT FILTER
+        if not custom_id.startswith(("event_join_", "event_leave_")):
             return
 
-        # Parse event action
-        if custom_id.startswith("event_join_"):
-            event_id = int(custom_id.replace("event_join_", ""))
-            await self._handle_event_join(interaction, event_id)
-        elif custom_id.startswith("event_leave_"):
-            event_id = int(custom_id.replace("event_leave_", ""))
-            await self._handle_event_leave(interaction, event_id)
+        # 2. SAFE DEFER
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
+
+        # 3. EXECUTE
+        try:
+            if custom_id.startswith("event_join_"):
+                event_id = int(custom_id.replace("event_join_", ""))
+                await self._handle_event_join(interaction, event_id)
+            elif custom_id.startswith("event_leave_"):
+                event_id = int(custom_id.replace("event_leave_", ""))
+                await self._handle_event_leave(interaction, event_id)
+        except Exception as e:
+            self.bot.logger.error(f"Error handling event button {custom_id}: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
+            except: pass
 
     async def _handle_event_join(self, interaction: MessageInteraction, event_id: int):
         """Handle user joining an event."""
-        await interaction.response.defer(ephemeral=True)
         user_id = interaction.user.id
 
         try:
@@ -139,7 +153,6 @@ class EventsHandlers(commands.Cog):
 
     async def _handle_event_leave(self, interaction: MessageInteraction, event_id: int):
         """Handle user leaving an event."""
-        await interaction.response.defer(ephemeral=True)
         user_id = interaction.user.id
 
         try:

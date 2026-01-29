@@ -30,77 +30,24 @@ class Spec(commands.Cog):
         """Обработка кликов по кнопкам спека."""
         custom_id = interaction.component.custom_id or ""
 
+        # Early defer to prevent "Unknown interaction" errors
+        if custom_id.startswith(("spec_claim_", "spec_unclaim_", "spec_transfer_")):
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+
         if custom_id.startswith("spec_claim_"):
             await self._handle_claim_button(interaction, custom_id)
         elif custom_id.startswith("spec_unclaim_"):
             await self._handle_unclaim_button(interaction, custom_id)
         elif custom_id.startswith("spec_transfer_"):
             await self._handle_transfer_button(interaction, custom_id)
-        elif custom_id.startswith("event_join_"):
-            await self._handle_event_join(interaction, custom_id)
 
-    async def _handle_event_join(
-        self, interaction: disnake.MessageInteraction, custom_id: str
-    ):
-        """Обработка присоединения/выхода из события."""
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
-            
-        try:
-            event_id = int(custom_id.replace("event_join_", ""))
-            user_id = interaction.user.id
 
-            result = await self.api.join_event(event_id, user_id)
-            # If logic for "Toggle" exists (join if not in, leave if in)?
-            # API `join_event` returns False/Error if already joined?
-            # Legacy logic: Check participation. If participating -> Leave. If not -> Join.
-            # My API `join_event` returns False if already joined.
-            # So if False, try LEAVE?
-            
-            # Let's check participation first via API
-            # I added `get_user_active_event`.
-            active = await self.api.get_user_active_event(user_id)
-            
-            if active and active['id'] == event_id:
-                # User IS in this event -> LEAVE
-                duration = await self.api.leave_event(event_id, user_id)
-                dur_str = format_spec_duration(duration)
-                await interaction.followup.send(f"➖ Ты покинул событие **{active['name']}**. (Спек: {dur_str})", ephemeral=True)
-                await self._send_pr_action(interaction.guild_id, f"📤 **Покинул событие**\n🎯 {interaction.user.mention}\n⏱️ {dur_str}")
-            
-            elif active:
-                # User in ANOTHER event
-                await interaction.followup.send(f"❌ Ты уже участвуешь в событии **{active['name']}**!", ephemeral=True)
-                return
-            
-            else:
-                # User not in any event -> JOIN
-                success = await self.api.join_event(event_id, user_id)
-                if success:
-                    await interaction.followup.send(f"➕ Ты присоединился к событию!", ephemeral=True)
-                    await self._send_pr_action(interaction.guild_id, f"📥 **Присоединился к событию**\n🎯 {interaction.user.mention}")
-                else:
-                    await interaction.followup.send("❌ Не удалось присоединиться.", ephemeral=True)
-
-            # Refresh monitoring
-            dashboard_cog = self.bot.get_cog("Dashboard")
-            if dashboard_cog:
-                # Trigger internal update if needed or just let API sync
-                pass # API syncs monitoring periodically or via manual refresh
-                await self.api.refresh_monitoring()
-
-        except Exception as e:
-            self.logger.error(f"Event join error: {e}", exc_info=True)
-            try:
-                await interaction.followup.send("❌ Ошибка.", ephemeral=True)
-            except: pass
 
     async def _handle_claim_button(
         self, interaction: disnake.MessageInteraction, custom_id: str
     ):
         """Обработка клика по кнопке закрепа."""
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
             
         try:
             streamer_id = int(custom_id.replace("spec_claim_", ""))
@@ -146,8 +93,6 @@ class Spec(commands.Cog):
         self, interaction: disnake.MessageInteraction, custom_id: str
     ):
         """Обработка клика по кнопке открепления."""
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
             
         try:
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
@@ -188,7 +133,14 @@ class Spec(commands.Cog):
             transfer_data = self.pending_transfers.pop(interaction.user.id)
 
             if action == "decline":
-                await interaction.response.edit_message(content="❌ Передача отклонена.", components=[])
+                # Edit the message to remove buttons
+                try:
+                    await interaction.message.edit(content="❌ Передача отклонена.", components=[])
+                except Exception:
+                    pass
+                
+                # Update the ephemeral response
+                await interaction.edit_original_response(content="❌ Передача отклонена.")
                 
                 # Notify the sender that their request was declined
                 try:
@@ -200,7 +152,7 @@ class Spec(commands.Cog):
                     self.logger.warning(f"Could not notify sender about decline: {e}")
                 return
 
-            await interaction.response.defer()
+            # Already deferred in on_spec_button
 
             # Check if this is a swap (both PRs have streamers) or a one-way transfer
             target_streamer_id = transfer_data.get("target_streamer_id")
@@ -210,22 +162,25 @@ class Spec(commands.Cog):
                 result = await self.api.swap_streamers(from_pr_id, interaction.user.id)
                 
                 if result and result.get("status") == "swapped":
-                    await interaction.followup.edit_message(
-                        message_id=interaction.message.id,
-                        content=(
-                            f"✅ Обмен завершён!\n"
-                            f"• Ты получил: **{result.get('pr2_new_streamer')}**\n"
-                            f"• Он получил: **{result.get('pr1_new_streamer')}**"
-                        ),
-                        components=[]
+                    # Update message
+                    msg_content = (
+                        f"✅ Обмен завершён!\n"
+                        f"• Ты получил: **{result.get('pr2_new_streamer')}**\n"
+                        f"• Он получил: **{result.get('pr1_new_streamer')}**"
                     )
+                    try:
+                        await interaction.message.edit(content=msg_content, components=[])
+                    except: pass
+                    
+                    await interaction.edit_original_response(content=msg_content)
                     await self.api.refresh_monitoring()
                 else:
                     error_msg = result.get("detail", "Неизвестная ошибка") if result else "Ошибка API"
-                    await interaction.followup.edit_message(
-                        message_id=interaction.message.id,
-                        content=f"❌ Не удалось обменяться: {error_msg}", 
-                        components=[]
+                    # Update message to show error? Or just ephemeral?
+                    # Keep message with buttons? Or fail it?
+                    # Let's show error in ephemeral only, keep buttons?
+                    await interaction.edit_original_response(
+                        content=f"❌ Не удалось обменяться: {error_msg}"
                     )
             else:
                 # This is a one-way TRANSFER
@@ -236,19 +191,18 @@ class Spec(commands.Cog):
                 )
 
                 if result and result.get("status") == "transferred":
-                    await interaction.followup.edit_message(
-                        message_id=interaction.message.id,
-                        content=f"✅ Ты принял стримера **{result.get('streamer_name')}**!",
-                        components=[]
-                    )
+                    msg_content = f"✅ Ты принял стримера **{result.get('streamer_name')}**!"
+                    try:
+                        await interaction.message.edit(content=msg_content, components=[])
+                    except: pass
+                    
+                    await interaction.edit_original_response(content=msg_content)
                     # PR actions log handled by broker_handlers via spec.transferred event
                     await self.api.refresh_monitoring()
                 else:
                     error_msg = result.get("detail", "Неизвестная ошибка") if result else "Ошибка API"
-                    await interaction.followup.edit_message(
-                        message_id=interaction.message.id,
-                        content=f"❌ Не удалось передать: {error_msg}", 
-                        components=[]
+                    await interaction.edit_original_response(
+                        content=f"❌ Не удалось передать: {error_msg}"
                     )
 
         except Exception as e:
@@ -260,14 +214,15 @@ class Spec(commands.Cog):
         """Обработка выбора в выпадающих списках (Monitoring)."""
         custom_id = interaction.component.custom_id
         if custom_id == "spec_claim_select":
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True)
+            except: pass
+            
             selected = interaction.values[0]
             if selected == "none":
                 await interaction.response.send_message("❌ Нет доступных.", ephemeral=True)
                 return
-            
-            if selected.startswith("event_"):
-                 await self._handle_event_join(interaction, f"event_join_{selected.replace('event_', '')}")
-                 return
             
             try:
                 streamer_id = int(selected)
@@ -282,7 +237,7 @@ class Spec(commands.Cog):
 
     @commands.slash_command(
         name="claim",
-        description="Взять медиа или событие (GTA 5)",
+        description="Взять медиа (GTA 5)",
     )
     async def claim(
         self,
@@ -294,12 +249,6 @@ class Spec(commands.Cog):
         """Ручное взятие стримера или события (для ассистента)."""
         await interaction.response.defer(ephemeral=True)
         try:
-            # Check if event
-            if target_id.startswith("event_"):
-                event_id = int(target_id.replace("event_", ""))
-                await self._handle_event_join(interaction, f"event_join_{event_id}")
-                return
-
             streamer_id_int = int(target_id)
             
             # Reuse button logic which handles API call + logging
@@ -319,22 +268,16 @@ class Spec(commands.Cog):
     async def claim_target_autocomplete(
         self, interaction: ApplicationCommandInteraction, current: str
     ):
-        """Автозаполнение доступных стримеров GTA 5 и активных событий."""
+        """Автозаполнение доступных стримеров GTA 5."""
         try:
             options = {}
 
-            # 1. Active Events
-            events = await self.api.get_active_events(interaction.guild_id)
-            for e in events:
-                if current.lower() in e["name"].lower():
-                    options[f"🎉 {e['name']}"] = f"event_{e['id']}"
-
-            # 2. Available Streamers
+            # Available Streamers
             streamers = await self.api.list_all_streamers()
             for s in streamers:
                 if (
                     s.get("is_online") 
-                    and str(s.get("game_id")) == Config.GTA5_GAME_ID
+                    and str(s.get("game_id")) == Config.gta5_game_id
                     and not s.get("assigned_pr_id")
                     and current.lower() in s["streamer_name"].lower()
                 ):
@@ -364,24 +307,12 @@ class Spec(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         # Find current
         try:
-            # Check event first (since unclaim applies to events too usually? or just streams?)
-            # Legacy unclaim worked for events too if participating?
-            # My _handle_unclaim_button is specifically for STREAMERS (calls unclaim_streamer).
-            # If user in event, they should use leave event?
-            # But user might think "/unclaim" works for everything.
-            
-            # Check event
-            active_event = await self.api.get_user_active_event(interaction.user.id)
-            if active_event:
-                 await self._handle_event_join(interaction, f"event_join_{active_event['id']}")
-                 return
-
             # Check streamer
             current = await self.api.get_pr_current_streamer(interaction.user.id)
             if current:
                 await self._handle_unclaim_button(interaction, f"spec_unclaim_{current['streamer_id']}")
             else:
-                await interaction.followup.send("❌ Не закреплен ни за стримером, ни за событием.", ephemeral=True)
+                await interaction.followup.send("❌ Не закреплен ни за стримером.", ephemeral=True)
         except Exception as e:
             self.logger.error(f"Unclaim error: {e}")
             await interaction.followup.send("❌ Ошибка.", ephemeral=True)
@@ -533,7 +464,7 @@ class Spec(commands.Cog):
             for s in streamers:
                 if s.get("is_online"):
                     online_streamers.append(s)
-                    is_gta = str(s.get("game_id")) == Config.GTA5_GAME_ID
+                    is_gta = str(s.get("game_id")) == Config.gta5_game_id
                     if is_gta:
                         gta_count += 1
                         if not s.get("assigned_pr_id"):

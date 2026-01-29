@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from schemas.streamer import (
     StreamerCreate,
     StreamerUpdate,
+    StreamerStatusUpdate,
     StreamerResponse,
     StreamerListResponse,
 )
@@ -43,7 +44,7 @@ async def list_streamers(
     gta_count = sum(
         1
         for s in streamers
-        if s.get("is_online") and str(s.get("game_id")) == Config.GTA5_GAME_ID
+        if str(s.get("game_id")) == Config.gta5_game_id
     )
 
     return StreamerListResponse(
@@ -72,34 +73,53 @@ async def create_streamer(
 ):
     """
     Add a new streamer.
-
-    Note: This endpoint expects the Discord bot or web UI to resolve
-    the Twitch username to ID before calling. For full resolution,
-    the Twitch bot handles get_streamer_id.
+    
+    Two modes:
+    1. URL mode (Discord/Web): Provide `twitch_url` → triggers async verification
+    2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` → direct creation
     """
-    # Parse URL or username
-    url = data.twitch_url
-    if url.startswith("https://www.twitch.tv/"):
-        username = url.replace("https://www.twitch.tv/", "").rstrip("/").strip()
-    else:
-        username = url.rstrip("/").strip()
+    # Mode B: Full data from Twitch bot - direct creation
+    if data.is_full_mode:
+        await db.create_streamer(
+            streamer_id=data.streamer_id,
+            streamer_name=data.streamer_name,
+            is_online=data.is_online,
+            started_at=data.started_at,
+            priority=data.priority,
+            added_by_id=data.added_by_id,
+            game_id=data.game_id,
+            game_name=data.game_name,
+            stream_title=data.stream_title,
+            stream_thumbnail_url=data.stream_thumbnail_url,
+        )
 
-    # Create streamer logic refactored for async verification
-    # User requested to ensure Twitch ID is present before DB insertion.
+        streamer = await db.get_streamer(data.streamer_id)
+        
+        if not streamer:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                detail=f"Failed to retrieve created streamer {data.streamer_id}"
+            )
 
+        if broker:
+            await broker.emit_streamer_added(
+                data.streamer_id,
+                data.streamer_name,
+                {"priority": data.priority},
+            )
+
+        return StreamerResponse(**streamer)
+    
+    # Mode A: URL mode - needs Twitch verification
+    username = data.twitch_url
+    
     if broker:
         # Emit verification event so Twitch Bot can resolve ID
         await broker.emit_streamer_verify(
-            username, {"priority": data.priority, "added_by_id": 0}
+            username, {"priority": data.priority, "added_by_id": data.added_by_id}
         )
 
-        # Return accepted status
-        # Note: Response model StreamerResponse requires fields that we don't have yet.
-        # We should probably change response code or model, but to keep signature:
-        # We return a dummy accepted response or raise HTTPException asking client to wait?
-        # Better: Return specific 202 Accepted with message.
         from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
@@ -108,71 +128,9 @@ async def create_streamer(
             },
         )
 
-    # If no broker (fallback mode), we try to proceed or fail
-    # Since we can't resolve ID without Twitch Bot (via Broker), we must fail or insert 0
-    # But user explicitely blocked 0.
     raise HTTPException(
         status_code=503, detail="Broker unavailable. Cannot verify Twitch ID."
     )
-
-    # Original logic removed to prevent ID=0 insertion
-    """
-    await db.create_streamer(
-        streamer_id=0,
-        streamer_name=username,
-        is_online=False,
-        priority=data.priority,
-        added_by_id=0,
-    )
-    ...
-    """
-
-
-@router.post(
-    "/full", response_model=StreamerResponse, status_code=status.HTTP_201_CREATED
-)
-async def create_streamer_full(
-    request: Request,
-    streamer_id: int,
-    streamer_name: str,
-    is_online: bool = False,
-    started_at: Optional[str] = None,
-    priority: int = 0,
-    added_by_id: int = 0,
-    game_id: Optional[int] = None,
-    game_name: Optional[str] = None,
-    stream_title: Optional[str] = None,
-    stream_thumbnail_url: Optional[str] = None,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
-):
-    """
-    Add a new streamer with full data.
-    This is called by the Discord bot after resolving Twitch data.
-    """
-    await db.create_streamer(
-        streamer_id=streamer_id,
-        streamer_name=streamer_name,
-        is_online=is_online,
-        started_at=started_at,
-        priority=priority,
-        added_by_id=added_by_id,
-        game_id=game_id,
-        game_name=game_name,
-        stream_title=stream_title,
-        stream_thumbnail_url=stream_thumbnail_url,
-    )
-
-    streamer = await db.get_streamer(streamer_id)
-
-    if broker:
-        await broker.emit_streamer_added(
-            streamer_id,
-            streamer_name,
-            {"priority": priority},
-        )
-
-    return StreamerResponse(**streamer)
 
 
 @router.patch("/{twitch_id}", response_model=StreamerResponse)
@@ -236,29 +194,16 @@ async def delete_streamer(
 @router.patch("/{twitch_id}/status")
 async def update_streamer_status(
     twitch_id: int,
-    is_online: bool,
-    started_at: Optional[str] = None,
-    game_id: Optional[Union[int, str]] = None,
-    game_name: Optional[str] = None,
-    stream_title: Optional[str] = None,
-    stream_thumbnail_url: Optional[str] = None,
+    data: StreamerStatusUpdate,
     db=Depends(get_db),
     broker=Depends(get_broker),
 ):
     """
     Update streamer online status.
     Called by Twitch bot when receiving EventSub events.
+    Accepts JSON body for proper REST semantics.
     Now also publishes appropriate RabbitMQ events based on state changes.
     """
-    # Handle game_id being passed as empty string
-    if game_id == "":
-        game_id = None
-    elif game_id is not None:
-        try:
-            game_id = int(game_id)
-        except ValueError:
-            game_id = None
-
     # Get current state BEFORE update
     streamer = await db.get_streamer(twitch_id)
     if not streamer:
@@ -270,51 +215,51 @@ async def update_streamer_status(
     # Update database
     await db.update_streamer_status(
         streamer_id=twitch_id,
-        is_online=is_online,
-        started_at=started_at,
-        game_id=game_id,
-        game_name=game_name,
-        stream_title=stream_title,
-        stream_thumbnail_url=stream_thumbnail_url,
+        is_online=data.is_online,
+        started_at=data.started_at,
+        game_id=data.game_id,
+        game_name=data.game_name,
+        stream_title=data.stream_title,
+        stream_thumbnail_url=data.stream_thumbnail_url,
     )
 
     # Publish events based on state changes
     if broker:
         streamer_name = streamer["streamer_name"]
-        new_game_id = str(game_id) if game_id else None
+        new_game_id = str(data.game_id) if data.game_id else None
         
-        broker.logger.info(f"DEBUG Check: {streamer_name} | Online: {old_is_online}->{is_online} | GameID: {old_game_id}->{new_game_id} | GameName: {game_name}")
+        broker.logger.info(f"DEBUG Check: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id} | GameName: {data.game_name}")
 
         # Online/Offline state change
-        if is_online and not old_is_online:
+        if data.is_online and not old_is_online:
             # Stream went ONLINE
             await broker.emit_stream_online(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
-                game_id=game_id,
-                game_name=game_name,
-                stream_title=stream_title,
-                thumbnail_url=stream_thumbnail_url,
-                guild_id=Config.GUILD_ID,
+                game_id=data.game_id,
+                game_name=data.game_name,
+                stream_title=data.stream_title,
+                thumbnail_url=data.stream_thumbnail_url,
+                guild_id=Config.guild_id,
             )
-        elif not is_online and old_is_online:
+        elif not data.is_online and old_is_online:
             # Stream went OFFLINE
             await broker.emit_stream_offline(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
-                guild_id=Config.GUILD_ID,
+                guild_id=Config.guild_id,
             )
-        elif is_online and old_is_online and old_game_id != new_game_id:
+        elif data.is_online and old_is_online and old_game_id != new_game_id:
             # Category changed while online
             await broker.emit_category_change(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
                 old_game_id=old_game_id,
                 new_game_id=new_game_id,
-                new_game_name=game_name,
-                stream_title=stream_title,
-                thumbnail_url=stream_thumbnail_url,
-                guild_id=Config.GUILD_ID,
+                new_game_name=data.game_name,
+                stream_title=data.stream_title,
+                thumbnail_url=data.stream_thumbnail_url,
+                guild_id=Config.guild_id,
             )
 
 

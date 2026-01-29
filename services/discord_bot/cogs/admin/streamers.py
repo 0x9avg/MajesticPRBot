@@ -205,91 +205,47 @@ class StreamersView(disnake.ui.View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self.bot = bot
-
-    @disnake.ui.button(
-        label="Добавить",
-        custom_id="admin_str_add",
-        style=disnake.ButtonStyle.success,
-        emoji="➕",
-        row=0,
-    )
-    async def add_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        await interaction.response.send_modal(AddStreamerModal(self.bot))
-
-    @disnake.ui.button(
-        label="Редактировать",
-        custom_id="admin_str_edit",
-        style=disnake.ButtonStyle.secondary,
-        emoji="✏️",
-        row=0,
-    )
-    async def edit_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        streamers = await self.bot.api_client.list_all_streamers()
-        if not streamers:
-            await interaction.response.send_message("Список пуст", ephemeral=True)
-            return
         
-        view = disnake.ui.View(timeout=None)
-        view.add_item(EditStreamerSelect(streamers))
-        await interaction.response.send_message(
-            "Выберите стримера:", view=view, ephemeral=True
-        )
-
-    @disnake.ui.button(
-        label="Удалить",
-        custom_id="admin_str_del",
-        style=disnake.ButtonStyle.danger,
-        emoji="🗑️",
-        row=1,
-    )
-    async def delete_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        streamers = await self.bot.api_client.list_all_streamers()
-        if not streamers:
-            await interaction.response.send_message("Список пуст", ephemeral=True)
-            return
+        # Add buttons manually to avoid internal callbacks
+        self.add_item(disnake.ui.Button(
+            label="Добавить",
+            custom_id="admin_str_add",
+            style=disnake.ButtonStyle.success,
+            emoji="➕",
+            row=0
+        ))
         
-        view = disnake.ui.View(timeout=None)
-        view.add_item(DeleteStreamerSelect(streamers))
-        await interaction.response.send_message(
-            "Выберите стримера для удаления:", view=view, ephemeral=True
-        )
-
-    @disnake.ui.button(
-        label="Список",
-        custom_id="admin_str_list",
-        style=disnake.ButtonStyle.primary,
-        emoji="📋",
-        row=1,
-    )
-    async def list_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        await interaction.response.defer(ephemeral=True)
-        streamers = await self.bot.api_client.list_all_streamers()
+        self.add_item(disnake.ui.Button(
+            label="Редактировать",
+            custom_id="admin_str_edit",
+            style=disnake.ButtonStyle.secondary,
+            emoji="✏️",
+            row=0
+        ))
         
-        if not streamers:
-            await interaction.followup.send("Список пуст", ephemeral=True)
-            return
-
-        lines = [
-            f"• **{s['streamer_name']}** (P{s.get('priority', 0)}) {'🟢' if s.get('is_online') else '⚫'}"
-            for s in streamers
-        ]
-        content = "\n".join(lines[:50])
-        if len(lines) > 50:
-            content += f"\n... и еще {len(lines) - 50}"
-
-        await interaction.followup.send(f"**Стримеры ({len(streamers)}):**\n{content}", ephemeral=True)
-
-    @disnake.ui.button(
-        label="Назад",
-        custom_id="admin_str_back",
-        style=disnake.ButtonStyle.secondary,
-        emoji="🔙",
-        row=2,
-    )
-    async def back_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
-        await interaction.response.edit_message(
-            embed=get_main_embed(), view=AdminMainView(self.bot)
-        )
+        self.add_item(disnake.ui.Button(
+            label="Удалить",
+            custom_id="admin_str_del",
+            style=disnake.ButtonStyle.danger,
+            emoji="🗑️",
+            row=1
+        ))
+        
+        self.add_item(disnake.ui.Button(
+            label="Список",
+            custom_id="admin_str_list",
+            style=disnake.ButtonStyle.primary,
+            emoji="📋",
+            row=1
+        ))
+        
+        self.add_item(disnake.ui.Button(
+            label="Назад",
+            custom_id="admin_str_back",
+            style=disnake.ButtonStyle.secondary,
+            emoji="🔙",
+            row=2
+        ))
 
 
 # =============================================================================
@@ -306,15 +262,90 @@ class AdminStreamers(commands.Cog):
 
     @commands.Cog.listener("on_button_click")
     async def on_streamers_button(self, interaction: MessageInteraction):
-        """Handle admin_streamers navigation."""
-        if interaction.component.custom_id != "admin_streamers":
+        """Handle admin_streamers navigation and sub-buttons."""
+        custom_id = interaction.component.custom_id or ""
+        
+        # 1. STRICT FILTER
+        if not custom_id.startswith("admin_streamers") and not custom_id.startswith("admin_str_"):
             return
 
-        await interaction.response.defer()
-        embed = await get_streamers_embed(self.api)
-        await interaction.edit_original_response(
-            embed=embed, view=StreamersView(self.bot)
-        )
+        # 2. SAFE DEFER (Exception for Modals)
+        # admin_str_add opens a Modal -> DO NOT DEFER
+        if custom_id != "admin_str_add":
+            try:
+                # Some other buttons might result in modal? Check:
+                # admin_str_edit -> Sends Select (Defer OK)
+                # admin_str_del -> Sends Select (Defer OK)
+                # admin_str_list -> Sends Embed (Defer OK)
+                # admin_str_back -> Edit (Defer OK)
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True) # Most actions here are ephemeral
+            except Exception as e:
+                self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
+
+        # 3. EXECUTE
+        try:
+            if custom_id == "admin_streamers":
+                # Check for existing defer from previous step if it wasn't valid? 
+                # Actually admin_streamers comes from core view which might have diff ephemeral state?
+                # Usually admin_streamers is "Show me the menu".
+                # If we deferred above, we use edit_original_response.
+                embed = await get_streamers_embed(self.api)
+                
+                # If interaction was deferred (likely), use edit_original_response
+                if interaction.response.is_done():
+                     await interaction.edit_original_response(embed=embed, view=StreamersView(self.bot))
+                else:
+                     # Should have been deferred above unless it failed?
+                     pass
+
+            elif custom_id == "admin_str_add":
+                # OPEN MODAL - DIRECT RESPONSE
+                await interaction.response.send_modal(AddStreamerModal(self.bot))
+
+            elif custom_id == "admin_str_edit":
+                streamers = await self.api.list_all_streamers()
+                if not streamers:
+                    await interaction.followup.send("Список пуст", ephemeral=True)
+                    return
+                view = disnake.ui.View(timeout=None)
+                view.add_item(EditStreamerSelect(streamers))
+                await interaction.followup.send("Выберите стримера для редактирования:", view=view, ephemeral=True)
+
+            elif custom_id == "admin_str_del":
+                streamers = await self.api.list_all_streamers()
+                if not streamers:
+                    await interaction.followup.send("Список пуст", ephemeral=True)
+                    return
+                view = disnake.ui.View(timeout=None)
+                view.add_item(DeleteStreamerSelect(streamers))
+                await interaction.followup.send("Выберите стримера для удаления:", view=view, ephemeral=True)
+
+            elif custom_id == "admin_str_list":
+                streamers = await self.api.list_all_streamers()
+                if not streamers:
+                    await interaction.followup.send("Список пуст", ephemeral=True)
+                    return
+                lines = [
+                    f"• **{s['streamer_name']}** (P{s.get('priority', 0)}) {'🟢' if s.get('is_online') else '⚫'}"
+                    for s in streamers
+                ]
+                content = "\n".join(lines[:50])
+                if len(lines) > 50:
+                    content += f"\n... и еще {len(lines) - 50}"
+                await interaction.followup.send(f"**Стримеры ({len(streamers)}):**\n{content}", ephemeral=True)
+
+            elif custom_id == "admin_str_back":
+                from .core import AdminMainView, get_main_embed
+                await interaction.edit_original_response(
+                    embed=get_main_embed(), view=AdminMainView(self.bot)
+                )
+
+        except Exception as e:
+            self.bot.logger.error(f"Error handling streamers button {custom_id}: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
+            except: pass
 
 
 def setup(bot: commands.Bot) -> None:

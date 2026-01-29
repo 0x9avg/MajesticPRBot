@@ -3,14 +3,13 @@ API Service Entry Point.
 FastAPI application with lifespan management for database and RabbitMQ connections.
 """
 
-import asyncio
+import sys
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import Config
-
-import sys
 
 logger = Config.setup_logging("API")
 
@@ -19,26 +18,16 @@ logger = Config.setup_logging("API")
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown."""
     # Startup
-    logger.info(f"Starting {Config.APP_NAME}...")
-
-    missing_vars = Config.validate_env_vars()
-    if missing_vars:
-        logger.error(
-            f"Missing required environment variables: {', '.join(missing_vars)}"
-        )
-
-        sys.exit(1)
-
-    logger.info("✓ Environment variables validated")
+    logger.info(f"Starting {Config.app_name}...")
 
     # Initialize database
     from database import Database
 
     app.state.database = Database(
-        db_host=Config.DB_HOST,
-        db_user=Config.DB_USER,
-        db_password=Config.DB_PASSWORD,
-        db_name=Config.DB_NAME,
+        db_host=Config.db_host,
+        db_user=Config.db_user,
+        db_password=Config.db_password,
+        db_name=Config.db_name,
         logger=Config.setup_logging("Database"),
     )
     await app.state.database.start()
@@ -58,10 +47,10 @@ async def lifespan(app: FastAPI):
     # Initialize Auth service
     from services.auth import AuthService
 
-    app.state.auth = AuthService(secret_key=Config.JWT_SECRET)
+    app.state.auth = AuthService(secret_key=Config.jwt_secret)
     logger.info("✓ Auth service initialized")
 
-    logger.info(f"✓ {Config.APP_NAME} started on {Config.API_HOST}:{Config.API_PORT}")
+    logger.info(f"✓ {Config.app_name} started on {Config.api_host}:{Config.api_port}")
 
     yield
 
@@ -75,12 +64,12 @@ async def lifespan(app: FastAPI):
     await app.state.database.close()
     logger.info("✓ Database disconnected")
 
-    logger.info(f"✓ {Config.APP_NAME} stopped")
+    logger.info(f"✓ {Config.app_name} stopped")
 
 
 # Create FastAPI application
 app = FastAPI(
-    title=Config.APP_NAME,
+    title=Config.app_name,
     version="2.0.0",
     description="PRMajesticBot Central API Service",
     lifespan=lifespan,
@@ -89,7 +78,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=Config.CORS_ORIGINS,
+    allow_origins=Config.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,7 +95,7 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "service": Config.APP_NAME,
+        "service": Config.app_name,
         "version": "2.0.0",
     }
 
@@ -116,7 +105,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "main:app",
-        host=Config.API_HOST,
-        port=Config.API_PORT,
-        log_level=Config.LOG_LEVEL.lower(),
+        host=Config.api_host,
+        port=Config.api_port,
+        log_level=Config.log_level.lower(),
     )

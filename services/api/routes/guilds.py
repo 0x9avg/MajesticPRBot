@@ -29,12 +29,12 @@ def get_broker(request: Request):
 @router.get("", response_model=GuildSettingsResponse)
 async def get_guild_settings(db=Depends(get_db)):
     """Get current guild settings."""
-    settings = await db.get_guild(Config.GUILD_ID)
+    settings = await db.get_guild(Config.guild_id)
     
     if not settings:
         # Create default settings if not exist
-        await db.create_or_update_guild(Config.GUILD_ID)
-        settings = await db.get_guild(Config.GUILD_ID)
+        await db.create_or_update_guild(Config.guild_id)
+        settings = await db.get_guild(Config.guild_id)
     
     return GuildSettingsResponse(**settings)
 
@@ -48,7 +48,7 @@ async def update_guild_settings(
     """Update guild channel settings."""
     # Update core settings
     await db.create_or_update_guild(
-        Config.GUILD_ID,
+        Config.guild_id,
         notification_channel_id=data.notification_channel_id,
         monitoring_channel_id=data.monitoring_channel_id,
         monitoring_message_id=data.monitoring_message_id,
@@ -62,17 +62,17 @@ async def update_guild_settings(
         data.assistant_role_id,
     ]):
         await db.update_guild_extended_settings(
-            Config.GUILD_ID,
+            Config.guild_id,
             pr_actions_channel_id=data.pr_actions_channel_id,
             control_panel_channel_id=data.control_panel_channel_id,
             control_panel_message_id=data.control_panel_message_id,
             assistant_role_id=data.assistant_role_id,
         )
     
-    settings = await db.get_guild(Config.GUILD_ID)
+    settings = await db.get_guild(Config.guild_id)
     
     if broker:
-        await broker.emit_guild_settings_updated(Config.GUILD_ID, data.model_dump(exclude_none=True))
+        await broker.emit_guild_settings_updated(Config.guild_id, data.model_dump(exclude_none=True))
     
     return GuildSettingsResponse(**settings)
 
@@ -85,17 +85,17 @@ async def update_guild_templates(
 ):
     """Update notification templates."""
     await db.update_guild_templates(
-        Config.GUILD_ID,
+        Config.guild_id,
         template_stream_online=data.template_stream_online,
         template_stream_offline=data.template_stream_offline,
         template_category_to_gta=data.template_category_to_gta,
         template_category_from_gta=data.template_category_from_gta,
     )
     
-    settings = await db.get_guild(Config.GUILD_ID)
+    settings = await db.get_guild(Config.guild_id)
     
     if broker:
-        await broker.emit_guild_settings_updated(Config.GUILD_ID, {"templates": data.model_dump(exclude_none=True)})
+        await broker.emit_guild_settings_updated(Config.guild_id, {"templates": data.model_dump(exclude_none=True)})
     
     return GuildSettingsResponse(**settings)
 
@@ -108,17 +108,17 @@ async def update_guild_rates(
 ):
     """Update point rates per priority."""
     await db.update_guild_rates(
-        Config.GUILD_ID,
+        Config.guild_id,
         p0_rate=data.p0_rate,
         p1_rate=data.p1_rate,
         p2_rate=data.p2_rate,
         p3_rate=data.p3_rate,
     )
     
-    settings = await db.get_guild(Config.GUILD_ID)
+    settings = await db.get_guild(Config.guild_id)
     
     if broker:
-        await broker.emit_guild_settings_updated(Config.GUILD_ID, {"rates": data.model_dump(exclude_none=True)})
+        await broker.emit_guild_settings_updated(Config.guild_id, {"rates": data.model_dump(exclude_none=True)})
     
     return GuildSettingsResponse(**settings)
 
@@ -126,8 +126,8 @@ async def update_guild_rates(
 @router.get("/templates/{event_type}")
 async def get_template(event_type: str, db=Depends(get_db)):
     """Get a specific notification template."""
-    if event_type not in Config.ALLOWED_EVENT_TYPES:
+    if event_type not in Config.allowed_event_types:
         raise HTTPException(status_code=400, detail="Недопустимый тип события")
     
-    template = await db.get_notification_template(Config.GUILD_ID, event_type)
+    template = await db.get_notification_template(Config.guild_id, event_type)
     return {"event_type": event_type, "template": template}

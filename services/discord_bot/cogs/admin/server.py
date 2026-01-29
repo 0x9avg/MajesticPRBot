@@ -86,372 +86,74 @@ def create_settings_embed(data):
 # =============================================================================
 
 
-class NotificationChannelSelect(disnake.ui.ChannelSelect):
-    def __init__(self, user_id: int):
-        super().__init__(
-            channel_types=[disnake.ChannelType.text],
-            placeholder="Выберите канал для уведомлений",
-            min_values=1,
-            max_values=1,
-        )
-        self.user_id = user_id
+# =============================================================================
+# Component IDs
+# =============================================================================
+ID_SETUP_NOTIF = "server_setup_notif"
+ID_SETUP_MON = "server_setup_mon"
+ID_SETUP_LOGS = "server_setup_logs"
+ID_SETUP_PANEL = "server_setup_panel"
+ID_SETUP_ROLE = "server_setup_role"
 
-    async def callback(self, interaction: MessageInteraction):
-        selected_channel = self.values[0]
-        try:
-            await interaction.bot.api_client.update_guild_settings(
-                notification_channel_id=selected_channel.id,
-            )
-            await interaction.response.edit_message(
-                embed=create_settings_embed(
-                    await interaction.bot.api_client.get_guild_settings(),
-                ),
-                view=SetupButtonsView(self.user_id),
-            )
-            await interaction.followup.send(
-                f"✅ Канал {selected_channel.mention} выбран для уведомлений.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            interaction.bot.logger.error(f"Error updating notification channel: {e}")
-            await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+ID_SELECT_NOTIF = "server_sel_notif"
+ID_SELECT_MON = "server_sel_mon"
+ID_SELECT_LOGS = "server_sel_logs"
+ID_SELECT_PANEL = "server_sel_panel"
+ID_SELECT_ROLE = "server_sel_role"
+
+ID_BTN_BACK = "server_btn_back"
+
+
+# =============================================================================
+# Views (Dumb Containers)
+# =============================================================================
+
+
+class SetupButtonsView(disnake.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        
+        self.add_item(disnake.ui.Button(label="🔔 Канал уведомлений", custom_id=ID_SETUP_NOTIF, style=disnake.ButtonStyle.primary, row=0))
+        self.add_item(disnake.ui.Button(label="📊 Канал мониторинга", custom_id=ID_SETUP_MON, style=disnake.ButtonStyle.primary, row=0))
+        self.add_item(disnake.ui.Button(label="📢 Канал логов PR", custom_id=ID_SETUP_LOGS, style=disnake.ButtonStyle.primary, row=1))
+        self.add_item(disnake.ui.Button(label="🎛️ Панель Управления", custom_id=ID_SETUP_PANEL, style=disnake.ButtonStyle.primary, row=1))
+        self.add_item(disnake.ui.Button(label="🏷️ Роль Ассистента", custom_id=ID_SETUP_ROLE, style=disnake.ButtonStyle.primary, row=2))
 
 
 class NotificationChannelView(disnake.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.add_item(NotificationChannelSelect(user_id))
-
-    @disnake.ui.button(label="🔙 Назад", style=disnake.ButtonStyle.secondary, row=1)
-    async def back_button(self, button: disnake.ui.Button, inter: MessageInteraction):
-        data = await inter.bot.api_client.get_guild_settings()
-        await inter.response.edit_message(
-            embed=create_settings_embed(data), view=SetupButtonsView(self.user_id)
-        )
-
-
-# =============================================================================
-# Monitoring Channel
-# =============================================================================
-
-
-class MonitoringChannelSelect(disnake.ui.ChannelSelect):
-    def __init__(self, user_id: int):
-        super().__init__(
-            channel_types=[disnake.ChannelType.text],
-            placeholder="Выберите канал для мониторинга",
-            min_values=1,
-            max_values=1,
-        )
-        self.user_id = user_id
-
-    async def callback(self, interaction: MessageInteraction):
-        selected_channel = self.values[0]
-        try:
-            # Delete old monitoring message if exists
-            old_settings = await interaction.bot.api_client.get_guild_settings()
-            if old_settings and old_settings.get("monitoring_message_id"):
-                old_channel_id = old_settings.get("monitoring_channel_id")
-                if old_channel_id:
-                    old_channel = interaction.bot.get_channel(int(old_channel_id))
-                    if old_channel:
-                        try:
-                            old_message = await old_channel.fetch_message(
-                                int(old_settings["monitoring_message_id"])
-                            )
-                            await old_message.delete()
-                            interaction.bot.logger.debug(f"Deleted old monitoring message")
-                        except Exception as e:
-                            interaction.bot.logger.warning(f"Could not delete old monitoring message: {e}")
-
-            # Get streamer data
-            streamers = await interaction.bot.api_client.list_all_streamers()
-            online = [s for s in streamers if s.get("is_online")]
-            gta_count = sum(
-                1 for s in online if str(s.get("game_id")) == Config.GTA5_GAME_ID
-            )
-
-            # Create monitoring message
-            container = create_streamers_component(online, len(streamers), gta_count)
-            monitoring_message = await selected_channel.send(components=container)
-
-            # Save to DB
-            await interaction.bot.api_client.update_guild_settings(
-                monitoring_channel_id=selected_channel.id,
-                monitoring_message_id=monitoring_message.id,
-            )
-
-            await interaction.response.edit_message(
-                embed=create_settings_embed(
-                    await interaction.bot.api_client.get_guild_settings(),
-                ),
-                view=SetupButtonsView(self.user_id),
-            )
-            await interaction.followup.send(
-                f"✅ Канал {selected_channel.mention} выбран для мониторинга.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            interaction.bot.logger.error(f"Error updating monitoring channel: {e}")
-            await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+        self.add_item(disnake.ui.ChannelSelect(custom_id=ID_SELECT_NOTIF, channel_types=[disnake.ChannelType.text], placeholder="Выберите канал...", min_values=1, max_values=1))
+        self.add_item(disnake.ui.Button(label="🔙 Назад", custom_id=ID_BTN_BACK, style=disnake.ButtonStyle.secondary, row=1))
 
 
 class MonitoringChannelView(disnake.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.add_item(MonitoringChannelSelect(user_id))
-
-    @disnake.ui.button(label="🔙 Назад", style=disnake.ButtonStyle.secondary, row=1)
-    async def back_button(self, button: disnake.ui.Button, inter: MessageInteraction):
-        data = await inter.bot.api_client.get_guild_settings()
-        await inter.response.edit_message(
-            embed=create_settings_embed(data), view=SetupButtonsView(self.user_id)
-        )
-
-
-# =============================================================================
-# PR Actions Channel
-# =============================================================================
-
-
-class PRActionsChannelSelect(disnake.ui.ChannelSelect):
-    def __init__(self, user_id: int):
-        super().__init__(
-            channel_types=[disnake.ChannelType.text],
-            placeholder="Выберите канал для логов PR",
-            min_values=1,
-            max_values=1,
-        )
-        self.user_id = user_id
-
-    async def callback(self, interaction: MessageInteraction):
-        selected_channel = self.values[0]
-        try:
-            await interaction.bot.api_client.update_guild_settings(
-                pr_actions_channel_id=selected_channel.id
-            )
-            await interaction.response.edit_message(
-                embed=create_settings_embed(
-                    await interaction.bot.api_client.get_guild_settings(),
-                ),
-                view=SetupButtonsView(self.user_id),
-            )
-            await interaction.followup.send(
-                f"✅ Канал {selected_channel.mention} выбран для логов PR.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            interaction.bot.logger.error(f"Error updating PR actions channel: {e}")
-            await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+        self.add_item(disnake.ui.ChannelSelect(custom_id=ID_SELECT_MON, channel_types=[disnake.ChannelType.text], placeholder="Выберите канал...", min_values=1, max_values=1))
+        self.add_item(disnake.ui.Button(label="🔙 Назад", custom_id=ID_BTN_BACK, style=disnake.ButtonStyle.secondary, row=1))
 
 
 class PRActionsChannelView(disnake.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.add_item(PRActionsChannelSelect(user_id))
-
-    @disnake.ui.button(label="🔙 Назад", style=disnake.ButtonStyle.secondary, row=1)
-    async def back_button(self, button: disnake.ui.Button, inter: MessageInteraction):
-        data = await inter.bot.api_client.get_guild_settings()
-        await inter.response.edit_message(
-            embed=create_settings_embed(data), view=SetupButtonsView(self.user_id)
-        )
-
-
-# =============================================================================
-# Control Panel Channel
-# =============================================================================
-
-
-class ControlPanelChannelSelect(disnake.ui.ChannelSelect):
-    def __init__(self, user_id: int):
-        super().__init__(
-            channel_types=[disnake.ChannelType.text],
-            placeholder="Выберите канал для Панели Управления",
-            min_values=1,
-            max_values=1,
-        )
-        self.user_id = user_id
-
-    async def callback(self, interaction: MessageInteraction):
-        selected_channel = self.values[0]
-        try:
-            # Delete old panel message if exists
-            settings = await interaction.bot.api_client.get_guild_settings()
-            if settings and settings.get("control_panel_message_id"):
-                old_channel_id = settings.get("control_panel_channel_id")
-                if old_channel_id:
-                    old_chan = interaction.bot.get_channel(int(old_channel_id))
-                    if old_chan:
-                        try:
-                            old_msg = await old_chan.fetch_message(
-                                int(settings["control_panel_message_id"])
-                            )
-                            await old_msg.delete()
-                            interaction.bot.logger.debug(f"Deleted old control panel message")
-                        except Exception as e:
-                            interaction.bot.logger.warning(f"Could not delete old panel message: {e}")
-
-            # Create new Control Panel message
-            try:
-                msg = await selected_channel.send(
-                    embed=get_main_embed(), view=AdminMainView(interaction.bot)
-                )
-            except disnake.Forbidden:
-                await interaction.response.send_message(
-                    f"❌ Нет прав отправлять в {selected_channel.mention}.",
-                    ephemeral=True,
-                )
-                return
-
-            # Save to DB
-            await interaction.bot.api_client.update_guild_settings(
-                control_panel_channel_id=selected_channel.id,
-                control_panel_message_id=msg.id,
-            )
-
-            await interaction.response.edit_message(
-                embed=create_settings_embed(
-                    await interaction.bot.api_client.get_guild_settings(),
-                ),
-                view=SetupButtonsView(self.user_id),
-            )
-            await interaction.followup.send(
-                f"✅ Панель управления создана в {selected_channel.mention}!",
-                ephemeral=True,
-            )
-        except Exception as e:
-            interaction.bot.logger.error(f"Error updating CP channel: {e}")
-            await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+        self.add_item(disnake.ui.ChannelSelect(custom_id=ID_SELECT_LOGS, channel_types=[disnake.ChannelType.text], placeholder="Выберите канал...", min_values=1, max_values=1))
+        self.add_item(disnake.ui.Button(label="🔙 Назад", custom_id=ID_BTN_BACK, style=disnake.ButtonStyle.secondary, row=1))
 
 
 class ControlPanelChannelView(disnake.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.add_item(ControlPanelChannelSelect(user_id))
-
-    @disnake.ui.button(label="🔙 Назад", style=disnake.ButtonStyle.secondary, row=1)
-    async def back_button(self, button: disnake.ui.Button, inter: MessageInteraction):
-        data = await inter.bot.api_client.get_guild_settings()
-        await inter.response.edit_message(
-            embed=create_settings_embed(data), view=SetupButtonsView(self.user_id)
-        )
-
-
-# =============================================================================
-# Assistant Role
-# =============================================================================
-
-
-class AssistantRoleSelect(disnake.ui.RoleSelect):
-    def __init__(self, user_id: int):
-        super().__init__(
-            placeholder="Выберите роль ассистента",
-            min_values=1,
-            max_values=1,
-        )
-        self.user_id = user_id
-
-    async def callback(self, interaction: MessageInteraction):
-        selected_role = self.values[0]
-        try:
-            await interaction.bot.api_client.update_guild_settings(
-                assistant_role_id=selected_role.id
-            )
-            await interaction.response.edit_message(
-                embed=create_settings_embed(
-                    await interaction.bot.api_client.get_guild_settings(),
-                ),
-                view=SetupButtonsView(self.user_id),
-            )
-            await interaction.followup.send(
-                f"✅ Роль {selected_role.mention} выбрана для ассистентов.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            interaction.bot.logger.error(f"Error updating assistant role: {e}")
-            await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+        self.add_item(disnake.ui.ChannelSelect(custom_id=ID_SELECT_PANEL, channel_types=[disnake.ChannelType.text], placeholder="Выберите канал...", min_values=1, max_values=1))
+        self.add_item(disnake.ui.Button(label="🔙 Назад", custom_id=ID_BTN_BACK, style=disnake.ButtonStyle.secondary, row=1))
 
 
 class AssistantRoleView(disnake.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.add_item(AssistantRoleSelect(user_id))
-
-    @disnake.ui.button(label="🔙 Назад", style=disnake.ButtonStyle.secondary, row=1)
-    async def back_button(self, button: disnake.ui.Button, inter: MessageInteraction):
-        data = await inter.bot.api_client.get_guild_settings()
-        await inter.response.edit_message(
-            embed=create_settings_embed(data), view=SetupButtonsView(self.user_id)
-        )
-
-
-# =============================================================================
-# Main Setup Buttons View
-# =============================================================================
-
-
-class SetupButtonsView(disnake.ui.View):
-    """Main setup view with buttons for each setting."""
-
-    def __init__(self, user_id: int):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-
-    @disnake.ui.button(
-        label="🔔 Канал уведомлений",
-        style=disnake.ButtonStyle.primary,
-        row=0,
-    )
-    async def notification_button(
-        self, button: disnake.ui.Button, inter: MessageInteraction
-    ):
-        await inter.response.edit_message(view=NotificationChannelView(self.user_id))
-
-    @disnake.ui.button(
-        label="📊 Канал мониторинга",
-        style=disnake.ButtonStyle.primary,
-        row=0,
-    )
-    async def monitoring_button(
-        self, button: disnake.ui.Button, inter: MessageInteraction
-    ):
-        await inter.response.edit_message(view=MonitoringChannelView(self.user_id))
-
-    @disnake.ui.button(
-        label="📢 Канал логов PR",
-        style=disnake.ButtonStyle.primary,
-        row=1,
-    )
-    async def logs_button(
-        self, button: disnake.ui.Button, inter: MessageInteraction
-    ):
-        await inter.response.edit_message(view=PRActionsChannelView(self.user_id))
-
-    @disnake.ui.button(
-        label="🎛️ Панель Управления",
-        style=disnake.ButtonStyle.primary,
-        row=1,
-    )
-    async def panel_button(
-        self, button: disnake.ui.Button, inter: MessageInteraction
-    ):
-        await inter.response.edit_message(view=ControlPanelChannelView(self.user_id))
-
-    @disnake.ui.button(
-        label="🏷️ Роль Ассистента",
-        style=disnake.ButtonStyle.primary,
-        row=2,
-    )
-    async def role_button(
-        self, button: disnake.ui.Button, inter: MessageInteraction
-    ):
-        await inter.response.edit_message(view=AssistantRoleView(self.user_id))
+        self.add_item(disnake.ui.RoleSelect(custom_id=ID_SELECT_ROLE, placeholder="Выберите роль...", min_values=1, max_values=1))
+        self.add_item(disnake.ui.Button(label="🔙 Назад", custom_id=ID_BTN_BACK, style=disnake.ButtonStyle.secondary, row=1))
 
 
 # =============================================================================
@@ -487,17 +189,139 @@ class AdminServer(commands.Cog):
         )
 
     @commands.Cog.listener("on_button_click")
-    async def on_server_button(self, interaction: MessageInteraction):
-        """Handle admin_server navigation from control panel."""
-        if interaction.component.custom_id != "admin_server":
+    async def on_server_button_interaction(self, interaction: MessageInteraction):
+        """Handle all server config buttons."""
+        custom_id = interaction.component.custom_id or ""
+        
+        # 1.Strict Filter
+        if not custom_id.startswith(("server_setup_", "server_btn_", "admin_server")):
             return
 
-        await interaction.response.defer()
-        data = await self.api.get_guild_settings()
-        await interaction.edit_original_response(
-            embed=create_settings_embed(data),
-            view=SetupButtonsView(interaction.user.id),
-        )
+        # 2. Safe Defer
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            self.bot.logger.warning(f"Defer failed: {e}")
+
+        # 3. Execute
+        try:
+            user_id = interaction.user.id
+            if custom_id == "admin_server":
+                 data = await self.api.get_guild_settings()
+                 await interaction.edit_original_response(embed=create_settings_embed(data), view=SetupButtonsView(user_id))
+            
+            elif custom_id == ID_BTN_BACK:
+                 data = await self.api.get_guild_settings()
+                 await interaction.edit_original_response(embed=create_settings_embed(data), view=SetupButtonsView(user_id))
+
+            elif custom_id == ID_SETUP_NOTIF:
+                 await interaction.edit_original_response(view=NotificationChannelView(user_id))
+            
+            elif custom_id == ID_SETUP_MON:
+                 await interaction.edit_original_response(view=MonitoringChannelView(user_id))
+
+            elif custom_id == ID_SETUP_LOGS:
+                 await interaction.edit_original_response(view=PRActionsChannelView(user_id))
+
+            elif custom_id == ID_SETUP_PANEL:
+                 await interaction.edit_original_response(view=ControlPanelChannelView(user_id))
+            
+            elif custom_id == ID_SETUP_ROLE:
+                 await interaction.edit_original_response(view=AssistantRoleView(user_id))
+
+        except Exception as e:
+             self.bot.logger.error(f"Server button error {custom_id}: {e}", exc_info=True)
+             try: await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+             except: pass
+
+
+    @commands.Cog.listener("on_dropdown")
+    async def on_server_dropdown_interaction(self, interaction: MessageInteraction):
+        """Handle server config dropdowns."""
+        custom_id = interaction.component.custom_id or ""
+        
+        if not custom_id.startswith("server_sel_"):
+            return
+
+        try:
+             if not interaction.response.is_done():
+                 await interaction.response.defer(ephemeral=True)
+        except: pass
+
+        try:
+            user_id = interaction.user.id
+            val = interaction.values[0] # Channel/Role object or ID string depending on select type? 
+            # disnake ChannelSelect/RoleSelect returns objects in values if resolved, but interaction.values usually lists raw IDs (strings).
+            # WAIT. interaction.values for ChannelSelect are IDs (strings). interaction.data['resolved'] has objects.
+            # But the 'values' property in interaction usually gives the IDs.
+            # Let's resolve safely.
+            
+            # Helper to get settings refresh
+            async def back_to_main():
+                data = await self.api.get_guild_settings()
+                await interaction.edit_original_response(embed=create_settings_embed(data), view=SetupButtonsView(user_id))
+
+            if custom_id == ID_SELECT_NOTIF:
+                await self.api.update_guild_settings(notification_channel_id=int(val))
+                await back_to_main()
+                try: await interaction.followup.send(f"✅ Канал уведомлений обновлен: <#{val}>", ephemeral=True)
+                except: pass
+
+            elif custom_id == ID_SELECT_LOGS:
+                await self.api.update_guild_settings(pr_actions_channel_id=int(val))
+                await back_to_main()
+                try: await interaction.followup.send(f"✅ Канал логов обновлен: <#{val}>", ephemeral=True)
+                except: pass
+
+            elif custom_id == ID_SELECT_ROLE:
+                await self.api.update_guild_settings(assistant_role_id=int(val))
+                await back_to_main()
+                try: await interaction.followup.send(f"✅ Роль ассистента обновлена: <@&{val}>", ephemeral=True)
+                except: pass
+
+            elif custom_id == ID_SELECT_PANEL:
+                 # Logic for Panel
+                 channel_id = int(val)
+                 channel = self.bot.get_channel(channel_id)
+                 if channel:
+                     try:
+                         msg = await channel.send(embed=get_main_embed(), view=AdminMainView(self.bot))
+                         await self.api.update_guild_settings(
+                              control_panel_channel_id=channel_id,
+                              control_panel_message_id=msg.id
+                         )
+                         await back_to_main()
+                         await interaction.followup.send(f"✅ Панель создана: <#{val}>", ephemeral=True)
+                     except Exception as e:
+                         await interaction.followup.send(f"❌ Ошибка создания панели: {e}", ephemeral=True)
+                 else:
+                     await interaction.followup.send("❌ Канал не найден.", ephemeral=True)
+
+            elif custom_id == ID_SELECT_MON:
+                 # Logic for Monitoring
+                 channel_id = int(val)
+                 channel = self.bot.get_channel(channel_id)
+                 if channel:
+                     streamers = await self.api.list_all_streamers()
+                     online = [s for s in streamers if s.get("is_online")]
+                     gta_count = sum(1 for s in online if str(s.get("game_id")) == Config.gta5_game_id)
+                     container = create_streamers_component(online, len(streamers), gta_count)
+                     
+                     msg = await channel.send(components=container)
+                     await self.api.update_guild_settings(
+                          monitoring_channel_id=channel_id,
+                          monitoring_message_id=msg.id
+                     )
+                     await back_to_main()
+                     await interaction.followup.send(f"✅ Мониторинг настроен: <#{val}>", ephemeral=True)
+                 else:
+                     await interaction.followup.send("❌ Канал не найден.", ephemeral=True)
+
+        except Exception as e:
+             self.bot.logger.error(f"Dropdown error {custom_id}: {e}", exc_info=True)
+             try: await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+             except: pass
 
 
 def setup(bot: commands.Bot) -> None:

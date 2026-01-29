@@ -3,7 +3,7 @@ Assistant schemas for API requests and responses.
 """
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 from schemas.common import Snowflake
 
@@ -12,8 +12,21 @@ class AssistantBase(BaseModel):
     user_id: str = Field(..., description="Discord user ID")
 
 
-class AssistantCreate(AssistantBase):
-    pass
+class AssistantCreate(BaseModel):
+    """Schema for creating/updating an assistant."""
+
+    pr_id: int
+    nickname: str
+    role: str  # 'employee', 'senior_employee', 'manager', 'developer'
+    experience_days: int = 0
+
+
+class AssistantAssignment(BaseModel):
+    """Schema for updating assistant assignment."""
+
+    assigned_to_type: Optional[str] = None  # 'streamer', 'event', or None
+    assigned_to_id: Optional[int] = None
+    assigned_to_name: Optional[str] = None
 
 
 class AssistantResponse(BaseModel):

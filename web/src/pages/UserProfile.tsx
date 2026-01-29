@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
@@ -40,13 +40,14 @@ export default function UserProfile() {
                     const assistantRes = await fetch(`/api/assistants/${authUser.discord_id}`);
                     if (assistantRes.ok) {
                         const json = await assistantRes.json();
-                        assistantData = json.data;
+                        assistantData = json.data || json;
                     } else {
                         // Fallback: Try finding by nickname (if ID mismatch or fresh DB)
                         const allRes = await fetch('/api/assistants');
-                        const allJson = await allRes.json();
-                        if (allJson.success) {
-                            assistantData = allJson.data.find((a: any) =>
+                        if (allRes.ok) {
+                            const allJson = await allRes.json();
+                            const allData = allJson.data || allJson;
+                            assistantData = (Array.isArray(allData) ? allData : []).find((a: any) =>
                                 a.nickname.toLowerCase() === authUser.nickname.toLowerCase()
                             );
                         }
@@ -59,8 +60,11 @@ export default function UserProfile() {
                     setUser(assistantData);
                     // 3. Fetch Logs
                     const logsRes = await fetch(`/api/assistants/${assistantData.pr_id}/logs`);
-                    const logsJson = await logsRes.json();
-                    if (logsJson.success) setLogs(logsJson.data);
+                    if (logsRes.ok) {
+                        const logsJson = await logsRes.json();
+                        const logsData = logsJson.data || logsJson;
+                        setLogs(Array.isArray(logsData) ? logsData : []);
+                    }
                 } else {
                     setError('PR-профиль не найден. Возможно, ваш Discord ID не привязан к базе ассистентов.');
                 }
@@ -101,13 +105,13 @@ export default function UserProfile() {
         const isFree = user.status === 'free';
         const color = isFree ? 'text-[#4ade80]' : 'text-[#facc15]';
         const bg = isFree ? 'bg-[#4ade80]/10' : 'bg-[#facc15]/10';
-        const icon = isFree ? Shield : (user.assigned_to_type === 'streamer' ? Wifi : Calendar);
+        const StatusIcon = isFree ? Shield : (user.assigned_to_type === 'streamer' ? Wifi : Calendar);
 
         return (
             <div className={`flex flex-col gap-1 p-4 rounded-2xl border border-white/5 bg-[#242424]/40 h-full`}>
                 <div className="flex items-center gap-2 mb-2">
                     <div className={`p-1.5 rounded-lg ${bg} ${color}`}>
-                        <Shield className="w-4 h-4" />
+                        <StatusIcon className="w-4 h-4" />
                     </div>
                     <span className="text-white/40 text-xs font-medium uppercase tracking-wider">Текущий статус</span>
                 </div>

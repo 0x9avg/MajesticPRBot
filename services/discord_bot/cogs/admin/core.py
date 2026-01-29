@@ -144,12 +144,13 @@ class AdminCore(commands.Cog):
     async def on_admin_button(self, interaction: MessageInteraction):
         """Handle admin navigation buttons."""
         custom_id = interaction.component.custom_id
-        if not custom_id or not custom_id.startswith("admin_"):
+        if custom_id != "admin_home":
             return
 
         # Back to main menu
         if custom_id == "admin_home":
-            await interaction.response.defer()
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             await interaction.edit_original_response(
                 embed=get_main_embed(), view=AdminMainView(self.bot)
             )

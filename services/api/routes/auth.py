@@ -38,24 +38,24 @@ async def login(
     
     if user:
         # Check lockout
-        if user["failed_login_attempts"] >= Config.MAX_LOGIN_ATTEMPTS:
+        if user["failed_login_attempts"] >= Config.max_login_attempts:
             last_failed = user["last_failed_login"]
             if last_failed:
                 time_passed = (datetime.now() - last_failed).total_seconds()
                 
-                if time_passed > Config.LOGIN_ATTEMPT_WINDOW:
+                if time_passed > Config.login_attempt_window:
                     await db.reset_failed_login(user["id"])
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail=f"Слишком много попыток входа. Повторите через {int(Config.LOGIN_ATTEMPT_WINDOW - time_passed)} секунд.",
+                        detail=f"Слишком много попыток входа. Повторите через {int(Config.login_attempt_window - time_passed)} секунд.",
                     )
             else:
                 await db.reset_failed_login(user["id"])
     
     # Check attempts
     attempts = await db.get_failed_login_attempts(login_data.username)
-    if attempts >= Config.MAX_LOGIN_ATTEMPTS:
+    if attempts >= Config.max_login_attempts:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Слишком много попыток входа. Повторите позже.",

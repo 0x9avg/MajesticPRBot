@@ -20,8 +20,8 @@ logger = logging.getLogger("Unsubscriber")
 class UnsubscribeBot(Client):
     def __init__(self):
         super().__init__(
-            client_id=Config.TWITCH_CLIENT_ID,
-            client_secret=Config.TWITCH_CLIENT_SECRET,
+            client_id=Config.twitch_client_id,
+            client_secret=Config.twitch_client_secret,
         )
 
     async def event_ready(self):

@@ -75,7 +75,7 @@ class APIClient:
         """Get a specific streamer."""
         return await self._request("GET", f"/streamers/{twitch_id}")
 
-    async def create_streamer_full(
+    async def create_streamer(
         self,
         streamer_id: int,
         streamer_name: str,
@@ -88,26 +88,29 @@ class APIClient:
         stream_title: str = None,
         stream_thumbnail_url: str = None,
     ) -> Optional[Dict]:
-        """Create streamer with full data (for Twitch bot use)."""
-        params = {
-            "streamer_id": str(streamer_id),
+        """Create streamer with full data (for Twitch bot use).
+        
+        Uses unified POST /streamers endpoint with full data mode.
+        """
+        data = {
+            "streamer_id": streamer_id,
             "streamer_name": streamer_name,
-            "is_online": str(is_online).lower(),
-            "priority": str(priority),
-            "added_by_id": str(added_by_id),
+            "is_online": is_online,
+            "priority": priority,
+            "added_by_id": added_by_id,
         }
         if started_at:
-            params["started_at"] = str(started_at)
-        if game_id:
-            params["game_id"] = str(game_id)
-        if game_name:
-            params["game_name"] = game_name
-        if stream_title:
-            params["stream_title"] = stream_title
-        if stream_thumbnail_url:
-            params["stream_thumbnail_url"] = stream_thumbnail_url
+            data["started_at"] = started_at
+        if game_id is not None:
+            data["game_id"] = game_id
+        if game_name is not None:
+            data["game_name"] = game_name
+        if stream_title is not None:
+            data["stream_title"] = stream_title
+        if stream_thumbnail_url is not None:
+            data["stream_thumbnail_url"] = stream_thumbnail_url
 
-        return await self._request("POST", "/streamers/full", params=params)
+        return await self._request("POST", "/streamers", data=data)
 
     async def update_streamer_status(
         self,
@@ -119,22 +122,21 @@ class APIClient:
         stream_title: str = None,
         stream_thumbnail_url: str = None,
     ) -> bool:
-        """Update streamer online status."""
-        # Convert boolean to string for aiohttp params
-        params = {"is_online": str(is_online).lower()}
+        """Update streamer online status using JSON body."""
+        data = {"is_online": is_online}
         if started_at:
-            params["started_at"] = str(started_at)
+            data["started_at"] = started_at
         if game_id is not None:
-            params["game_id"] = str(game_id)
+            data["game_id"] = game_id
         if game_name is not None:
-            params["game_name"] = game_name
+            data["game_name"] = game_name
         if stream_title is not None:
-            params["stream_title"] = stream_title
+            data["stream_title"] = stream_title
         if stream_thumbnail_url is not None:
-            params["stream_thumbnail_url"] = stream_thumbnail_url
+            data["stream_thumbnail_url"] = stream_thumbnail_url
 
         result = await self._request(
-            "PATCH", f"/streamers/{twitch_id}/status", params=params
+            "PATCH", f"/streamers/{twitch_id}/status", data=data
         )
         return result is not None
 

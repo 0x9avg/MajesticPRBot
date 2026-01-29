@@ -20,7 +20,7 @@ class Info(commands.Cog):
             embed = Embed(
                 title=f"Информация о {self.bot.user.name}",
                 color=disnake.Colour.red(),
-                description=f"**Version:** {Config.VERSION}\n**Microservice Architecture**\n**Developer:** 9avg",
+                description=f"**Version:** {Config.version}\n**Microservice Architecture**\n**Developer:** 9avg",
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
         except Exception as e:

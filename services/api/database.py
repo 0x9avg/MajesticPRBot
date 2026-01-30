@@ -193,7 +193,7 @@ class Database:
                         CREATE TABLE IF NOT EXISTS assistants (
                             pr_id BIGINT UNSIGNED PRIMARY KEY,
                             nickname VARCHAR(100),
-                            role ENUM('employee', 'senior_employee', 'manager', 'developer') NOT NULL,
+                            role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL,
                             
                             -- Current Assignment State
                             assigned_to_type ENUM('streamer', 'event') NULL,
@@ -217,6 +217,7 @@ class Database:
                             
                             target_type ENUM('streamer', 'event') NOT NULL DEFAULT 'streamer',
                             target_id BIGINT UNSIGNED NOT NULL,
+                            is_probation BOOLEAN DEFAULT FALSE,
                             
                             started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             ended_at TIMESTAMP NULL,
@@ -339,6 +340,27 @@ class Database:
                         """
                     )
 
+                    # =========================================================
+                    # Admin Logs Table (GEMINI.md: Audit Logs for admin actions)
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS admin_logs (
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            admin_id BIGINT UNSIGNED NOT NULL,
+                            action VARCHAR(50) NOT NULL,
+                            target_type VARCHAR(50),
+                            target_id VARCHAR(100),
+                            details JSON,
+                            ip_address VARCHAR(45),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_admin_id (admin_id),
+                            INDEX idx_action (action),
+                            INDEX idx_created_at (created_at)
+                        )
+                        """
+                    )
+
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
 
@@ -356,30 +378,50 @@ class Database:
 
         async with conn.cursor() as cursor:
             default_permissions = {
+                "junior_employee": {
+                    "can_view_dashboard": True,
+                    "can_spec_probation": True,
+                    "can_manage_events": False,
+                    "can_manage_streamers": False,
+                    "can_execute_commands": False,
+                    "can_view_logs": False,
+                },
                 "employee": {
                     "can_view_dashboard": True,
+                    "can_spec_probation": False,
+                    "can_manage_events": False,
+                    "can_manage_streamers": False,
                     "can_execute_commands": False,
                     "can_view_logs": False,
                 },
                 "senior_employee": {
                     "can_view_dashboard": True,
-                    "can_execute_commands": True,
-                    "can_view_logs": True,
+                    "can_spec_probation": False,
+                    "can_manage_events": False,
+                    "can_manage_streamers": False,
+                    "can_execute_commands": False,
+                    "can_view_logs": False,
                 },
                 "manager": {
                     "can_view_dashboard": True,
+                    "can_spec_probation": True,
+                    "can_manage_events": True,
+                    "can_manage_streamers": True,
+                    "can_register_users": True,
                     "can_execute_commands": True,
                     "can_view_logs": True,
-                    "can_register_users": True,
                     "can_manage_permissions": False,
                 },
                 "developer": {
                     "can_view_dashboard": True,
-                    "can_execute_commands": True,
-                    "can_view_logs": True,
+                    "can_spec_probation": True,
+                    "can_manage_events": True,
+                    "can_manage_streamers": True,
                     "can_register_users": True,
                     "can_manage_permissions": True,
                     "can_access_admin_panel": True,
+                    "can_execute_commands": True,
+                    "can_view_logs": True,
                 },
             }
 
@@ -394,6 +436,80 @@ class Database:
                 )
             await conn.commit()
             self.logger.debug("  ✓ Default permissions initialized")
+
+    async def get_role_permissions(self, role: str) -> dict:
+        """Get permissions for a role from role_permissions table."""
+        import json
+        
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT permissions FROM role_permissions WHERE role = %s",
+                    (role,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    permissions = row.get("permissions", "{}")
+                    if isinstance(permissions, str):
+                        return json.loads(permissions)
+                    return permissions
+                
+                # Return default (no permissions) for unknown roles
+                return {
+                    "can_view_dashboard": False,
+                    "can_spec_probation": False,
+                    "can_manage_events": False,
+                    "can_manage_streamers": False,
+                    "can_execute_commands": False,
+                    "can_view_logs": False,
+                }
+
+    @db_retry()
+    async def log_admin_action(
+        self,
+        admin_id: int,
+        action: str,
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        details: Optional[dict] = None,
+        ip_address: Optional[str] = None,
+    ) -> None:
+        """
+        Log an admin action to the admin_logs table for auditing.
+        
+        Args:
+            admin_id: Discord ID of the admin performing the action
+            action: Action name (e.g., 'update_streamer', 'delete_assistant')
+            target_type: Type of target entity (e.g., 'streamer', 'assistant')
+            target_id: ID of the target entity
+            details: Optional JSON details (old_value, new_value, etc.)
+            ip_address: Optional IP address of the request source
+        """
+        import json
+        
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO admin_logs 
+                            (admin_id, action, target_type, target_id, details, ip_address)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            admin_id,
+                            action,
+                            target_type,
+                            target_id,
+                            json.dumps(details) if details else None,
+                            ip_address,
+                        ),
+                    )
+                    await conn.commit()
+                    self.logger.debug(f"Admin log: {action} by {admin_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to log admin action: {e}", exc_info=True)
+            # Don't raise - logging failure shouldn't break the main operation
 
     # =========================================================================
     # Streamer Operations
@@ -498,30 +614,67 @@ class Database:
     @db_retry()
     async def get_streamer(self, streamer_id: int) -> Optional[Dict[str, Any]]:
         """
-        Получение информации о стримере по ID.
+        Получение информации о стримере по ID с поддержкой множественных назначений.
+        
+        Returns dict with 'assignments' list containing Main and Probation slots.
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # 1. Get streamer base info
                     await cursor.execute(
                         """
                         SELECT 
-                            s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
-                            s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.added_at, s.added_by_id, s.updated_at,
-                            a.pr_id as assigned_pr_id, 
-                            ss.started_at as assigned_at
-                        FROM streamers s
-                        LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                             AND ss.target_type = 'streamer' 
-                             AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL
-                        WHERE s.streamer_id = %s
+                            streamer_id, streamer_name, is_online, stream_title, stream_thumbnail_url,
+                            stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
+                            priority, added_at, added_by_id, updated_at
+                        FROM streamers
+                        WHERE streamer_id = %s
                         """,
                         (streamer_id,),
                     )
-                    result = await cursor.fetchone()
+                    streamer = await cursor.fetchone()
+                    if not streamer:
+                        return None
+                    
+                    # 2. Get all assignments for this streamer (Main + Probation)
+                    # Probation status comes from spec_sessions.is_probation, not assistants table
+                    await cursor.execute(
+                        """
+                        SELECT 
+                            a.pr_id, 
+                            ss.is_probation,
+                            ss.started_at as assigned_at
+                        FROM assistants a
+                        INNER JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
+                            AND ss.target_type = 'streamer' 
+                            AND ss.target_id = a.assigned_to_id 
+                            AND ss.ended_at IS NULL
+                        WHERE a.assigned_to_type = 'streamer' AND a.assigned_to_id = %s
+                        """,
+                        (streamer_id,),
+                    )
+                    assignments = await cursor.fetchall()
+                    
+                    # 3. Build result with assignments list
+                    result = dict(streamer)
+                    result["assignments"] = [
+                        {
+                            "pr_id": str(a["pr_id"]),
+                            "is_probation": a.get("is_probation", False),
+                            "assigned_at": a.get("assigned_at"),
+                        }
+                        for a in assignments
+                    ] if assignments else []
+                    
+                    # Legacy compatibility: set assigned_pr_id to Main slot if exists
+                    main_assignment = next(
+                        (a for a in result["assignments"] if not a["is_probation"]), 
+                        None
+                    )
+                    result["assigned_pr_id"] = main_assignment["pr_id"] if main_assignment else None
+                    result["assigned_at"] = main_assignment["assigned_at"] if main_assignment else None
+                    
                     return result
         except Exception as e:
             self.logger.error(
@@ -728,24 +881,29 @@ class Database:
     async def list_all_streamers(self) -> List[Dict[str, Any]]:
         """
         Получение всех стримеров из базы данных.
+        Returns unique streamers without duplicates from multiple assignments.
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # Query streamers with GROUP BY to avoid duplicates
+                    # For assignments, we take the first (Main) slot if exists
                     await cursor.execute(
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
-                            a.pr_id as assigned_pr_id, 
-                            ss.started_at as assigned_at
+                            MIN(a.pr_id) as assigned_pr_id,
+                            MIN(ss.started_at) as assigned_at
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
                         LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
                              AND ss.target_type = 'streamer' 
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
+                        GROUP BY s.streamer_id
+                        ORDER BY s.priority DESC, s.streamer_name ASC
                         """
                     )
                     return await cursor.fetchall()
@@ -997,29 +1155,62 @@ class Database:
     # =========================================================================
 
     @db_retry()
-    async def assign_pr_to_streamer(self, streamer_id: int, pr_id: int) -> bool:
+    async def assign_pr_to_streamer(
+        self, streamer_id: int, pr_id: int, is_probation: bool = False
+    ) -> bool:
         """
-        Назначение PR-ассистента стримеру.
+        Назначение PR-ассистента стримеру с поддержкой Probation (Slot Logic).
 
         Args:
             streamer_id: Twitch ID стримера
             pr_id: Discord ID ассистента
+            is_probation: True если это спек стажера (второй слот)
 
         Returns:
-            True если успешно, False если уже назначен
+            True если успешно, False если слот занят
+
+        Slot Logic:
+            - Каждый стример может иметь до 2 назначенных: 1 Main + 1 Probation
+            - Slot type is determined by spec_sessions.is_probation flag
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Check if streamer is already assigned (via assistants table)
+                    # Check if the PR is already assigned to something
                     await cursor.execute(
-                        "SELECT pr_id FROM assistants WHERE assigned_to_type = 'streamer' AND assigned_to_id = %s",
+                        "SELECT assigned_to_type FROM assistants WHERE pr_id = %s",
+                        (pr_id,),
+                    )
+                    pr_status = await cursor.fetchone()
+                    if pr_status and pr_status.get("assigned_to_type"):
+                        self.logger.warning(f"PR {pr_id} is already assigned")
+                        return False
+
+                    # Check if requested slot is available for this streamer
+                    # Slot availability is based on active spec_sessions, not assistants.is_probation_mode
+                    await cursor.execute(
+                        """
+                        SELECT ss.pr_id, ss.is_probation 
+                        FROM spec_sessions ss
+                        WHERE ss.target_type = 'streamer' 
+                          AND ss.target_id = %s 
+                          AND ss.ended_at IS NULL
+                        """,
                         (streamer_id,),
                     )
-                    if await cursor.fetchone():
-                        return False  # Already assigned
+                    existing_sessions = await cursor.fetchall()
 
-                    # Assign PR to streamer in assistants table
+                    # Check slot availability
+                    for session in existing_sessions:
+                        if session.get("is_probation") == is_probation:
+                            # Slot is occupied
+                            slot_name = "Probation" if is_probation else "Main"
+                            self.logger.warning(
+                                f"{slot_name} slot for streamer {streamer_id} is occupied by PR {session['pr_id']}"
+                            )
+                            return False
+
+                    # Assign PR to streamer in assistants table (no is_probation_mode)
                     await cursor.execute(
                         """
                         INSERT INTO assistants (pr_id, assigned_to_type, assigned_to_id) 
@@ -1031,18 +1222,19 @@ class Database:
                         (pr_id, streamer_id, streamer_id),
                     )
 
-                    # Create new spec session
+                    # Create new spec session with is_probation flag
                     await cursor.execute(
                         """
-                        INSERT INTO spec_sessions (pr_id, target_type, target_id, started_at)
-                        VALUES (%s, 'streamer', %s, NOW())
+                        INSERT INTO spec_sessions (pr_id, target_type, target_id, is_probation, started_at)
+                        VALUES (%s, 'streamer', %s, %s, NOW())
                         """,
-                        (pr_id, streamer_id),
+                        (pr_id, streamer_id, is_probation),
                     )
 
                     await conn.commit()
+                    slot_name = "Probation" if is_probation else "Main"
                     self.logger.debug(
-                        f"✓ PR {pr_id} assigned to streamer {streamer_id}"
+                        f"✓ PR {pr_id} assigned to streamer {streamer_id} as {slot_name}"
                     )
                     return True
         except Exception as e:
@@ -1256,6 +1448,23 @@ class Database:
             raise
 
     @db_retry()
+    async def get_active_sessions(self) -> List[Dict[str, Any]]:
+        """Get all active spec sessions."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT * FROM spec_sessions 
+                        WHERE ended_at IS NULL
+                        """
+                    )
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to get active sessions: {e}", exc_info=True)
+            return []
+
+    @db_retry()
     async def get_streamer_assigned_pr(self, streamer_id: int) -> Optional[int]:
         """
         Получение назначенного PR-ассистента для стримера.
@@ -1421,38 +1630,7 @@ class Database:
             )
             raise
 
-    @db_retry()
-    async def transfer_streamer(
-        self, from_pr_id: int, to_pr_id: int, streamer_id: int
-    ) -> Optional[int]:
-        """
-        Передача стримера от одного ассистента другому.
-
-        Args:
-            from_pr_id: ID текущего ассистента
-            to_pr_id: ID нового ассистента
-            streamer_id: Twitch ID стримера
-
-        Returns:
-            Длительность сессии предыдущего ассистента или None
-        """
-        try:
-            # First unassign current PR with 'transfer' reason
-            result = await self.unassign_pr_from_streamer(streamer_id, "transfer")
-            if not result:
-                return None
-
-            # Инициализация таблиц
-            await self.init_db()
-            await self.assign_pr_to_streamer(streamer_id, to_pr_id)
-
-            return result["duration_seconds"]
-        except Exception as e:
-            self.logger.error(
-                f"Failed to transfer streamer {streamer_id} from {from_pr_id} to {to_pr_id}: {e}",
-                exc_info=True,
-            )
-            raise
+    # NOTE: transfer_streamer method moved to Spec Extended Operations section (line ~2669)
 
     @db_retry()
     async def get_pr_actions_channel(self, guild_id: str) -> Optional[int]:
@@ -1737,15 +1915,18 @@ class Database:
         priority: int,
         duration_seconds: int,
         points: float,
+        is_probation: bool = False,
     ):
-        """Обновление ежедневной статистики для конкретной даты и приоритета."""
+        """Обновление ежедневной статистики для конкретной даты и приоритета/пробации."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Construct column name based on priority
-                    # priority is 0-3
-                    col_name = f"p{priority}_seconds"
-                    # Handle probation/other if needed? Assuming standard p0-p3 + probation_seconds column exists
+                    # Route to correct column based on probation flag
+                    if is_probation:
+                        col_name = "probation_seconds"
+                    else:
+                        # Construct column name based on priority (0-3)
+                        col_name = f"p{priority}_seconds"
 
                     await cursor.execute(
                         f"""
@@ -1922,8 +2103,9 @@ class Database:
         start_time: datetime,
         end_time: datetime,
         priority: int,
+        is_probation: bool = False,
     ):
-        """Запись сессии спека с разделением по дням и расчетом баллов."""
+        """Запись сессии спека с разделением по дням и расчетом баллов (с поддержкой пробации)."""
         try:
             # 1. Split time by day
             chunks = split_time_by_day(start_time, end_time)
@@ -1932,8 +2114,14 @@ class Database:
 
             # 2. Get Point Rates
             config = await self.get_points_config(guild_id)
-            # Default rate if not found for priority
-            rate_per_hour = config.get(priority, 0.5)
+            
+            # Use probation_rate if probation, else use priority rate
+            if is_probation:
+                # Get probation_rate from settings (default 1.2)
+                rate_per_hour = await self._get_probation_rate(guild_id)
+            else:
+                # Default rate if not found for priority
+                rate_per_hour = config.get(priority, 0.5)
 
             # 3. Record each chunk
             for date_obj, duration in chunks:
@@ -1941,7 +2129,7 @@ class Database:
                 points = (duration / 3600.0) * rate_per_hour
 
                 await self.record_daily_stats(
-                    pr_id, date_obj, priority, duration, points
+                    pr_id, date_obj, priority, duration, points, is_probation=is_probation
                 )
 
             # 4. Update Global Assistant Stats (assistants table)
@@ -1962,6 +2150,20 @@ class Database:
 
         except Exception as e:
             self.logger.error(f"Failed to record spec session: {e}", exc_info=True)
+    
+    async def _get_probation_rate(self, guild_id: str) -> float:
+        """Get probation rate from settings."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT probation_rate FROM settings WHERE guild_id = %s",
+                        (guild_id,),
+                    )
+                    result = await cursor.fetchone()
+                    return result.get("probation_rate", 1.2) if result else 1.2
+        except Exception:
+            return 1.2
 
     @db_retry()
     async def join_event(self, event_id: int, user_id: int) -> bool:

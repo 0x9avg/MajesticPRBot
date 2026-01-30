@@ -11,6 +11,7 @@ from schemas.common import Snowflake
 class SpecClaimRequest(BaseModel):
     streamer_id: Snowflake = Field(..., description="Twitch streamer ID to claim")
     pr_id: Snowflake = Field(..., description="Discord user ID of assistant")
+    is_probation: bool = Field(default=False, description="Whether this is a probation (trainee) claim")
 
 
 class SpecUnclaimRequest(BaseModel):

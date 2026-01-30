@@ -63,7 +63,7 @@ async def create_or_update_assistant(assistant: AssistantCreate, db=Depends(get_
     """Create or update a PR staff member."""
     try:
         # Validate role
-        valid_roles = ["employee", "senior_employee", "manager", "developer"]
+        valid_roles = ["junior_employee", "employee", "senior_employee", "manager", "developer"]
         if assistant.role not in valid_roles:
             raise HTTPException(
                 status_code=400,
@@ -169,3 +169,30 @@ async def get_assistant_logs(pr_id: int, db=Depends(get_db)):
         return {"success": True, "data": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {str(e)}")
+
+
+@router.get("/{pr_id}/capabilities")
+async def get_assistant_capabilities(pr_id: int, db=Depends(get_db)):
+    """Get assistant capabilities/permissions from role_permissions table (RBAC)."""
+    try:
+        assistant = await db.get_assistant(pr_id)
+        
+        if not assistant:
+            # Return default (no permissions) for unknown users
+            return {
+                    "can_view_dashboard": False,
+                    "can_spec_probation": False,
+                    "can_manage_events": False,
+                    "can_manage_streamers": False,
+                    "can_execute_commands": False,
+                    "can_view_logs": False,
+                },
+        
+        role = assistant.get("role", "employee")
+        permissions = await db.get_role_permissions(role)
+        
+        return permissions
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch capabilities: {str(e)}"
+        )

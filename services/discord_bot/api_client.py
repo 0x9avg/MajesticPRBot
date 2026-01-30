@@ -53,6 +53,8 @@ class APIClient:
         """Make HTTP request to API."""
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
+        if endpoint == "/health":
+             url = f"{self.base_url}{endpoint}"
 
         try:
             async with session.request(method, url, json=data, params=params) as resp:
@@ -77,8 +79,29 @@ class APIClient:
             self.logger.error(f"API request failed: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Unexpected error in API request: {e}")
+            self.logger.error(f"Unexpected error in API request: {e}", exc_info=True)
             return None
+    
+    # =========================================================================
+    # System / Service API
+    # =========================================================================
+
+    async def get_health(self) -> Dict[str, Any]:
+        """Get API health status."""
+        # Assuming there is a /health endpoint not under /api
+        # or we just returning a dummy structure if not exists, but better try /health
+        try:
+            result = await self._request("GET", "/health")
+            if result: return result
+            return {"status": "unknown", "api": "online"}
+        except:
+             return {"status": "unreachable"}
+
+    async def sync_streamers(self) -> Dict[str, Any]:
+        """Trigger streamers sync (via refreshing monitoring for now)."""
+        # Ideally this would tell Twitch Bot to sync.
+        # Fallback to refreshing monitoring.
+        return await self.refresh_monitoring(force=True)
 
     # =========================================================================
     # Streamers API
@@ -184,14 +207,17 @@ class APIClient:
     # Spec System API
     # =========================================================================
 
-    async def claim_streamer(self, streamer_id: int, pr_id: int) -> Optional[Dict]:
-        """Claim a streamer."""
+    async def claim_streamer(
+        self, streamer_id: int, pr_id: int, is_probation: bool = False
+    ) -> Optional[Dict]:
+        """Claim a streamer (supports Probation via Slot Logic)."""
         return await self._request(
             "POST",
             "/spec/claim",
             data={
                 "streamer_id": streamer_id,
                 "pr_id": pr_id,
+                "is_probation": is_probation,
             },
         )
 
@@ -257,6 +283,18 @@ class APIClient:
         """Get all assistants."""
         result = await self._request("GET", "/assistants")
         return result if isinstance(result, list) else []
+
+    async def get_assistant_capabilities(self, user_id: int) -> Dict[str, bool]:
+        """Get assistant capabilities/permissions."""
+        result = await self._request("GET", f"/assistants/{user_id}/capabilities")
+        if result and isinstance(result, dict) and "detail" not in result:
+            return result
+        # Default capabilities if not found
+        return {
+            "can_spec_probation": False,
+            "can_manage_events": False,
+            "can_manage_streamers": False,
+        }
 
     async def get_assistant_stats(self, user_id: int) -> Optional[Dict]:
         """Get assistant stats."""

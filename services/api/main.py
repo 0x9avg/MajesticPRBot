@@ -17,7 +17,10 @@ logger = Config.setup_logging("API")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown."""
+    import time
+    
     # Startup
+    app.state._start_time = time.time()
     logger.info(f"Starting {Config.app_name}...")
 
     # Initialize database
@@ -92,11 +95,69 @@ app.include_router(api_router)
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with detailed stats."""
+    import time
+    from datetime import datetime, timezone
+    
+    # Calculate uptime
+    uptime_seconds = 0
+    if hasattr(app.state, "_start_time"):
+        uptime_seconds = int(time.time() - app.state._start_time)
+    
+    # Component status - active checks
+    db_status = "disconnected"
+    broker_status = "disconnected"
+    
+    # Database: try a simple query
+    try:
+        if app.state.database and app.state.database.pool:
+            async with app.state.database.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+                    await cursor.fetchone()
+            db_status = "connected"
+    except Exception as e:
+        logger.warning(f"Health check: DB connection failed: {e}")
+        db_status = "disconnected"
+    
+    # RabbitMQ: check connection is_closed
+    try:
+        if app.state.broker:
+            conn = getattr(app.state.broker, 'connection', None)
+            if conn and not conn.is_closed:
+                broker_status = "connected"
+    except Exception as e:
+        logger.warning(f"Health check: Broker check failed: {e}")
+        broker_status = "disconnected"
+    
+    # Entity stats
+    stats = {
+        "streamers_total": 0,
+        "streamers_online": 0,
+        "active_specs": 0,
+    }
+    
+    try:
+        if db_status == "connected":
+            streamers = await app.state.database.list_all_streamers()
+            stats["streamers_total"] = len(streamers)
+            stats["streamers_online"] = sum(1 for s in streamers if s.get("is_online"))
+            
+            specs = await app.state.database.get_active_sessions()
+            stats["active_specs"] = len(specs) if specs else 0
+    except Exception as e:
+        logger.warning(f"Health stats query failed: {e}")
+    
     return {
-        "status": "healthy",
+        "status": "healthy" if db_status == "connected" else "degraded",
         "service": Config.app_name,
         "version": "2.0.0",
+        "uptime_seconds": uptime_seconds,
+        "components": {
+            "database": db_status,
+            "broker": broker_status,
+        },
+        "stats": stats,
     }
 
 

@@ -104,9 +104,9 @@ class AdminAssistants(commands.Cog):
             return
 
         # 2. SAFE DEFER (Exception for Modals)
-        # assistant_edit_{id} opens Modal -> NO DEFER
+        # assistant_edit_{id} and assistant_edit_stats_{id} open Modals -> NO DEFER
         should_defer = True
-        if custom_id.startswith("assistant_edit_"):
+        if custom_id.startswith("assistant_edit_stats_") or custom_id.startswith("assistant_edit_"):
             should_defer = False
         
         if should_defer:
@@ -173,8 +173,20 @@ class AdminAssistants(commands.Cog):
                 embed = await view.get_actions_embed()
                 await interaction.edit_original_response(embed=embed, view=view)
 
+
+            elif custom_id.startswith("assistant_edit_stats_"):
+                # OPEN EDIT DAILY STATS MODAL
+                user_id = int(custom_id.replace("assistant_edit_stats_", ""))
+                user = await self.bot.fetch_user(user_id)
+                name = user.display_name if user else "Unknown"
+                # For now, open with today's date and default stats
+                from datetime import datetime, timezone
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                current_stats = {"p0": 0, "p1": 0, "p2": 0, "p3": 0}  # API could fetch current
+                await interaction.response.send_modal(EditDailyStatsModal(self.bot, user_id, today, current_stats))
+
             elif custom_id.startswith("assistant_edit_"):
-                # OPEN MODAL
+                # OPEN TIME EDIT MODAL (general edit)
                 user_id = int(custom_id.replace("assistant_edit_", ""))
                 user = await self.bot.fetch_user(user_id)
                 name = user.display_name if user else "Unknown"

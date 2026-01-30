@@ -74,7 +74,7 @@ class AssistantManagementView(disnake.ui.View):
         self.add_item(
             disnake.ui.Button(
                 label="🔙 Назад",
-                custom_id="btn_back_to_menu",
+                custom_id="admin_home",
                 style=disnake.ButtonStyle.secondary,
                 row=2,
             )
@@ -150,7 +150,7 @@ class AssistantOverviewView(disnake.ui.View):
         self.add_item(
             disnake.ui.Button(
                 label="🔙 Назад",
-                custom_id="assistant_back_to_select",
+                custom_id="btn_back_to_menu",
                 style=disnake.ButtonStyle.secondary,
                 row=2,
             )
@@ -315,13 +315,23 @@ class AssistantStatsView(disnake.ui.View):
             )
         )
 
+        # Edit Daily Stats (opens modal) - Needs user_id in custom_id
+        self.add_item(
+            disnake.ui.Button(
+                label="✏️ Редактировать",
+                custom_id=f"assistant_edit_stats_{self.user_id}",
+                style=disnake.ButtonStyle.primary,
+                row=1,
+            )
+        )
+
         # Back
         self.add_item(
             disnake.ui.Button(
                 label="🔙 К обзору",
                 custom_id=f"assistant_overview_{self.user_id}",
                 style=disnake.ButtonStyle.secondary,
-                row=1,
+                row=2,
             )
         )
 

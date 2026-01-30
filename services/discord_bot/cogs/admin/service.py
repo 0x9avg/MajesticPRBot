@@ -129,9 +129,49 @@ class AdminService(commands.Cog):
 
             elif custom_id == "admin_svc_api_stats":
                  stats = await self.bot.api_client.get_health()
-                 embed = disnake.Embed(title="📊 Статистика API", color=0x00BCD4)
-                 for key, value in stats.items():
-                     embed.add_field(name=key, value=str(value), inline=True)
+                 
+                 # Format uptime
+                 uptime = stats.get("uptime_seconds", 0)
+                 hours, remainder = divmod(uptime, 3600)
+                 minutes, seconds = divmod(remainder, 60)
+                 uptime_str = f"{hours}h {minutes}m {seconds}s"
+                 
+                 # Status emoji
+                 status = stats.get("status", "unknown")
+                 status_emoji = "🟢" if status == "healthy" else "🟡" if status == "degraded" else "🔴"
+                 
+                 # Components
+                 components = stats.get("components", {})
+                 db_emoji = "✅" if components.get("database") == "connected" else "❌"
+                 broker_emoji = "✅" if components.get("broker") == "connected" else "❌"
+                 
+                 # Entity stats 
+                 entity_stats = stats.get("stats", {})
+                 
+                 embed = disnake.Embed(
+                     title="📊 Статистика API",
+                     description=f"{status_emoji} **Статус**: {status.capitalize()}",
+                     color=0x00BCD4 if status == "healthy" else 0xFFC107
+                 )
+                 embed.add_field(name="⏱️ Аптайм", value=uptime_str, inline=True)
+                 embed.add_field(name="📦 Версия", value=stats.get("version", "?"), inline=True)
+                 embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
+                 
+                 embed.add_field(
+                     name="💾 Компоненты",
+                     value=f"{db_emoji} База данных\n{broker_emoji} RabbitMQ",
+                     inline=True
+                 )
+                 embed.add_field(
+                     name="📈 Сущности",
+                     value=(
+                         f"**Стримеров**: {entity_stats.get('streamers_total', 0)}\n"
+                         f"**Онлайн**: {entity_stats.get('streamers_online', 0)}\n"
+                         f"**Активных спеков**: {entity_stats.get('active_specs', 0)}"
+                     ),
+                     inline=True
+                 )
+                 
                  await interaction.followup.send(embed=embed, ephemeral=True)
 
             elif custom_id == "admin_svc_respawn":

@@ -20,6 +20,14 @@ EVENT_TYPES = {
     "category_from_gta": "🚫 Уход с GTA 5",
 }
 
+# Default templates used when no custom template is set
+DEFAULT_TEMPLATES = {
+    "stream_online": "🟢 **{streamer_name}** начал стрим!",
+    "stream_offline": "🔴 **{streamer_name}** закончил стрим.",
+    "category_to_gta": "🎮 **{streamer_name}** сменил категорию на **GTA 5**!",
+    "category_from_gta": "🚫 **{streamer_name}** ушёл с GTA 5.",
+}
+
 
 # =============================================================================
 # Notifications Embed
@@ -246,13 +254,13 @@ class AdminNotifications(commands.Cog):
         try:
             event_type = interaction.values[0]
             
-            # Get current template
+            # Get current template (fallback to default if empty)
             try:
                 settings = await self.bot.api_client.get_guild_settings()
                 templates = settings.get("notification_templates", {}) if settings else {}
-                current = templates.get(event_type, "")
+                current = templates.get(event_type) or DEFAULT_TEMPLATES.get(event_type, "")
             except Exception:
-                current = ""
+                current = DEFAULT_TEMPLATES.get(event_type, "")
 
             # Open Modal
             await interaction.response.send_modal(

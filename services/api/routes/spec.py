@@ -53,18 +53,11 @@ async def claim_streamer(
     db=Depends(get_db),
     broker=Depends(get_broker),
 ):
-    """Claim a streamer for a PR assistant."""
+    """Claim a streamer for a PR assistant (supports Probation Slot Logic)."""
     # Check if streamer exists
     streamer = await db.get_streamer(data.streamer_id)
     if not streamer:
         raise HTTPException(status_code=404, detail="Стример не найден")
-
-    # Check if already claimed
-    if streamer.get("assigned_pr_id"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Стример уже закреплен за PR <@{streamer['assigned_pr_id']}>",
-        )
 
     # Check if streamer is online
     if not streamer.get("is_online"):
@@ -78,8 +71,22 @@ async def claim_streamer(
             detail=f"Вы уже закреплены за стримером {current['streamer_name']}",
         )
 
-    # Claim
-    success = await db.assign_pr_to_streamer(data.streamer_id, data.pr_id)
+    # Check slot availability using new assignments list
+    assignments = streamer.get("assignments", [])
+    requested_slot = "Probation" if data.is_probation else "Main"
+    
+    # Check if the requested slot is already taken
+    for assignment in assignments:
+        if assignment.get("is_probation") == data.is_probation:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Слот {requested_slot} уже занят PR <@{assignment['pr_id']}>",
+            )
+
+    # Claim with probation flag
+    success = await db.assign_pr_to_streamer(
+        data.streamer_id, data.pr_id, is_probation=data.is_probation
+    )
     if not success:
         raise HTTPException(status_code=500, detail="Не удалось закрепить стримера")
 
@@ -95,6 +102,7 @@ async def claim_streamer(
         "streamer_id": data.streamer_id,
         "streamer_name": streamer["streamer_name"],
         "pr_id": data.pr_id,
+        "is_probation": data.is_probation,
     }
 
 

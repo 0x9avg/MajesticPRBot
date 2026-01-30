@@ -58,10 +58,18 @@ async def list_streamers(
 @router.get("/{twitch_id}", response_model=StreamerResponse)
 async def get_streamer(twitch_id: int, db=Depends(get_db)):
     """Get a specific streamer by Twitch ID."""
-    streamer = await db.get_streamer(twitch_id)
-    if not streamer:
-        raise HTTPException(status_code=404, detail="Стример не найден")
-    return StreamerResponse(**streamer)
+    try:
+        streamer = await db.get_streamer(twitch_id)
+        if not streamer:
+            raise HTTPException(status_code=404, detail="Стример не найден")
+        return StreamerResponse(**streamer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting streamer {twitch_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
 @router.post("", response_model=StreamerResponse, status_code=status.HTTP_201_CREATED)

@@ -21,6 +21,15 @@ class Spec(commands.Cog):
         # Store pending transfer requests: {target_user_id: {from_pr_id, streamer_id, guild_id}}
         self.pending_transfers = {}
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Refresh monitoring on bot startup."""
+        self.logger.info("Spec cog ready - Refreshing monitoring...")
+        try:
+            await self.update_monitoring()
+        except Exception as e:
+            self.logger.error(f"Failed to refresh monitoring on ready: {e}")
+
     # =========================================================================
     # Button Handlers
     # =========================================================================
@@ -47,47 +56,109 @@ class Spec(commands.Cog):
     async def _handle_claim_button(
         self, interaction: disnake.MessageInteraction, custom_id: str
     ):
-        """Обработка клика по кнопке закрепа."""
+        """Обработка клика по кнопке закрепа (с поддержкой Probation)."""
             
         try:
             streamer_id = int(custom_id.replace("spec_claim_", ""))
             pr_id = interaction.user.id
 
-            result = await self.api.claim_streamer(streamer_id, pr_id)
-
-            if result and result.get("status") == "claimed":
-                streamer_name = result.get("streamer_name")
-                
-                # Update notification message to show "Claimed by X"
-                try:
-                    # Fetch full streamer data for proper UI rebuild
-                    streamer = await self.api.get_streamer(streamer_id)
-                    if streamer:
-                        new_components = create_notification_component(
-                            message="",
-                            streamer_name=streamer.get("streamer_name", streamer_name),
-                            stream_title=streamer.get("stream_title", ""),
-                            game_name=streamer.get("game_name", "GTA 5"),
-                            thumbnail_url=streamer.get("stream_thumbnail_url", ""),
-                            streamer_id=streamer_id,
-                            show_claim_button=True,
-                            assigned_pr_id=pr_id,
-                            assigned_pr_name=interaction.user.display_name
-                        )
-                        await interaction.message.edit(components=new_components)
-                except Exception as e:
-                    self.logger.warning(f"Could not update notification message: {e}")
-
-                await interaction.followup.send(f"✅ Успешно закреплен: **{streamer_name}**", ephemeral=True)
-                # PR actions log handled by broker_handlers via spec.claimed event
-                await self.api.refresh_monitoring()
-            else:
-                error = result.get("detail", "Ошибка") if result else "API Error"
-                await interaction.followup.send(f"❌ {error}", ephemeral=True)
+            # Check if user has probation capability
+            capabilities = await self.api.get_assistant_capabilities(pr_id)
+            
+            if capabilities.get("can_spec_probation", False):
+                # Show probation prompt for eligible users
+                await self._show_probation_prompt(interaction, streamer_id)
+                return
+            
+            # Standard flow for regular users
+            await self._do_claim(interaction, streamer_id, pr_id, is_probation=False)
 
         except Exception as e:
             self.logger.error(f"Error claim button: {e}", exc_info=True)
             await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+
+    async def _show_probation_prompt(
+        self, interaction: disnake.MessageInteraction, streamer_id: int
+    ):
+        """Show probation/main spec choice buttons."""
+        view = disnake.ui.View(timeout=60)
+        
+        main_btn = disnake.ui.Button(
+            label="🔵 Main Spec", 
+            style=disnake.ButtonStyle.primary,
+            custom_id=f"probation_choice_main_{streamer_id}"
+        )
+        probation_btn = disnake.ui.Button(
+            label="🟡 Probation Spec", 
+            style=disnake.ButtonStyle.secondary,
+            custom_id=f"probation_choice_prob_{streamer_id}"
+        )
+        
+        async def main_callback(btn_inter: disnake.MessageInteraction):
+            await btn_inter.response.defer(ephemeral=True)
+            await self._do_claim(btn_inter, streamer_id, btn_inter.user.id, is_probation=False)
+        
+        async def prob_callback(btn_inter: disnake.MessageInteraction):
+            await btn_inter.response.defer(ephemeral=True)
+            await self._do_claim(btn_inter, streamer_id, btn_inter.user.id, is_probation=True)
+        
+        main_btn.callback = main_callback
+        probation_btn.callback = prob_callback
+        
+        view.add_item(main_btn)
+        view.add_item(probation_btn)
+        
+        await interaction.followup.send(
+            "**Выберите тип спека:**\n"
+            "🔵 **Main Spec** — обычный спек\n"
+            "🟡 **Probation Spec** — стажерский спек",
+            view=view,
+            ephemeral=True
+        )
+
+    async def _do_claim(
+        self, 
+        interaction: disnake.MessageInteraction, 
+        streamer_id: int, 
+        pr_id: int, 
+        is_probation: bool
+    ):
+        """Perform the actual claim operation."""
+        result = await self.api.claim_streamer(streamer_id, pr_id, is_probation=is_probation)
+
+        if result and result.get("status") == "claimed":
+            streamer_name = result.get("streamer_name")
+            spec_type = "Probation" if is_probation else "Main"
+            
+            # Update notification message to show "Claimed by X"
+            try:
+                # Fetch full streamer data for proper UI rebuild
+                streamer = await self.api.get_streamer(streamer_id)
+                if streamer and hasattr(interaction, "message") and interaction.message:
+                    new_components = create_notification_component(
+                        message="",
+                        streamer_name=streamer.get("streamer_name", streamer_name),
+                        stream_title=streamer.get("stream_title", ""),
+                        game_name=streamer.get("game_name", "GTA 5"),
+                        thumbnail_url=streamer.get("stream_thumbnail_url", ""),
+                        streamer_id=streamer_id,
+                        show_claim_button=True,
+                        assigned_pr_id=pr_id,
+                        assigned_pr_name=interaction.user.display_name
+                    )
+                    await interaction.message.edit(components=new_components)
+            except Exception as e:
+                self.logger.warning(f"Could not update notification message: {e}")
+
+            await interaction.followup.send(
+                f"✅ Успешно закреплен ({spec_type}): **{streamer_name}**", 
+                ephemeral=True
+            )
+            # PR actions log handled by broker_handlers via spec.claimed event
+            await self.api.refresh_monitoring()
+        else:
+            error = result.get("detail", "Ошибка") if result else "API Error"
+            await interaction.followup.send(f"❌ {error}", ephemeral=True)
 
     async def _handle_unclaim_button(
         self, interaction: disnake.MessageInteraction, custom_id: str

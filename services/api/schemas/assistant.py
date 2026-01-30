@@ -17,7 +17,7 @@ class AssistantCreate(BaseModel):
 
     pr_id: int
     nickname: str
-    role: str  # 'employee', 'senior_employee', 'manager', 'developer'
+    role: str  # 'junior_employee', 'employee', 'senior_employee', 'manager', 'developer'
     experience_days: int = 0
 
 

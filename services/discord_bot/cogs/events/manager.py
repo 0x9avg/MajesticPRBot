@@ -2,21 +2,29 @@
 EventCreateModal, scheduled events loop, event end logic.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from api_client import APIClient
+    from discord_bot import DiscordBot
+
+from datetime import datetime, timedelta, timezone
+
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands, tasks
-from datetime import datetime, timedelta, timezone
-
 
 # =============================================================================
 # Events Embed
 # =============================================================================
 
 
-async def get_events_embed(api, guild_id: int) -> disnake.Embed:
+async def get_events_embed(api) -> disnake.Embed:
     """Create embed showing active events."""
     try:
-        events = await api.get_active_events(guild_id)
+        events = await api.get_active_events()
     except Exception:
         events = []
 
@@ -35,7 +43,7 @@ async def get_events_embed(api, guild_id: int) -> disnake.Embed:
                 time_str = f"<t:{ts}:R>"
             except Exception:
                 time_str = "?"
-            
+
             embed.add_field(
                 name=f"📅 {event['name']}",
                 value=(
@@ -57,9 +65,10 @@ async def get_events_embed(api, guild_id: int) -> disnake.Embed:
 class EventCreateModal(disnake.ui.Modal):
     """Modal for creating a new event with optional scheduling."""
 
-    def __init__(self, bot, guild_id: int, channel_id: int):
+    bot: "DiscordBot"
+
+    def __init__(self, bot: "DiscordBot", channel_id: int):
         self.bot = bot
-        self.guild_id = guild_id
         self.channel_id = channel_id
 
         components = [
@@ -101,11 +110,13 @@ class EventCreateModal(disnake.ui.Modal):
         try:
             name = interaction.text_values["name"]
             description = interaction.text_values["description"]
-            
+
             try:
                 required_count = int(interaction.text_values["required_count"])
             except ValueError:
-                await interaction.edit_original_message(content="❌ Количество должно быть числом")
+                await interaction.edit_original_message(
+                    content="❌ Количество должно быть числом"
+                )
                 return
 
             # Parse start time (MSK -> UTC)
@@ -132,8 +143,8 @@ class EventCreateModal(disnake.ui.Modal):
                         # HH:MM format (today or tomorrow)
                         hour, minute = map(int, start_time_str.split(":"))
                         target_dt_msk = datetime.combine(
-                            now_msk.date(), 
-                            datetime.strptime(start_time_str, "%H:%M").time()
+                            now_msk.date(),
+                            datetime.strptime(start_time_str, "%H:%M").time(),
                         ).replace(tzinfo=msk_tz)
                         if target_dt_msk < now_msk:
                             target_dt_msk += timedelta(days=1)
@@ -164,9 +175,7 @@ class EventCreateModal(disnake.ui.Modal):
             if start_dt:
                 ts = int(start_dt.timestamp())
                 embed.add_field(
-                    name="🕒 Начало", 
-                    value=f"<t:{ts}:t> (<t:{ts}:R>)", 
-                    inline=False
+                    name="🕒 Начало", value=f"<t:{ts}:t> (<t:{ts}:R>)", inline=False
                 )
 
             # Create event via API
@@ -176,7 +185,6 @@ class EventCreateModal(disnake.ui.Modal):
                 required_pr_count=required_count,
                 channel_id=self.channel_id,
                 created_by=interaction.user.id,
-                guild_id=self.guild_id,
                 start_time=start_dt.isoformat() if start_dt else None,
             )
 
@@ -254,7 +262,7 @@ class EventEndSelect(disnake.ui.StringSelect):
         try:
             # End event via API
             result = await interaction.bot.api_client.end_event(event_id)
-            
+
             # Try to update the event message
             if result and result.get("channel_id") and result.get("message_id"):
                 channel = interaction.bot.get_channel(int(result["channel_id"]))
@@ -270,7 +278,7 @@ class EventEndSelect(disnake.ui.StringSelect):
                         pass
 
             await interaction.edit_original_response(content="✅ Событие завершено!")
-            
+
             # Refresh monitoring
             await interaction.bot.api_client.refresh_monitoring()
 
@@ -287,10 +295,11 @@ class EventEndSelect(disnake.ui.StringSelect):
 class EventsView(disnake.ui.View):
     """View for event management."""
 
-    def __init__(self, bot: commands.Bot, guild_id: int):
+    bot: "DiscordBot"
+
+    def __init__(self, bot: "DiscordBot"):
         super().__init__(timeout=None)
         self.bot = bot
-        self.guild_id = guild_id
 
     @disnake.ui.button(
         label="Создать",
@@ -299,7 +308,9 @@ class EventsView(disnake.ui.View):
         emoji="➕",
         row=0,
     )
-    async def create_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def create_button(
+        self, button: disnake.ui.Button, interaction: MessageInteraction
+    ):
         """Show channel select for event creation."""
         select = disnake.ui.ChannelSelect(
             custom_id="admin_events_channel_select",
@@ -310,7 +321,7 @@ class EventsView(disnake.ui.View):
         )
         view = disnake.ui.View(timeout=None)
         view.add_item(select)
-        
+
         await interaction.response.send_message(
             "Выберите канал для события:", view=view, ephemeral=True
         )
@@ -322,12 +333,14 @@ class EventsView(disnake.ui.View):
         emoji="🏁",
         row=0,
     )
-    async def end_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def end_button(
+        self, button: disnake.ui.Button, interaction: MessageInteraction
+    ):
         """Show event select for ending."""
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-            
-        events = await self.bot.api_client.get_active_events(self.guild_id)
+
+        events = await self.bot.api_client.get_active_events()
         if not events:
             await interaction.followup.send("Нет активных событий", ephemeral=True)
             return
@@ -345,12 +358,14 @@ class EventsView(disnake.ui.View):
         emoji="🔙",
         row=1,
     )
-    async def back_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def back_button(
+        self, button: disnake.ui.Button, interaction: MessageInteraction
+    ):
         from cogs.admin.core import AdminMainView, get_main_embed
-        
+
         if not interaction.response.is_done():
             await interaction.response.defer()
-            
+
         await interaction.edit_original_response(
             embed=get_main_embed(), view=AdminMainView(self.bot)
         )
@@ -364,7 +379,10 @@ class EventsView(disnake.ui.View):
 class EventsManager(commands.Cog):
     """Event creation, scheduling, and management."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    bot: "DiscordBot"
+    api: "APIClient"
+
+    def __init__(self, bot: "DiscordBot") -> None:
         self.bot = bot
         self.api = bot.api_client
         self.check_event_starts.start()
@@ -380,7 +398,7 @@ class EventsManager(commands.Cog):
             for event in events:
                 channel_id = event.get("channel_id")
                 channel = self.bot.get_channel(int(channel_id)) if channel_id else None
-                
+
                 if channel:
                     participants = event.get("participants", [])
                     if participants:
@@ -392,7 +410,9 @@ class EventsManager(commands.Cog):
                                 delete_after=300,
                             )
                         except Exception as e:
-                            self.bot.logger.error(f"Event start notification error: {e}")
+                            self.bot.logger.error(
+                                f"Event start notification error: {e}"
+                            )
 
                 # Mark as notified
                 await self.api.mark_event_notification_sent(event["id"])
@@ -412,10 +432,8 @@ class EventsManager(commands.Cog):
 
         if not interaction.response.is_done():
             await interaction.response.defer()
-        embed = await get_events_embed(self.api, interaction.guild_id)
-        await interaction.edit_original_response(
-            embed=embed, view=EventsView(self.bot, interaction.guild_id)
-        )
+        embed = await get_events_embed(self.api)
+        await interaction.edit_original_response(embed=embed, view=EventsView(self.bot))
 
     @commands.Cog.listener("on_dropdown")
     async def on_events_channel_select(self, interaction: MessageInteraction):
@@ -424,9 +442,7 @@ class EventsManager(commands.Cog):
             return
 
         channel_id = int(interaction.values[0])
-        await interaction.response.send_modal(
-            EventCreateModal(self.bot, interaction.guild_id, channel_id)
-        )
+        await interaction.response.send_modal(EventCreateModal(self.bot, channel_id))
 
 
 def setup(bot: commands.Bot) -> None:

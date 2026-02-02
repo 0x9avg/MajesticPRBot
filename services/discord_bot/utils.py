@@ -1,14 +1,13 @@
 """Utility functions for Discord Bot (Ported from Legacy)."""
 
-import disnake
-from disnake.ext import commands
-import calendar
 import datetime
 import logging
 import time
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
+import disnake
 from config import Config
+from disnake.ext import commands
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -18,22 +17,23 @@ def format_spec_duration(seconds: int) -> str:
     """Format duration in seconds to human readable string."""
     if seconds < 60:
         return f"{seconds}с"
-    
+
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
-    
+
     if hours > 0:
         return f"{hours}ч {minutes}м" if minutes > 0 else f"{hours}ч"
     return f"{minutes}м"
 
+
 async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
     """
     Send message to the PR actions log channel.
-    
+
     Args:
         bot: The Discord bot instance (must have api_client)
         message: The formatted message to send
-        
+
     Returns:
         True if message was sent successfully, False otherwise
     """
@@ -41,18 +41,18 @@ async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
         settings = await bot.api_client.get_guild_settings()
         if not settings or not isinstance(settings, dict):
             return False
-        
+
         channel_id = settings.get("pr_actions_channel_id")
         if not channel_id:
             return False
-        
+
         channel = bot.get_channel(int(channel_id))
         if not channel:
             return False
-        
+
         await channel.send(message)
         return True
-        
+
     except Exception as e:
         bot.logger.error(f"Failed to send PR action log: {e}")
         return False
@@ -97,19 +97,22 @@ def create_streamers_embed(
     for streamer in online_streamers_sorted:
         streamer_name = streamer["streamer_name"]
         started_at = streamer.get("started_at")
-        
+
         # Handle various date formats (str or datetime)
         started_at_unix = 0
         if started_at:
             if isinstance(started_at, str):
                 try:
                     # ISO format parsing
-                    dt = datetime.datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                    dt = datetime.datetime.fromisoformat(
+                        started_at.replace("Z", "+00:00")
+                    )
                     started_at_unix = int(dt.timestamp())
-                except:
+                except Exception as e:
+                    logger.error(f"Error while ISO format parsing: {e}")
                     started_at_unix = 0
             elif isinstance(started_at, (datetime.datetime, datetime.date)):
-                 started_at_unix = int(started_at.timestamp())
+                started_at_unix = int(started_at.timestamp())
 
         stream_title = streamer.get("stream_title") or "Без названия"
         game_name = streamer.get("game_name") or "Не в игре"
@@ -185,12 +188,16 @@ def create_streamers_component(
         if started_at:
             if isinstance(started_at, str):
                 try:
-                   dt = datetime.datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                   started_at_unix = int(dt.timestamp())
-                except: pass
+                    dt = datetime.datetime.fromisoformat(
+                        started_at.replace("Z", "+00:00")
+                    )
+                    started_at_unix = int(dt.timestamp())
+                except Exception as e:
+                    logger.error(f"Error while ISO format parsing: {e}")
+                    started_at_unix = 0
             elif isinstance(started_at, (datetime.datetime, datetime.date)):
-                 started_at_unix = int(started_at.timestamp())
-        
+                started_at_unix = int(started_at.timestamp())
+
         stream_title = streamer.get("stream_title") or "Без названия"
         game_name = streamer.get("game_name") or "Не в игре"
         priority = streamer.get("priority", 0)
@@ -201,8 +208,10 @@ def create_streamers_component(
             or "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
         )
         assigned_pr_id = streamer.get("assigned_pr_id")
-        
-        pr_line = f"👤 PR: <@{assigned_pr_id}>" if assigned_pr_id else "👤 PR: *свободен*"
+
+        pr_line = (
+            f"👤 PR: <@{assigned_pr_id}>" if assigned_pr_id else "👤 PR: *свободен*"
+        )
 
         components.append(
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
@@ -229,34 +238,34 @@ def create_streamers_component(
         components.append(
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.large)
         )
-        components.append(
-            disnake.ui.TextDisplay(content="### 🎉 Активные события")
-        )
-        
+        components.append(disnake.ui.TextDisplay(content="### 🎉 Активные события"))
+
         for event in events:
             # Parse start_time
             start_time = event.get("start_time")
             start_unix = 0
             if start_time:
-                 if isinstance(start_time, str):
-                     try:
-                        dt = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                if isinstance(start_time, str):
+                    try:
+                        dt = datetime.datetime.fromisoformat(
+                            start_time.replace("Z", "+00:00")
+                        )
                         start_unix = int(dt.timestamp())
-                     except: pass
-                 elif isinstance(start_time, (datetime.datetime, datetime.date)):
-                     start_unix = int(start_time.timestamp())
+                    except Exception as e:
+                        logger.error(f"Error while ISO format parsing: {e}")
+                        started_at_unix = 0
+                elif isinstance(start_time, (datetime.datetime, datetime.date)):
+                    start_unix = int(start_time.timestamp())
 
             participant_count = event.get("current_participants", 0)
             required = event.get("required_pr_count", 0)
-            
+
             components.append(
-                disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
-            )
-            components.append(
-                disnake.ui.TextDisplay(
-                    content=f"### {event['name']}"
+                disnake.ui.Separator(
+                    divider=True, spacing=disnake.SeparatorSpacing.small
                 )
             )
+            components.append(disnake.ui.TextDisplay(content=f"### {event['name']}"))
             components.append(
                 disnake.ui.TextDisplay(
                     content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', ''))>100 else ''}"
@@ -267,7 +276,6 @@ def create_streamers_component(
                     content=f"👥 **Участников:** {participant_count} / {required}\n🕒 **Начало:** <t:{start_unix}:R>"
                 )
             )
-
 
     # Add last updated timestamp at the bottom
     components.append(
@@ -310,19 +318,21 @@ def create_notification_component(
     )
 
     result = []
-    
+
     # Only include TextDisplay if message is not empty
     if message and message.strip():
         text_display = disnake.ui.TextDisplay(content=message)
         result.append(text_display)
-    
+
     result.append(container)
 
     # Add claim button if requested and we have streamer_id
     if show_claim_button and streamer_id:
         if assigned_pr_id:
             # Already claimed - show who claimed it
-            claim_label = f"✅ Взял: {assigned_pr_name}" if assigned_pr_name else "✅ Взят"
+            claim_label = (
+                f"✅ Взял: {assigned_pr_name}" if assigned_pr_name else "✅ Взят"
+            )
             result.append(
                 disnake.ui.ActionRow(
                     disnake.ui.Button(
@@ -348,10 +358,12 @@ def create_notification_component(
     return result
 
 
-def create_monitoring_select(available_streamers: list, events: list = None) -> disnake.ui.ActionRow:
+def create_monitoring_select(
+    available_streamers: list, events: list = None
+) -> disnake.ui.ActionRow:
     """Create dropdown for monitoring message."""
     options = []
-    
+
     # Add Streamers
     for s in available_streamers:
         options.append(
@@ -359,10 +371,10 @@ def create_monitoring_select(available_streamers: list, events: list = None) -> 
                 label=s["streamer_name"],
                 value=str(s["streamer_id"]),
                 description="Взять медиа (GTA 5)",
-                emoji="🎯"
+                emoji="🎯",
             )
         )
-        
+
     # Add Events
     if events:
         for e in events:
@@ -371,7 +383,7 @@ def create_monitoring_select(available_streamers: list, events: list = None) -> 
                     label=e["name"][:100],
                     value=f"event_{e['id']}",
                     description=f"Событие (PR: {e.get('current_participants')}/{e.get('required_pr_count')})",
-                    emoji="🎉"
+                    emoji="🎉",
                 )
             )
 
@@ -381,7 +393,7 @@ def create_monitoring_select(available_streamers: list, events: list = None) -> 
                 label="Нет доступных медиа/событий",
                 value="none",
                 description="Все занято или пусто",
-                default=True
+                default=True,
             )
         )
 
@@ -391,9 +403,9 @@ def create_monitoring_select(available_streamers: list, events: list = None) -> 
         max_values=1,
         options=options[:25],  # Max 25 options
         custom_id="spec_claim_select",
-        disabled=not options or (len(options) == 1 and options[0].value == "none")
+        disabled=not options or (len(options) == 1 and options[0].value == "none"),
     )
-    
+
     return disnake.ui.ActionRow(select)
 
 

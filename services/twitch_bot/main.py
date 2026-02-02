@@ -6,8 +6,8 @@ Twitch Bot Entry Point.
 import asyncio
 import sys
 
-from config import Config
 from api_client import APIClient
+from config import Config
 from twitch_bot import TwitchBot
 
 
@@ -45,7 +45,9 @@ async def main():
             logger=Config.setup_logging("BrokerConsumer"),
         )
 
-        logger.info(f"✓ Broker consumer configured: {Config.rabbitmq_host}:{Config.rabbitmq_port}")
+        logger.info(
+            f"✓ Broker consumer configured: {Config.rabbitmq_host}:{Config.rabbitmq_port}"
+        )
     except Exception as e:
         logger.warning(f"Broker unavailable: {e}")
         consumer = None

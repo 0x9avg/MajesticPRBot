@@ -1,19 +1,19 @@
-"""
-Streamers routes for API.
-CRUD operations for Twitch streamers.
-"""
+from __future__ import annotations
+from typing import TYPE_CHECKING, Annotated, List, Optional, Union
 
-from typing import List, Optional, Union
-from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
+if TYPE_CHECKING:
+    from database import Database
+    from services.broker import BrokerService
 
+from config import Config
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from schemas.streamer import (
     StreamerCreate,
-    StreamerUpdate,
-    StreamerStatusUpdate,
-    StreamerResponse,
     StreamerListResponse,
+    StreamerResponse,
+    StreamerStatusUpdate,
+    StreamerUpdate,
 )
-from config import Config
 
 router = APIRouter(prefix="/streamers", tags=["Streamers"])
 
@@ -30,8 +30,8 @@ def get_broker(request: Request):
 
 @router.get("", response_model=StreamerListResponse)
 async def list_streamers(
+    db: Annotated["Database", Depends(get_db)],
     online_only: bool = Query(False, description="Filter only online streamers"),
-    db=Depends(get_db),
 ):
     """Get all streamers."""
     if online_only:
@@ -42,9 +42,7 @@ async def list_streamers(
     # Count stats
     online_count = sum(1 for s in streamers if s.get("is_online"))
     gta_count = sum(
-        1
-        for s in streamers
-        if str(s.get("game_id")) == Config.gta5_game_id
+        1 for s in streamers if str(s.get("game_id")) == Config.gta5_game_id
     )
 
     return StreamerListResponse(
@@ -56,7 +54,7 @@ async def list_streamers(
 
 
 @router.get("/{twitch_id}", response_model=StreamerResponse)
-async def get_streamer(twitch_id: int, db=Depends(get_db)):
+async def get_streamer(twitch_id: int, db: Annotated["Database", Depends(get_db)]):
     """Get a specific streamer by Twitch ID."""
     try:
         streamer = await db.get_streamer(twitch_id)
@@ -68,6 +66,7 @@ async def get_streamer(twitch_id: int, db=Depends(get_db)):
     except Exception as e:
         print(f"Error getting streamer {twitch_id}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
@@ -76,12 +75,12 @@ async def get_streamer(twitch_id: int, db=Depends(get_db)):
 async def create_streamer(
     request: Request,
     data: StreamerCreate,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """
     Add a new streamer.
-    
+
     Two modes:
     1. URL mode (Discord/Web): Provide `twitch_url` → triggers async verification
     2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` → direct creation
@@ -102,11 +101,11 @@ async def create_streamer(
         )
 
         streamer = await db.get_streamer(data.streamer_id)
-        
+
         if not streamer:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-                detail=f"Failed to retrieve created streamer {data.streamer_id}"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve created streamer {data.streamer_id}",
             )
 
         if broker:
@@ -117,10 +116,10 @@ async def create_streamer(
             )
 
         return StreamerResponse(**streamer)
-    
+
     # Mode A: URL mode - needs Twitch verification
     username = data.twitch_url
-    
+
     if broker:
         # Emit verification event so Twitch Bot can resolve ID
         await broker.emit_streamer_verify(
@@ -128,6 +127,7 @@ async def create_streamer(
         )
 
         from fastapi.responses import JSONResponse
+
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
@@ -145,8 +145,8 @@ async def create_streamer(
 async def update_streamer(
     twitch_id: int,
     data: StreamerUpdate,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Update streamer properties."""
     streamer = await db.get_streamer(twitch_id)
@@ -179,10 +179,10 @@ async def update_streamer(
 
 
 @router.delete("/{twitch_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_streamer(
+async def remove_streamer(
     twitch_id: int,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Delete a streamer."""
     streamer = await db.get_streamer(twitch_id)
@@ -191,7 +191,7 @@ async def delete_streamer(
 
     streamer_name = streamer["streamer_name"]
 
-    await db.delete_streamer(twitch_id)
+    await db.remove_streamer(twitch_id)
 
     if broker:
         await broker.emit_streamer_removed(twitch_id, streamer_name)
@@ -203,8 +203,8 @@ async def delete_streamer(
 async def update_streamer_status(
     twitch_id: int,
     data: StreamerStatusUpdate,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """
     Update streamer online status.
@@ -235,9 +235,47 @@ async def update_streamer_status(
     if broker:
         streamer_name = streamer["streamer_name"]
         new_game_id = str(data.game_id) if data.game_id else None
-        
-        broker.logger.info(f"DEBUG Check: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id} | GameName: {data.game_name}")
 
+        broker.logger.info(
+            f"DEBUG Check: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id} | GameName: {data.game_name}"
+        )
+
+        # === AUTO-UNASSIGN LOGIC ===
+        should_unassign = False
+        unassign_reason = ""
+
+        # Case 1: Stream went OFFLINE
+        if not data.is_online and old_is_online:
+            should_unassign = True
+            unassign_reason = "stream_offline"
+
+        # Case 2: Category changed FROM GTA while online
+        elif data.is_online and old_is_online:
+            was_gta = old_game_id == Config.gta5_game_id
+            is_gta = new_game_id == Config.gta5_game_id
+            if was_gta and not is_gta:
+                should_unassign = True
+                unassign_reason = "category_from_gta"
+
+        # Execute auto-unassign if needed
+        if should_unassign:
+            unassign_result = await db.unassign_pr_from_streamer(
+                twitch_id, end_reason=unassign_reason
+            )
+            if unassign_result:
+                broker.logger.info(
+                    f"AUTO-UNASSIGN: {streamer_name} | Reason: {unassign_reason} | PR: {unassign_result['pr_id']} | Duration: {unassign_result['duration_seconds']}s"
+                )
+                # Emit spec unclaimed event for Discord bot to update UI
+                await broker.emit_spec_unclaimed(
+                    streamer_id=twitch_id,
+                    streamer_name=streamer_name,
+                    pr_id=unassign_result["pr_id"],
+                    duration_seconds=unassign_result["duration_seconds"],
+                    reason=unassign_reason,
+                )
+
+        # === BROKER NOTIFICATIONS ===
         # Online/Offline state change
         if data.is_online and not old_is_online:
             # Stream went ONLINE
@@ -248,14 +286,12 @@ async def update_streamer_status(
                 game_name=data.game_name,
                 stream_title=data.stream_title,
                 thumbnail_url=data.stream_thumbnail_url,
-                guild_id=Config.guild_id,
             )
         elif not data.is_online and old_is_online:
             # Stream went OFFLINE
             await broker.emit_stream_offline(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
-                guild_id=Config.guild_id,
             )
         elif data.is_online and old_is_online and old_game_id != new_game_id:
             # Category changed while online
@@ -267,9 +303,7 @@ async def update_streamer_status(
                 new_game_name=data.game_name,
                 stream_title=data.stream_title,
                 thumbnail_url=data.stream_thumbnail_url,
-                guild_id=Config.guild_id,
             )
-
 
     return {"status": "updated"}
 
@@ -277,12 +311,12 @@ async def update_streamer_status(
 @router.post("/sync_status")
 async def sync_streamers_status(
     updates: List[dict],
-    db=Depends(get_db),
+    db: Annotated["Database", Depends(get_db)],
 ):
     """
     Bulk update streamer statuses.
     Called by Twitch bot during sync to update multiple streamers efficiently.
-    
+
     Each update should contain:
     - streamer_id (required)
     - is_online (required)
@@ -294,13 +328,13 @@ async def sync_streamers_status(
     """
     if not updates:
         return {"status": "no_updates", "updated_count": 0}
-    
+
     # Validate and clean updates
     valid_updates = []
     for update in updates:
         if "streamer_id" not in update or "is_online" not in update:
             continue
-        
+
         # Handle game_id being passed as empty string
         game_id = update.get("game_id")
         if game_id == "":
@@ -310,17 +344,19 @@ async def sync_streamers_status(
                 game_id = int(game_id)
             except ValueError:
                 game_id = None
-        
-        valid_updates.append({
-            "streamer_id": update["streamer_id"],
-            "is_online": update["is_online"],
-            "started_at": update.get("started_at"),
-            "game_id": game_id,
-            "game_name": update.get("game_name"),
-            "stream_title": update.get("stream_title"),
-            "stream_thumbnail_url": update.get("stream_thumbnail_url"),
-        })
-    
+
+        valid_updates.append(
+            {
+                "streamer_id": update["streamer_id"],
+                "is_online": update["is_online"],
+                "started_at": update.get("started_at"),
+                "game_id": game_id,
+                "game_name": update.get("game_name"),
+                "stream_title": update.get("stream_title"),
+                "stream_thumbnail_url": update.get("stream_thumbnail_url"),
+            }
+        )
+
     updated_count = await db.update_streamers_status_bulk(valid_updates)
-    
+
     return {"status": "synced", "updated_count": updated_count}

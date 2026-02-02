@@ -3,10 +3,18 @@ Auth routes for API.
 Handles login, logout, and user info.
 """
 
+from __future__ import annotations
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from database import Database
+    from services.auth import AuthService
+    from fastapi.security import HTTPAuthorizationCredentials
+
 from datetime import datetime
 from jose import JWTError
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 
 from schemas.auth import LoginRequest, TokenResponse, UserResponse
 from config import Config
@@ -29,8 +37,8 @@ def get_auth(request: Request):
 async def login(
     request: Request,
     login_data: LoginRequest,
-    db=Depends(get_db),
-    auth=Depends(get_auth),
+    db: Annotated["Database", Depends(get_db)],
+    auth: Annotated["AuthService", Depends(get_auth)],
 ):
     """Authenticate user and return tokens."""
     # Get user
@@ -110,9 +118,9 @@ async def login(
 @router.post("/logout")
 async def logout(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db=Depends(get_db),
-    auth=Depends(get_auth),
+    db: Annotated["Database", Depends(get_db)],
+    auth: Annotated["AuthService", Depends(get_auth)],
+    credentials: Annotated["HTTPAuthorizationCredentials", Depends(security)],
 ):
     """Logout user and revoke all sessions."""
     try:
@@ -136,9 +144,9 @@ async def logout(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db=Depends(get_db),
-    auth=Depends(get_auth),
+    db: Annotated["Database", Depends(get_db)],
+    auth: Annotated["AuthService", Depends(get_auth)],
+    credentials: Annotated["HTTPAuthorizationCredentials", Depends(security)],
 ):
     """Get current authenticated user info."""
     try:

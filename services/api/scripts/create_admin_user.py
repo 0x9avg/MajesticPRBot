@@ -11,9 +11,9 @@ import sys
 # Добавляем родительскую директорию в путь для импортов
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
 from config import Config
 from database import Database
+from dotenv import load_dotenv
 from services.auth import AuthService
 
 load_dotenv()
@@ -68,7 +68,7 @@ async def create_admin(username, password, nickname, role, discord_id):
                     VALUES (%s, %s, %s, NOW())
                     ON DUPLICATE KEY UPDATE nickname = %s, role = %s
                     """,
-                    (discord_id, nickname, role, nickname, role)
+                    (discord_id, nickname, role, nickname, role),
                 )
                 await conn.commit()
 
@@ -104,5 +104,15 @@ if __name__ == "__main__":
             nickname="Yamato",
             role="developer",
             discord_id=566652404838170625,
+        )
+    )
+
+    asyncio.run(
+        create_admin(
+            username="EpikeS",
+            password="EpikeSPR",
+            nickname="EpikeS",
+            role="manager",
+            discord_id=278198677947023371,
         )
     )

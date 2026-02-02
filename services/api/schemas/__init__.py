@@ -3,17 +3,6 @@ Schemas package - Pydantic models for API requests and responses.
 """
 
 # Auth
-from schemas.auth import LoginRequest, TokenResponse, UserResponse
-
-# Streamers
-from schemas.streamer import (
-    StreamerBase,
-    StreamerCreate,
-    StreamerUpdate,
-    StreamerResponse,
-    StreamerListResponse,
-)
-
 # Assistants
 from schemas.assistant import (
     AssistantBase,
@@ -21,26 +10,36 @@ from schemas.assistant import (
     AssistantResponse,
     AssistantStatsResponse,
 )
+from schemas.auth import LoginRequest, TokenResponse, UserResponse
 
 # Guild
 from schemas.guild import (
-    GuildSettingsUpdate,
-    GuildTemplatesUpdate,
     GuildRatesUpdate,
     GuildSettingsResponse,
-)
-
-# Spec
-from schemas.spec import (
-    SpecClaimRequest,
-    SpecUnclaimRequest,
-    SpecTransferRequest,
-    SpecSessionResponse,
-    ActiveSpecResponse,
+    GuildSettingsUpdate,
+    GuildTemplatesUpdate,
 )
 
 # Monitoring
 from schemas.monitoring import MonitoringRefreshResponse
+
+# Spec
+from schemas.spec import (
+    ActiveSpecResponse,
+    SpecClaimRequest,
+    SpecSessionResponse,
+    SpecTransferRequest,
+    SpecUnclaimRequest,
+)
+
+# Streamers
+from schemas.streamer import (
+    StreamerBase,
+    StreamerCreate,
+    StreamerListResponse,
+    StreamerResponse,
+    StreamerUpdate,
+)
 
 __all__ = [
     # Auth

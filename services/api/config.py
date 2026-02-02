@@ -3,11 +3,11 @@
 Использует pydantic-settings для type-safe конфигурации.
 """
 
-import os
 import logging
-from typing import List, Optional
-from logging.handlers import RotatingFileHandler
+import os
 from functools import lru_cache
+from logging.handlers import RotatingFileHandler
+from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     db_host: str = Field(default="localhost", validation_alias="DB_HOST")
     db_port: int = Field(default=3306, validation_alias="DB_PORT")
     db_user: str = Field(default="root", validation_alias="DB_USER")
-    db_password: str = Field(default="", validation_alias="DB_PASSWORD")
+    db_password: str = Field(default="root", validation_alias="DB_PASSWORD")
     db_name: str = Field(default="prmajesticbot", validation_alias="DB_NAME")
 
     # ==========================================================================
@@ -52,7 +52,9 @@ class Settings(BaseSettings):
     rabbitmq_host: str = Field(default="localhost", validation_alias="RABBITMQ_HOST")
     rabbitmq_port: int = Field(default=5672, validation_alias="RABBITMQ_PORT")
     rabbitmq_user: str = Field(default="guest", validation_alias="RABBITMQ_USER")
-    rabbitmq_password: str = Field(default="guest", validation_alias="RABBITMQ_PASSWORD")
+    rabbitmq_password: str = Field(
+        default="guest", validation_alias="RABBITMQ_PASSWORD"
+    )
     rabbitmq_vhost: str = Field(default="/", validation_alias="RABBITMQ_VHOST")
     exchange_name: str = "prmajesticbot"
 
@@ -63,7 +65,9 @@ class Settings(BaseSettings):
     # ==========================================================================
     # CORS Settings
     # ==========================================================================
-    web_panel_url: str = Field(default="http://localhost:5173", validation_alias="WEB_PANEL_URL")
+    web_panel_url: str = Field(
+        default="http://localhost:5173", validation_alias="WEB_PANEL_URL"
+    )
 
     @property
     def cors_origins(self) -> List[str]:
@@ -101,9 +105,9 @@ class Settings(BaseSettings):
     ]
 
     template_defaults: dict = {
-        "stream_online": "@everyone 🔴 {streamer_name} начал стрим!",
+        "stream_online": "🔴 {streamer_name} начал стрим!",
         "stream_offline": "⚫ {streamer_name} закончил стрим",
-        "category_to_gta": "@everyone 🎮 {streamer_name} сменил категорию на GTA 5!",
+        "category_to_gta": "🎮 {streamer_name} сменил категорию на GTA 5!",
         "category_from_gta": "🎮 {streamer_name} сменил категорию с GTA 5 на другую",
     }
 
@@ -116,7 +120,9 @@ class Settings(BaseSettings):
     # Logging Settings
     # ==========================================================================
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
-    log_dir: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../logs"))
+    log_dir: str = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../logs")
+    )
     log_file: str = "api.log"
     log_max_bytes: int = 10 * 1024 * 1024  # 10MB
     log_backup_count: int = 5

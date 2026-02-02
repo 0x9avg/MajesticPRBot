@@ -4,12 +4,13 @@
 Uses pydantic-settings for type validation and .env loading.
 """
 
-import os
 import logging
-from typing import Optional, List, ClassVar
+import os
 from logging.handlers import RotatingFileHandler
-from pydantic_settings import BaseSettings
+from typing import ClassVar, List, Optional
+
 from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Config(BaseSettings):
@@ -49,7 +50,7 @@ class Config(BaseSettings):
     # Logging
     # ==========================================================================
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    
+
     # ClassVars are not validated or loaded from env
     log_dir: ClassVar[str] = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "../../logs")

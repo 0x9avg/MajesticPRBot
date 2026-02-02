@@ -1,6 +1,8 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
+
 from schemas.common import Snowflake
 
 
@@ -14,7 +16,6 @@ class EventBase(BaseModel):
 
 class EventCreate(EventBase):
     created_by: Snowflake
-    guild_id: Snowflake
 
 
 class EventResponse(EventBase):

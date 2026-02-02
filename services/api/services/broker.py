@@ -4,16 +4,16 @@ RabbitMQ Broker Service for publishing events.
 
 import asyncio
 import json
-from typing import Optional
 import logging
+from typing import Optional
 
 import aio_pika
-from aio_pika import Message, ExchangeType
+from aio_pika import ExchangeType, Message
 
 
 class BrokerService:
     """RabbitMQ message broker for publishing events."""
-    
+
     def __init__(
         self,
         host: str = "localhost",
@@ -31,34 +31,36 @@ class BrokerService:
         self.vhost = vhost
         self.exchange_name = exchange_name
         self.logger = logger or logging.getLogger(__name__)
-        
+
         self.connection: Optional[aio_pika.RobustConnection] = None
         self.channel: Optional[aio_pika.Channel] = None
         self.exchange: Optional[aio_pika.Exchange] = None
-    
+
     @property
     def url(self) -> str:
         """Get the AMQP connection URL."""
-        return f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
-    
+        return (
+            f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
+        )
+
     async def connect(self) -> None:
         """Establish connection to RabbitMQ."""
         try:
             self.connection = await aio_pika.connect_robust(self.url)
             self.channel = await self.connection.channel()
-            
+
             # Declare a topic exchange
             self.exchange = await self.channel.declare_exchange(
                 self.exchange_name,
                 ExchangeType.TOPIC,
                 durable=True,
             )
-            
+
             self.logger.info(f"✓ Connected to RabbitMQ at {self.host}:{self.port}")
         except Exception as e:
             self.logger.error(f"Failed to connect to RabbitMQ: {e}")
             raise
-    
+
     async def disconnect(self) -> None:
         """Close connection to RabbitMQ."""
         try:
@@ -67,65 +69,78 @@ class BrokerService:
                 self.logger.info("✓ Disconnected from RabbitMQ")
         except Exception as e:
             self.logger.error(f"Error disconnecting from RabbitMQ: {e}")
-    
+
     async def publish(self, routing_key: str, data: dict) -> bool:
         """
         Publish a message to the exchange.
-        
+
         Args:
             routing_key: Topic routing key (e.g., "streamer.added", "spec.claimed")
             data: Dictionary to serialize as JSON
-            
+
         Returns:
             True if published successfully, False otherwise
         """
         if not self.exchange:
             self.logger.warning("Cannot publish: not connected to RabbitMQ")
             return False
-        
+
         try:
             message = Message(
                 body=json.dumps(data, default=str).encode(),
                 content_type="application/json",
             )
-            
+
             await self.exchange.publish(message, routing_key=routing_key)
             self.logger.debug(f"Published event: {routing_key}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to publish event {routing_key}: {e}")
             return False
-    
+
     # =========================================================================
     # Convenience methods for specific events
     # =========================================================================
-    
-    async def emit_streamer_added(self, streamer_id: int, streamer_name: str, data: dict = None) -> bool:
+
+    async def emit_streamer_added(
+        self, streamer_id: int, streamer_name: str, data: dict = None
+    ) -> bool:
         """Emit streamer.added event."""
-        return await self.publish("streamer.added", {
-            "event": "streamer.added",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "data": data or {},
-        })
-    
+        return await self.publish(
+            "streamer.added",
+            {
+                "event": "streamer.added",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "data": data or {},
+            },
+        )
+
     async def emit_streamer_removed(self, streamer_id: int, streamer_name: str) -> bool:
         """Emit streamer.removed event."""
-        return await self.publish("streamer.removed", {
-            "event": "streamer.removed",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-        })
-    
-    async def emit_streamer_updated(self, streamer_id: int, streamer_name: str, data: dict = None) -> bool:
+        return await self.publish(
+            "streamer.removed",
+            {
+                "event": "streamer.removed",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+            },
+        )
+
+    async def emit_streamer_updated(
+        self, streamer_id: int, streamer_name: str, data: dict = None
+    ) -> bool:
         """Emit streamer.updated event."""
-        return await self.publish("streamer.updated", {
-            "event": "streamer.updated",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "data": data or {},
-        })
-    
+        return await self.publish(
+            "streamer.updated",
+            {
+                "event": "streamer.updated",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "data": data or {},
+            },
+        )
+
     async def emit_stream_state_changed(
         self,
         streamer_id: int,
@@ -134,14 +149,17 @@ class BrokerService:
         data: dict = None,
     ) -> bool:
         """Emit stream.state.changed event."""
-        return await self.publish("stream.state.changed", {
-            "event": "stream.state.changed",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "is_online": is_online,
-            "data": data or {},
-        })
-    
+        return await self.publish(
+            "stream.state.changed",
+            {
+                "event": "stream.state.changed",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "is_online": is_online,
+                "data": data or {},
+            },
+        )
+
     async def emit_spec_claimed(
         self,
         streamer_id: int,
@@ -150,14 +168,17 @@ class BrokerService:
         data: dict = None,
     ) -> bool:
         """Emit spec.claimed event."""
-        return await self.publish("spec.claimed", {
-            "event": "spec.claimed",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "pr_id": pr_id,
-            "data": data or {},
-        })
-    
+        return await self.publish(
+            "spec.claimed",
+            {
+                "event": "spec.claimed",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "pr_id": pr_id,
+                "data": data or {},
+            },
+        )
+
     async def emit_spec_unclaimed(
         self,
         streamer_id: int,
@@ -167,30 +188,40 @@ class BrokerService:
         reason: str,
     ) -> bool:
         """Emit spec.unclaimed event."""
-        return await self.publish("spec.unclaimed", {
-            "event": "spec.unclaimed",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "pr_id": pr_id,
-            "duration_seconds": duration_seconds,
-            "reason": reason,
-        })
-    
-    async def emit_guild_settings_updated(self, guild_id: str, data: dict = None) -> bool:
-        """Emit guild.settings.updated event."""
-        return await self.publish("guild.settings.updated", {
-            "event": "guild.settings.updated",
-            "guild_id": guild_id,
-            "data": data or {},
-        })
+        return await self.publish(
+            "spec.unclaimed",
+            {
+                "event": "spec.unclaimed",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "pr_id": pr_id,
+                "duration_seconds": duration_seconds,
+                "reason": reason,
+            },
+        )
 
-    async def emit_streamer_verify(self, username: str, added_by_data: dict = None) -> bool:
+    async def emit_guild_settings_updated(self, data: dict = None) -> bool:
+        """Emit guild.settings.updated event."""
+        return await self.publish(
+            "guild.settings.updated",
+            {
+                "event": "guild.settings.updated",
+                "data": data or {},
+            },
+        )
+
+    async def emit_streamer_verify(
+        self, username: str, added_by_data: dict = None
+    ) -> bool:
         """Emit streamer.verify event for async ID resolution."""
-        return await self.publish("streamer.verify", {
-            "event": "streamer.verify",
-            "username": username,
-            "added_by": added_by_data or {},
-        })
+        return await self.publish(
+            "streamer.verify",
+            {
+                "event": "streamer.verify",
+                "username": username,
+                "added_by": added_by_data or {},
+            },
+        )
 
     # =========================================================================
     # Stream State Events (called from update_streamer_status)
@@ -204,35 +235,37 @@ class BrokerService:
         game_name: str = None,
         stream_title: str = None,
         thumbnail_url: str = None,
-        guild_id: str = None,
     ) -> bool:
         """Emit stream.state.online event."""
-        return await self.publish("stream.state.online", {
-            "event": "online",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "is_online": True,
-            "game_id": game_id,
-            "game_name": game_name,
-            "stream_title": stream_title,
-            "thumbnail_url": thumbnail_url,
-            "guild_id": guild_id,
-        })
+        return await self.publish(
+            "stream.state.online",
+            {
+                "event": "online",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "is_online": True,
+                "game_id": game_id,
+                "game_name": game_name,
+                "stream_title": stream_title,
+                "thumbnail_url": thumbnail_url,
+            },
+        )
 
     async def emit_stream_offline(
         self,
         streamer_id: int,
         streamer_name: str,
-        guild_id: str = None,
     ) -> bool:
         """Emit stream.state.offline event."""
-        return await self.publish("stream.state.offline", {
-            "event": "offline",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "is_online": False,
-            "guild_id": guild_id,
-        })
+        return await self.publish(
+            "stream.state.offline",
+            {
+                "event": "offline",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "is_online": False,
+            },
+        )
 
     async def emit_category_change(
         self,
@@ -243,25 +276,27 @@ class BrokerService:
         new_game_name: str,
         stream_title: str = None,
         thumbnail_url: str = None,
-        guild_id: str = None,
     ) -> bool:
         """Emit stream.state.category event."""
-        return await self.publish("stream.state.category", {
-            "event": "category_change",
-            "streamer_id": streamer_id,
-            "streamer_name": streamer_name,
-            "old_game_id": old_game_id,
-            "new_game_id": new_game_id,
-            "new_game_name": new_game_name,
-            "stream_title": stream_title,
-            "thumbnail_url": thumbnail_url,
-            "guild_id": guild_id,
-        })
+        return await self.publish(
+            "stream.state.category",
+            {
+                "event": "category_change",
+                "streamer_id": streamer_id,
+                "streamer_name": streamer_name,
+                "old_game_id": old_game_id,
+                "new_game_id": new_game_id,
+                "new_game_name": new_game_name,
+                "stream_title": stream_title,
+                "thumbnail_url": thumbnail_url,
+            },
+        )
 
-    async def emit_monitoring_refresh(self, guild_id: str = None) -> bool:
+    async def emit_monitoring_refresh(self) -> bool:
         """Request monitoring refresh."""
-        return await self.publish("monitoring.refresh", {
-            "event": "refresh",
-            "guild_id": guild_id,
-        })
-
+        return await self.publish(
+            "monitoring.refresh",
+            {
+                "event": "refresh",
+            },
+        )

@@ -6,9 +6,9 @@ Discord Bot Entry Point.
 import asyncio
 import sys
 
-from config import Config
 from api_client import APIClient
 from broker_consumer import BrokerConsumer
+from config import Config
 from discord_bot import DiscordBot
 
 

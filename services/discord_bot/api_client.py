@@ -4,9 +4,12 @@ HTTP client for communicating with the central API service.
 Полностью независимый - не импортирует из других сервисов.
 """
 
-import aiohttp
-from typing import Optional, List, Dict, Any
 import logging
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+
+import json
 
 
 class APIClient:
@@ -54,7 +57,7 @@ class APIClient:
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
         if endpoint == "/health":
-             url = f"{self.base_url}{endpoint}"
+            url = f"{self.base_url}{endpoint}"
 
         try:
             async with session.request(method, url, json=data, params=params) as resp:
@@ -63,13 +66,19 @@ class APIClient:
 
                 result = await resp.json()
                 if not isinstance(result, (dict, list)) and result is not None:
-                    self.logger.warning(f"API returned non-structured JSON: {type(result)} val: {result} for {url}")
+                    self.logger.warning(
+                        f"API returned non-structured JSON: {type(result)} val: {result} for {url}"
+                    )
 
                 if resp.status >= 400:
                     # 4xx = expected business logic (conflict, not found, etc.)
                     # 5xx = actual server errors
                     if resp.status >= 500:
                         self.logger.error(f"API error {resp.status}: {result}")
+                    elif resp.status == 404:
+                        self.logger.debug(
+                            f"API resource not found {resp.status}: {result}"
+                        )
                     else:
                         self.logger.warning(f"API response {resp.status}: {result}")
                     return result  # Return error details
@@ -81,7 +90,7 @@ class APIClient:
         except Exception as e:
             self.logger.error(f"Unexpected error in API request: {e}", exc_info=True)
             return None
-    
+
     # =========================================================================
     # System / Service API
     # =========================================================================
@@ -92,10 +101,11 @@ class APIClient:
         # or we just returning a dummy structure if not exists, but better try /health
         try:
             result = await self._request("GET", "/health")
-            if result: return result
+            if result:
+                return result
             return {"status": "unknown", "api": "online"}
         except:
-             return {"status": "unreachable"}
+            return {"status": "unreachable"}
 
     async def sync_streamers(self) -> Dict[str, Any]:
         """Trigger streamers sync (via refreshing monitoring for now)."""
@@ -163,7 +173,11 @@ class APIClient:
 
     async def get_guild_settings(self) -> Optional[Dict]:
         """Get guild settings."""
-        return await self._request("GET", "/guild")
+        data = await self._request("GET", "/guild")
+        data["notification_templates"] = json.loads(
+            data.get("notification_templates", "{}")
+        )
+        return data
 
     async def update_guild_settings(self, **kwargs) -> Optional[Dict]:
         """Update guild settings."""
@@ -171,17 +185,7 @@ class APIClient:
 
     async def update_guild_templates(self, templates: Dict[str, str]) -> Optional[Dict]:
         """Update notification templates."""
-        # Map template names to schema fields if necessary
-        # Schema expects: template_stream_online, etc.
-        # But UI might pass { "stream_online": "tmpl" }
-        # Mapping generic event types to schema fields
-        data = {}
-        for k, v in templates.items():
-            if not k.startswith("template_"):
-                data[f"template_{k}"] = v
-            else:
-                data[k] = v
-        return await self._request("PATCH", "/guild/templates", data=data)
+        return await self._request("PATCH", "/guild/templates", data=templates)
 
     async def update_guild_rates(
         self,
@@ -282,7 +286,16 @@ class APIClient:
     async def get_assistants(self) -> List[Dict]:
         """Get all assistants."""
         result = await self._request("GET", "/assistants")
+        if result and "data" in result:
+            return result["data"]
         return result if isinstance(result, list) else []
+
+    async def get_assistant(self, user_id: int) -> Optional[Dict]:
+        """Get a specific assistant by ID."""
+        result = await self._request("GET", f"/assistants/{user_id}")
+        if result and "data" in result:
+            return result["data"]
+        return None
 
     async def get_assistant_capabilities(self, user_id: int) -> Dict[str, bool]:
         """Get assistant capabilities/permissions."""
@@ -296,6 +309,7 @@ class APIClient:
             "can_manage_streamers": False,
         }
 
+    # TODO: Fix /assistants/{user_id}/stats is not existing
     async def get_assistant_stats(self, user_id: int) -> Optional[Dict]:
         """Get assistant stats."""
         return await self._request("GET", f"/assistants/{user_id}/stats")
@@ -326,6 +340,7 @@ class APIClient:
         """Get dashboard status."""
         return await self._request("GET", "/dashboard/status")
 
+    # TODO: Fix /stats/leaderboard is not existing
     async def get_leaderboard(self, limit: int = 10) -> Optional[Dict]:
         """Get PR leaderboard."""
         return await self._request("GET", "/stats/leaderboard", params={"limit": limit})
@@ -341,7 +356,6 @@ class APIClient:
         required_pr_count: int,
         channel_id: int,
         created_by: int,
-        guild_id: str,
         start_time: Optional[str] = None,
     ) -> Optional[Dict]:
         """Create a new event."""
@@ -351,18 +365,15 @@ class APIClient:
             "required_pr_count": required_pr_count,
             "channel_id": channel_id,
             "created_by": created_by,
-            "guild_id": guild_id,
         }
         if start_time:
             data["start_time"] = start_time
 
         return await self._request("POST", "/events", data=data)
 
-    async def get_active_events(self, guild_id: str) -> List[Dict]:
+    async def get_active_events(self) -> List[Dict]:
         """Get active events."""
-        result = await self._request(
-            "GET", "/events/active", params={"guild_id": guild_id}
-        )
+        result = await self._request("GET", "/events/active")
         return result if isinstance(result, list) else []
 
     async def get_scheduled_events(self) -> List[Dict]:
@@ -472,7 +483,7 @@ class APIClient:
     async def update_daily_stats_manual(
         self,
         pr_id: int,
-        date_str: str,
+        date: str,
         p0: int,
         p1: int,
         p2: int,
@@ -484,7 +495,7 @@ class APIClient:
             "PUT",
             f"/assistants/{pr_id}/daily-stats",
             data={
-                "date": date_str,
+                "date": date,
                 "p0_seconds": p0,
                 "p1_seconds": p1,
                 "p2_seconds": p2,
@@ -494,11 +505,40 @@ class APIClient:
         )
         return result is not None and "detail" not in result
 
+    async def create_manual_session(
+        self,
+        pr_id: int,
+        admin_id: int,
+        target_type: str,
+        target_id: int,
+        target_name: str,
+        duration_seconds: int,
+        date: str,
+        is_probation: bool = False,
+        priority: int = 0,
+    ) -> bool:
+        """Create a manual spec session."""
+        result = await self._request(
+            "POST",
+            f"/assistants/{pr_id}/session",
+            data={
+                "admin_id": admin_id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "target_name": target_name,
+                "duration_seconds": duration_seconds,
+                "date": date,
+                "is_probation": is_probation,
+                "priority": priority,
+            },
+        )
+        return result is not None and "detail" not in result
+
     # =========================================================================
     # Extended Guild API
     # =========================================================================
 
-    async def get_pr_actions_channel(self, guild_id: str) -> Optional[int]:
+    async def get_pr_actions_channel(self) -> Optional[int]:
         """Get PR actions channel ID."""
         settings = await self.get_guild_settings()
         if settings:
@@ -544,17 +584,17 @@ class APIClient:
     # Channel Management API
     # =========================================================================
 
-    async def set_notification_channel(self, guild_id: str, channel_id: int) -> bool:
+    async def set_notification_channel(self, channel_id: int) -> bool:
         """Set notification channel."""
         result = await self.update_guild_settings(notification_channel_id=channel_id)
         return result is not None
 
-    async def set_monitoring_channel(self, guild_id: str, channel_id: int) -> bool:
+    async def set_monitoring_channel(self, channel_id: int) -> bool:
         """Set monitoring channel."""
         result = await self.update_guild_settings(monitoring_channel_id=channel_id)
         return result is not None
 
-    async def set_pr_actions_channel(self, guild_id: str, channel_id: int) -> bool:
+    async def set_pr_actions_channel(self, channel_id: int) -> bool:
         """Set PR actions channel."""
         result = await self.update_guild_settings(pr_actions_channel_id=channel_id)
         return result is not None

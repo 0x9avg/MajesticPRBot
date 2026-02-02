@@ -3,16 +3,16 @@
 событиями и статистикой. Включает автоматическое создание таблиц и логику повторных попыток.
 """
 
-import aiomysql
-from datetime import datetime, timezone, timedelta
 import asyncio
-import logging
+import json
 import time
-from typing import Optional, List, Dict, Any, Union
+from datetime import datetime, timezone
 from functools import wraps
+from typing import Any, Dict, List, Optional
 
-from utils import split_time_by_day
+import aiomysql
 from config import Config
+from utils import split_time_by_day
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
@@ -133,7 +133,7 @@ class Database:
             self.logger.info("Initializing database schema...")
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SET sql_notes = 0")
+                    await cursor.execute("SET note_verbosity = 0")
 
                     # =========================================================
                     # 1. Streamers Table
@@ -164,7 +164,6 @@ class Database:
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS settings (
-                            guild_id BIGINT UNSIGNED PRIMARY KEY,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
                             monitoring_message_id BIGINT UNSIGNED,
@@ -172,10 +171,7 @@ class Database:
                             control_panel_channel_id BIGINT UNSIGNED,
                             control_panel_message_id BIGINT UNSIGNED,
                             assistant_role_id BIGINT UNSIGNED,
-                            template_stream_online VARCHAR(500),
-                            template_stream_offline VARCHAR(500),
-                            template_category_to_gta VARCHAR(500),
-                            template_category_from_gta VARCHAR(500),
+                            notification_templates JSON,
                             p0_rate FLOAT DEFAULT 1.0,
                             p1_rate FLOAT DEFAULT 1.2,
                             p2_rate FLOAT DEFAULT 1.5,
@@ -215,7 +211,7 @@ class Database:
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                             pr_id BIGINT UNSIGNED NOT NULL,
                             
-                            target_type ENUM('streamer', 'event') NOT NULL DEFAULT 'streamer',
+                            target_type ENUM('streamer', 'event', 'manual') NOT NULL DEFAULT 'streamer',
                             target_id BIGINT UNSIGNED NOT NULL,
                             is_probation BOOLEAN DEFAULT FALSE,
                             
@@ -361,7 +357,7 @@ class Database:
                         """
                     )
 
-                    await cursor.execute("SET sql_notes = 1")
+                    await cursor.execute("SET note_verbosity = 0")
                     await conn.commit()
 
                     # Initialize default permissions
@@ -374,8 +370,6 @@ class Database:
 
     async def _init_default_permissions(self, conn):
         """Initialize default role permissions."""
-        import json
-
         async with conn.cursor() as cursor:
             default_permissions = {
                 "junior_employee": {
@@ -440,12 +434,11 @@ class Database:
     async def get_role_permissions(self, role: str) -> dict:
         """Get permissions for a role from role_permissions table."""
         import json
-        
+
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
-                    "SELECT permissions FROM role_permissions WHERE role = %s",
-                    (role,)
+                    "SELECT permissions FROM role_permissions WHERE role = %s", (role,)
                 )
                 row = await cursor.fetchone()
                 if row:
@@ -453,7 +446,7 @@ class Database:
                     if isinstance(permissions, str):
                         return json.loads(permissions)
                     return permissions
-                
+
                 # Return default (no permissions) for unknown roles
                 return {
                     "can_view_dashboard": False,
@@ -476,7 +469,7 @@ class Database:
     ) -> None:
         """
         Log an admin action to the admin_logs table for auditing.
-        
+
         Args:
             admin_id: Discord ID of the admin performing the action
             action: Action name (e.g., 'update_streamer', 'delete_assistant')
@@ -485,8 +478,6 @@ class Database:
             details: Optional JSON details (old_value, new_value, etc.)
             ip_address: Optional IP address of the request source
         """
-        import json
-        
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -552,15 +543,16 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT streamer_id FROM streamers WHERE streamer_name = %s", 
-                        (streamer_name,)
+                        "SELECT streamer_id FROM streamers WHERE streamer_name = %s",
+                        (streamer_name,),
                     )
                     existing_by_name = await cursor.fetchone()
-                    
-                    if existing_by_name and existing_by_name['streamer_id'] != streamer_id:
-                        # Conflict! Name exists but ID is different.
-                        # This happens if a streamer channel was recycled or ID changed.
-                        old_id = existing_by_name['streamer_id']
+
+                    if (
+                        existing_by_name
+                        and existing_by_name["streamer_id"] != streamer_id
+                    ):
+                        old_id = existing_by_name["streamer_id"]
                         # Rename old record to free the name
                         new_name_old = f"old_{old_id}"
                         self.logger.warning(
@@ -569,9 +561,9 @@ class Database:
                         )
                         await cursor.execute(
                             "UPDATE streamers SET streamer_name = %s WHERE streamer_id = %s",
-                            (new_name_old, old_id)
+                            (new_name_old, old_id),
                         )
-                    
+
                     await cursor.execute(
                         """
                         INSERT INTO streamers (
@@ -615,7 +607,7 @@ class Database:
     async def get_streamer(self, streamer_id: int) -> Optional[Dict[str, Any]]:
         """
         Получение информации о стримере по ID с поддержкой множественных назначений.
-        
+
         Returns dict with 'assignments' list containing Main and Probation slots.
         """
         try:
@@ -636,7 +628,7 @@ class Database:
                     streamer = await cursor.fetchone()
                     if not streamer:
                         return None
-                    
+
                     # 2. Get all assignments for this streamer (Main + Probation)
                     # Probation status comes from spec_sessions.is_probation, not assistants table
                     await cursor.execute(
@@ -655,26 +647,34 @@ class Database:
                         (streamer_id,),
                     )
                     assignments = await cursor.fetchall()
-                    
+
                     # 3. Build result with assignments list
                     result = dict(streamer)
-                    result["assignments"] = [
-                        {
-                            "pr_id": str(a["pr_id"]),
-                            "is_probation": a.get("is_probation", False),
-                            "assigned_at": a.get("assigned_at"),
-                        }
-                        for a in assignments
-                    ] if assignments else []
-                    
+                    result["assignments"] = (
+                        [
+                            {
+                                "pr_id": str(a["pr_id"]),
+                                "is_probation": a.get("is_probation", False),
+                                "assigned_at": a.get("assigned_at"),
+                            }
+                            for a in assignments
+                        ]
+                        if assignments
+                        else []
+                    )
+
                     # Legacy compatibility: set assigned_pr_id to Main slot if exists
                     main_assignment = next(
-                        (a for a in result["assignments"] if not a["is_probation"]), 
-                        None
+                        (a for a in result["assignments"] if not a["is_probation"]),
+                        None,
                     )
-                    result["assigned_pr_id"] = main_assignment["pr_id"] if main_assignment else None
-                    result["assigned_at"] = main_assignment["assigned_at"] if main_assignment else None
-                    
+                    result["assigned_pr_id"] = (
+                        main_assignment["pr_id"] if main_assignment else None
+                    )
+                    result["assigned_at"] = (
+                        main_assignment["assigned_at"] if main_assignment else None
+                    )
+
                     return result
         except Exception as e:
             self.logger.error(
@@ -699,7 +699,7 @@ class Database:
 
         try:
             self.logger.debug(
-                f"Updating streamer {streamer_id} status: online={is_online}"
+                f"Updating streamer {streamer_id} status: online={is_online} game: {game_name} stream: {stream_title}"
             )
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -734,7 +734,7 @@ class Database:
     ) -> int:
         """
         Bulk update streamer statuses (max 100 per call).
-        
+
         Args:
             updates: List of dicts with keys:
                 - streamer_id (required)
@@ -744,17 +744,17 @@ class Database:
                 - game_name (optional)
                 - stream_title (optional)
                 - stream_thumbnail_url (optional)
-                
+
         Returns:
             Number of streamers updated
         """
         if not updates:
             return 0
-            
+
         if len(updates) > 100:
             self.logger.warning("Bulk update limited to 100 streamers, truncating")
             updates = updates[:100]
-        
+
         try:
             updated_count = 0
             async with self.pool.acquire() as conn:
@@ -763,7 +763,7 @@ class Database:
                         streamer_id = update.get("streamer_id")
                         if not streamer_id:
                             continue
-                            
+
                         await cursor.execute(
                             """
                             UPDATE streamers 
@@ -783,9 +783,9 @@ class Database:
                         )
                         if cursor.rowcount > 0:
                             updated_count += 1
-                    
+
                     await conn.commit()
-            
+
             self.logger.info(f"✓ Bulk updated {updated_count} streamers")
             return updated_count
         except Exception as e:
@@ -796,28 +796,15 @@ class Database:
     async def update_streamer(
         self,
         streamer_id: int,
-        priority: Optional[int] = None,
-        is_paid: Optional[bool] = None,
+        priority: int,
     ) -> bool:
         """Обновление настроек стримера."""
         try:
-            updates = []
-            values = []
-
-            if priority is not None:
-                updates.append("priority = %s")
-                values.append(priority)
-
-            if not updates:
-                return True
-
-            values.append(streamer_id)
-
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        f"UPDATE streamers SET {', '.join(updates)} WHERE streamer_id = %s",
-                        values,
+                        "UPDATE streamers SET priority = %s WHERE streamer_id = %s",
+                        (priority, streamer_id),
                     )
                     await conn.commit()
                     return cursor.rowcount > 0
@@ -828,7 +815,7 @@ class Database:
             return False
 
     @db_retry()
-    async def delete_streamer(self, streamer_id: int) -> bool:
+    async def remove_streamer(self, streamer_id: int) -> bool:
         """
         Удаление стримера из базы данных.
 
@@ -886,8 +873,6 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Query streamers with GROUP BY to avoid duplicates
-                    # For assignments, we take the first (Main) slot if exists
                     await cursor.execute(
                         """
                         SELECT 
@@ -895,6 +880,7 @@ class Database:
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
+                            MIN(a.nickname) as assigned_pr_name,
                             MIN(ss.started_at) as assigned_at
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
@@ -947,30 +933,35 @@ class Database:
 
     async def create_or_update_guild(
         self,
-        guild_id: str,
-        *,
         notification_channel_id: Optional[int] = None,
         monitoring_channel_id: Optional[int] = None,
         monitoring_message_id: Optional[int] = None,
+        pr_actions_channel_id: Optional[int] = None,
+        control_panel_channel_id: Optional[int] = None,
+        control_panel_message_id: Optional[int] = None,
+        assistant_role_id: Optional[int] = None,
     ) -> None:
         """Create or update guild settings.
 
         Args:
-            guild_id: Discord guild ID
             notification_channel_id: Discord channel ID for notifications (optional)
             monitoring_channel_id: Discord channel ID for monitoring (optional)
             monitoring_message_id: Discord message ID for monitoring embed (optional)
+            pr_actions_channel_id: Discord channel ID for PR actions (optional)
+            control_panel_channel_id: Discord channel ID for control panel (optional)
+            control_panel_message_id: Discord message ID for control panel embed (optional)
+            assistant_role_id: Discord role ID for assistant
         """
         try:
             self.logger.debug(
-                f"Saving guild settings: guild={guild_id}, notification channel={notification_channel_id}, monitoring channel={monitoring_channel_id}, monitoring message={monitoring_message_id}"
+                f"""Saving guild settings: notification channel={notification_channel_id}, monitoring channel={monitoring_channel_id}, monitoring message={monitoring_message_id}, 
+                PR actions channel={pr_actions_channel_id}, control panel channel={control_panel_channel_id}, control panel message={control_panel_message_id}, assistant role={assistant_role_id}"""
             )
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     # First, get existing settings using the same cursor to ensure consistency
                     await cursor.execute(
-                        "SELECT guild_id, notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, template_stream_online, template_stream_offline, template_category_to_gta, template_category_from_gta, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE guild_id = %s",
-                        (guild_id,),
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id FROM settings",
                     )
                     existing = await cursor.fetchone()
 
@@ -984,48 +975,86 @@ class Database:
                             else None
                         )
                     )
-                    final_monitoring = (
+                    final_monitoring_channel = (
                         monitoring_channel_id
                         if monitoring_channel_id is not None
                         else (
                             existing.get("monitoring_channel_id") if existing else None
                         )
                     )
-                    final_message = (
+                    final_monitoring_message = (
                         monitoring_message_id
                         if monitoring_message_id is not None
                         else (
                             existing.get("monitoring_message_id") if existing else None
                         )
                     )
+                    final_pr_actions_channel = (
+                        pr_actions_channel_id
+                        if pr_actions_channel_id is not None
+                        else (
+                            existing.get("pr_actions_channel_id") if existing else None
+                        )
+                    )
+                    final_control_panel_channel = (
+                        control_panel_channel_id
+                        if control_panel_channel_id is not None
+                        else (
+                            existing.get("control_panel_channel_id")
+                            if existing
+                            else None
+                        )
+                    )
+                    final_control_panel_message = (
+                        control_panel_message_id
+                        if control_panel_message_id is not None
+                        else (
+                            existing.get("control_panel_message_id")
+                            if existing
+                            else None
+                        )
+                    )
+
+                    final_pr_role = (
+                        assistant_role_id
+                        if assistant_role_id is not None
+                        else (existing.get("assistant_role_id") if existing else None)
+                    )
 
                     await cursor.execute(
                         """
-                        INSERT INTO settings (guild_id, notification_channel_id, monitoring_channel_id, monitoring_message_id)
-                        VALUES (%s, %s, %s, %s) AS new_settings
+                        INSERT INTO settings (notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s) AS new_settings
                         ON DUPLICATE KEY UPDATE 
                             notification_channel_id = new_settings.notification_channel_id, 
                             monitoring_channel_id = new_settings.monitoring_channel_id, 
-                            monitoring_message_id = new_settings.monitoring_message_id
+                            monitoring_message_id = new_settings.monitoring_message_id,
+                            pr_actions_channel_id = new_settings.pr_actions_channel_id,
+                            control_panel_channel_id = new_settings.control_panel_channel_id,
+                            control_panel_message_id = new_settings.control_panel_message_id,
+                            assistant_role_id = new_settings.assistant_role_id
+
+
                         """,
                         (
-                            guild_id,
                             final_notification,
-                            final_monitoring,
-                            final_message,
+                            final_monitoring_channel,
+                            final_monitoring_message,
+                            final_pr_actions_channel,
+                            final_control_panel_channel,
+                            final_control_panel_message,
+                            final_pr_role,
                         ),
                     )
                     await conn.commit()
-                    self.logger.debug(f"✓ Guild {guild_id} settings saved successfully")
+                    self.logger.debug("✓ Guild settings saved successfully")
+
         except Exception as e:
-            self.logger.error(f"Failed to save guild {guild_id}: {e}", exc_info=True)
+            self.logger.error(f"Failed to save guild: {e}", exc_info=True)
             raise
 
-    async def get_guild(self, guild_id: str) -> Optional[Dict[str, Any]]:
+    async def get_guild(self) -> Optional[Dict[str, Any]]:
         """Get guild settings.
-
-        Args:
-            guild_id: Discord guild ID
 
         Returns:
             Guild settings dict or None if not found
@@ -1034,46 +1063,18 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT guild_id, notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, template_stream_online, template_stream_offline, template_category_to_gta, template_category_from_gta, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE guild_id = %s",
-                        (guild_id,),
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings",
                     )
                     return await cursor.fetchone()
         except Exception as e:
-            self.logger.error(f"Failed to get guild {guild_id}: {e}", exc_info=True)
+            self.logger.error(f"Failed to get guild: {e}", exc_info=True)
             raise
 
-    async def list_guilds_with_monitoring(self) -> List[Dict[str, Any]]:
-        """Get all guilds that have monitoring channel configured.
-
-        Returns:
-            List of guild settings dicts with monitoring_channel_id set
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        SELECT guild_id, notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, template_stream_online, template_stream_offline, template_category_to_gta, template_category_from_gta, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings 
-                        WHERE monitoring_channel_id IS NOT NULL
-                        """
-                    )
-                    return await cursor.fetchall()
-        except Exception as e:
-            self.logger.error(
-                f"Failed to list guilds with monitoring: {e}", exc_info=True
-            )
-            raise
-
-    # =========================================================================
-    # Notification Template Operations
-    # =========================================================================
-
-    async def get_notification_template(self, guild_id: str, event_type: str) -> str:
+    async def get_notification_template(self, event_type: str) -> str:
         """
         Получение шаблона уведомления для события.
 
         Args:
-            guild_id: ID Discord сервера
             event_type: Тип события ('stream_online', 'stream_offline' и т.д.)
 
         Returns:
@@ -1089,66 +1090,20 @@ class Database:
             )
             raise ValueError(f"Invalid event type: {event_type}")
 
-        column_name = f"template_{event_type}"
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        f"SELECT {column_name} FROM settings WHERE guild_id = %s",
-                        (guild_id,),
-                    )
+                    await cursor.execute("SELECT notification_templates FROM settings")
                     result = await cursor.fetchone()
-                    if result and result.get(column_name):
-                        return result[column_name]
+                    if result and result.get("notification_templates"):
+                        templates = json.loads(result["notification_templates"])
+                        return templates.get(
+                            event_type, Config.template_defaults.get(event_type, "")
+                        )
                     return Config.template_defaults.get(event_type, "")
         except Exception as e:
-            self.logger.error(
-                f"Failed to get template for guild {guild_id}: {e}", exc_info=True
-            )
+            self.logger.error(f"Failed to get template for guild: {e}", exc_info=True)
             return Config.template_defaults.get(event_type, "")
-
-    async def update_notification_template(
-        self, guild_id: str, event_type: str, template: str
-    ) -> None:
-        """
-        Обновление шаблона уведомления.
-
-        Args:
-            guild_id: ID Discord сервера
-            event_type: Тип события
-            template: Новый шаблон
-        """
-        # SQL injection prevention: validate event_type against whitelist
-        if event_type not in Config.allowed_event_types:
-            self.logger.error(
-                f"Invalid event_type '{event_type}' - possible SQL injection attempt"
-            )
-            raise ValueError(f"Invalid event type: {event_type}")
-
-        column_name = f"template_{event_type}"
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Ensure guild exists in settings
-                    await cursor.execute(
-                        """
-                        INSERT INTO settings (guild_id, {column}) 
-                        VALUES (%s, %s)
-                        ON DUPLICATE KEY UPDATE {column} = %s
-                        """.format(
-                            column=column_name
-                        ),
-                        (guild_id, template, template),
-                    )
-                    await conn.commit()
-                    self.logger.debug(
-                        f"✓ Updated {event_type} template for guild {guild_id}"
-                    )
-        except Exception as e:
-            self.logger.error(
-                f"Failed to update template for guild {guild_id}: {e}", exc_info=True
-            )
-            raise
 
     # =========================================================================
     # Spec System Operations
@@ -1246,7 +1201,7 @@ class Database:
 
     @db_retry()
     async def unassign_pr_from_streamer(
-        self, streamer_id: int, end_reason: str = "stream_end"
+        self, streamer_id: int, end_reason: str = "unknown"
     ) -> Optional[Dict[str, Any]]:
         """
         Снятие PR-ассистента со стримера и обновление статистики.
@@ -1261,10 +1216,10 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get assigned PR
+                    # Get assigned PR and session info (including is_probation)
                     await cursor.execute(
                         """
-                        SELECT a.pr_id, s.started_at, st.streamer_name, st.priority
+                        SELECT a.pr_id, s.started_at, s.is_probation, st.streamer_name, st.priority
                         FROM assistants a
                         JOIN spec_sessions s ON s.pr_id = a.pr_id 
                             AND s.target_type = 'streamer' 
@@ -1282,6 +1237,7 @@ class Database:
 
                     pr_id = result["pr_id"]
                     started_at = result["started_at"]
+                    is_probation = result.get("is_probation", False)
                     streamer_name = result["streamer_name"]
                     priority = result.get("priority", 0)
 
@@ -1320,16 +1276,21 @@ class Database:
                     )
                     await conn.commit()
 
-            # Record Stats (Outside transaction)
+            # Record Stats (Outside transaction) - now with is_probation
             if duration_seconds > 0:
                 await self.record_spec_session(
-                    pr_id, Config.guild_id, started_at, now, priority
+                    pr_id,
+                    started_at,
+                    now,
+                    priority,
+                    is_probation=is_probation,
                 )
 
             return {
                 "pr_id": pr_id,
                 "duration_seconds": duration_seconds,
                 "streamer_name": streamer_name,
+                "is_probation": is_probation,
             }
         except Exception as e:
             self.logger.error(
@@ -1342,14 +1303,14 @@ class Database:
     async def swap_pr_streamers(self, pr1_id: int, pr2_id: int) -> Dict[str, Any]:
         """
         Atomically swap claimed streamers between two PRs.
-        
+
         Args:
             pr1_id: Discord ID of first assistant
             pr2_id: Discord ID of second assistant
-            
+
         Returns:
             Dict with swap details
-            
+
         Raises:
             ValueError: If either PR has no claimed streamer
         """
@@ -1367,10 +1328,10 @@ class Database:
                         (pr1_id,),
                     )
                     pr1_assignment = await cursor.fetchone()
-                    
+
                     if not pr1_assignment:
                         raise ValueError(f"PR {pr1_id} has no claimed streamer")
-                    
+
                     # Get PR2's current assignment
                     await cursor.execute(
                         """
@@ -1382,13 +1343,13 @@ class Database:
                         (pr2_id,),
                     )
                     pr2_assignment = await cursor.fetchone()
-                    
+
                     if not pr2_assignment:
                         raise ValueError(f"PR {pr2_id} has no claimed streamer")
-                    
+
                     streamer1_id = pr1_assignment["streamer_id"]
                     streamer2_id = pr2_assignment["streamer_id"]
-                    
+
                     # Close existing spec sessions for both PRs (with reason 'swap')
                     await cursor.execute(
                         """
@@ -1398,7 +1359,7 @@ class Database:
                         """,
                         (pr1_id, pr2_id),
                     )
-                    
+
                     # Swap assignments in assistants table
                     # PR1 now gets PR2's streamer
                     await cursor.execute(
@@ -1409,7 +1370,7 @@ class Database:
                         """,
                         (streamer2_id, pr1_id),
                     )
-                    
+
                     # PR2 now gets PR1's streamer
                     await cursor.execute(
                         """
@@ -1419,7 +1380,7 @@ class Database:
                         """,
                         (streamer1_id, pr2_id),
                     )
-                    
+
                     # Create new spec sessions
                     await cursor.execute(
                         """
@@ -1428,13 +1389,13 @@ class Database:
                         """,
                         (pr1_id, streamer2_id, pr2_id, streamer1_id),
                     )
-                    
+
                     await conn.commit()
-                    
+
                     self.logger.info(
                         f"✓ Swapped: PR {pr1_id} ({pr1_assignment['streamer_name']}) <-> PR {pr2_id} ({pr2_assignment['streamer_name']})"
                     )
-                    
+
                     return {
                         "pr1_id": pr1_id,
                         "pr2_id": pr2_id,
@@ -1630,15 +1591,10 @@ class Database:
             )
             raise
 
-    # NOTE: transfer_streamer method moved to Spec Extended Operations section (line ~2669)
-
     @db_retry()
-    async def get_pr_actions_channel(self, guild_id: str) -> Optional[int]:
+    async def get_pr_actions_channel(self) -> Optional[int]:
         """
         Получение канала для логов действий PR.
-
-        Args:
-            guild_id: ID Discord сервера
 
         Returns:
             ID канала или None
@@ -1646,46 +1602,12 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT pr_actions_channel_id FROM settings WHERE guild_id = %s",
-                        (guild_id,),
-                    )
+                    await cursor.execute("SELECT pr_actions_channel_id FROM settings")
                     result = await cursor.fetchone()
                     return result.get("pr_actions_channel_id") if result else None
         except Exception as e:
             self.logger.error(
-                f"Failed to get PR actions channel for guild {guild_id}: {e}",
-                exc_info=True,
-            )
-            raise
-
-    @db_retry()
-    async def set_pr_actions_channel(self, guild_id: str, channel_id: int) -> None:
-        """
-        Установка канала для логов действий PR.
-
-        Args:
-            guild_id: ID Discord сервера
-            channel_id: ID канала
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO settings (guild_id, pr_actions_channel_id)
-                        VALUES (%s, %s)
-                        ON DUPLICATE KEY UPDATE pr_actions_channel_id = %s
-                        """,
-                        (guild_id, channel_id, channel_id),
-                    )
-                    await conn.commit()
-                    self.logger.debug(
-                        f"✓ Set PR actions channel to {channel_id} for guild {guild_id}"
-                    )
-        except Exception as e:
-            self.logger.error(
-                f"Failed to set PR actions channel for guild {guild_id}: {e}",
+                f"Failed to get PR actions channel: {e}",
                 exc_info=True,
             )
             raise
@@ -1730,7 +1652,6 @@ class Database:
     @db_retry()
     async def create_event(
         self,
-        guild_id: str,
         name: str,
         description: str,
         channel_id: int,
@@ -1750,8 +1671,8 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO events (
-                             name, description, channel_id, message_id, required_pr_count,
-                            created_by, start_time, notification_sent
+                            name, description, channel_id, message_id, 
+                            required_pr_count, created_by, start_time, notification_sent
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
@@ -1772,7 +1693,7 @@ class Database:
             return None
 
     @db_retry()
-    async def get_active_events(self, guild_id: str) -> list:
+    async def get_active_events(self) -> list:
         """Получение активных событий гильдии."""
         try:
             async with self.pool.acquire() as conn:
@@ -1896,7 +1817,7 @@ class Database:
                             duration = 0
 
                         await self.record_spec_session(
-                            user_id, Config.guild_id, effective_start, now, priority=0
+                            user_id, effective_start, now, priority=0
                         )
 
                         results.append({"user_id": user_id, "duration": duration})
@@ -1917,7 +1838,7 @@ class Database:
         points: float,
         is_probation: bool = False,
     ):
-        """Обновление ежедневной статистики для конкретной даты и приоритета/пробации."""
+        """Обновление ежедневной статистики для конкретной даты и приоритета/испыталки."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -1984,7 +1905,7 @@ class Database:
                     await cursor.execute(query, tuple(params))
                     results = await cursor.fetchall()
                     for r in results:
-                         r["pr_id"] = str(r["pr_id"])
+                        r["pr_id"] = str(r["pr_id"])
                     return results
         except Exception as e:
             self.logger.error(f"Failed to get daily stats: {e}")
@@ -2037,14 +1958,90 @@ class Database:
             return False
 
     @db_retry()
-    async def get_points_config(self, guild_id: str) -> dict:
+    async def create_manual_spec_session(
+        self,
+        pr_id: int,
+        target_type: str,
+        target_id: Optional[int],
+        duration_seconds: int,
+        date_str: str,
+        is_probation: bool = False,
+        priority: int = 0,
+    ) -> bool:
+        """
+        Создание ручной записи сессии спека (для админских корректировок).
+        Записывается как уже завершённая сессия + обновляет daily_stats.
+        """
+        from datetime import datetime, timedelta
+
+        try:
+            # Parse date string
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+            # Create fake start/end times for the session
+            start_time = datetime.combine(date_obj, datetime.min.time())
+            end_time = start_time + timedelta(seconds=duration_seconds)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Insert completed spec_session
+                    await cursor.execute(
+                        """
+                        INSERT INTO spec_sessions 
+                        (pr_id, target_type, target_id, started_at, ended_at, end_reason, is_probation)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            pr_id,
+                            target_type,
+                            target_id,
+                            start_time,
+                            end_time,
+                            "manual_admin",
+                            is_probation,
+                        ),
+                    )
+
+                    # Update assistants table counters
+                    await cursor.execute(
+                        """
+                        UPDATE assistants 
+                        SET total_spec_seconds = total_spec_seconds + %s, 
+                            session_count = session_count + 1
+                        WHERE pr_id = %s
+                        """,
+                        (duration_seconds, pr_id),
+                    )
+                    await conn.commit()
+
+            # Record daily stats (uses existing logic for points calculation)
+            await self.record_spec_session(
+                pr_id=pr_id,
+                start_time=start_time,
+                end_time=end_time,
+                priority=priority,
+                is_probation=is_probation,
+            )
+
+            self.logger.info(
+                f"Manual spec session created: PR={pr_id}, duration={duration_seconds}s, date={date_str}, probation={is_probation}"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to create manual spec session: {e}", exc_info=True
+            )
+            return False
+
+    @db_retry()
+    async def get_points_config(self) -> dict:
         """Получение конфигурации баллов для гильдии."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT p0_rate, p1_rate, p2_rate, p3_rate FROM settings WHERE guild_id = %s",
-                        (guild_id,),
+                        "SELECT p0_rate, p1_rate, p2_rate, p3_rate FROM settings",
                     )
                     result = await cursor.fetchone()
                     if result and result["p0_rate"] is not None:
@@ -2062,7 +2059,7 @@ class Database:
             return {k: v for k, v in Config.default_points.items()}
 
     @db_retry()
-    async def set_points_config(self, guild_id: str, rates: dict):
+    async def set_points_config(self, rates: dict):
         """Установка конфигурации баллов."""
         try:
             async with self.pool.acquire() as conn:
@@ -2071,9 +2068,8 @@ class Database:
                         """
                         UPDATE settings 
                         SET p0_rate = %s, p1_rate = %s, p2_rate = %s, p3_rate = %s
-                        WHERE guild_id = %s
                         """,
-                        (rates[0], rates[1], rates[2], rates[3], guild_id),
+                        (rates[0], rates[1], rates[2], rates[3]),
                     )
                     await conn.commit()
         except Exception as e:
@@ -2099,13 +2095,12 @@ class Database:
     async def record_spec_session(
         self,
         pr_id: int,
-        guild_id: str,
         start_time: datetime,
         end_time: datetime,
         priority: int,
         is_probation: bool = False,
     ):
-        """Запись сессии спека с разделением по дням и расчетом баллов (с поддержкой пробации)."""
+        """Запись сессии спека с разделением по дням и расчетом баллов (с поддержкой испыталки)."""
         try:
             # 1. Split time by day
             chunks = split_time_by_day(start_time, end_time)
@@ -2113,12 +2108,12 @@ class Database:
                 return
 
             # 2. Get Point Rates
-            config = await self.get_points_config(guild_id)
-            
+            config = await self.get_points_config()
+
             # Use probation_rate if probation, else use priority rate
             if is_probation:
                 # Get probation_rate from settings (default 1.2)
-                rate_per_hour = await self._get_probation_rate(guild_id)
+                rate_per_hour = await self._get_probation_rate()
             else:
                 # Default rate if not found for priority
                 rate_per_hour = config.get(priority, 0.5)
@@ -2129,7 +2124,12 @@ class Database:
                 points = (duration / 3600.0) * rate_per_hour
 
                 await self.record_daily_stats(
-                    pr_id, date_obj, priority, duration, points, is_probation=is_probation
+                    pr_id,
+                    date_obj,
+                    priority,
+                    duration,
+                    points,
+                    is_probation=is_probation,
                 )
 
             # 4. Update Global Assistant Stats (assistants table)
@@ -2150,16 +2150,13 @@ class Database:
 
         except Exception as e:
             self.logger.error(f"Failed to record spec session: {e}", exc_info=True)
-    
-    async def _get_probation_rate(self, guild_id: str) -> float:
+
+    async def _get_probation_rate(self) -> float:
         """Get probation rate from settings."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "SELECT probation_rate FROM settings WHERE guild_id = %s",
-                        (guild_id,),
-                    )
+                    await cursor.execute("SELECT probation_rate FROM settings")
                     result = await cursor.fetchone()
                     return result.get("probation_rate", 1.2) if result else 1.2
         except Exception:
@@ -2267,7 +2264,7 @@ class Database:
                         effective_start = max(started_at, event_start_time)
 
                         await self.record_spec_session(
-                            user_id, Config.guild_id, effective_start, now, priority=0
+                            user_id, effective_start, now, priority=0
                         )
 
                     await conn.commit()
@@ -2277,18 +2274,18 @@ class Database:
             return
 
     @db_retry()
-    async def set_assistant_role(self, guild_id: str, role_id: int) -> None:
+    async def set_assistant_role(self, role_id: int) -> None:
         """Установка роли ассистента для гильдии."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        INSERT INTO settings (guild_id, assistant_role_id)
-                        VALUES (%s, %s) AS new
+                        INSERT INTO settings (assistant_role_id)
+                        VALUES (%s) AS new
                         ON DUPLICATE KEY UPDATE assistant_role_id = new.assistant_role_id
                         """,
-                        (guild_id, role_id),
+                        (role_id,),
                     )
                     await conn.commit()
         except Exception as e:
@@ -2306,7 +2303,9 @@ class Database:
                     )
                     await conn.commit()
         except Exception as e:
-            self.logger.error(f"Failed to mark event notif sent: {e}", exc_info=True)
+            self.logger.error(
+                f"Failed to mark event notification sent: {e}", exc_info=True
+            )
 
     @db_retry()
     async def get_user_active_event_participation(self, user_id: int) -> Optional[dict]:
@@ -2590,60 +2589,9 @@ class Database:
             )
             return False
 
-    # =========================================================================
-    # Guild Extended Settings (for routes refactoring)
-    # =========================================================================
-
-    @db_retry()
-    async def update_guild_extended_settings(
-        self,
-        guild_id: str,
-        pr_actions_channel_id: Optional[int] = None,
-        control_panel_channel_id: Optional[int] = None,
-        control_panel_message_id: Optional[int] = None,
-        assistant_role_id: Optional[int] = None,
-    ) -> bool:
-        """Обновление расширенных настроек гильдии."""
-        try:
-            updates = []
-            values = []
-
-            if pr_actions_channel_id is not None:
-                updates.append("pr_actions_channel_id = %s")
-                values.append(pr_actions_channel_id)
-            if control_panel_channel_id is not None:
-                updates.append("control_panel_channel_id = %s")
-                values.append(control_panel_channel_id)
-            if control_panel_message_id is not None:
-                updates.append("control_panel_message_id = %s")
-                values.append(control_panel_message_id)
-            if assistant_role_id is not None:
-                updates.append("assistant_role_id = %s")
-                values.append(assistant_role_id)
-
-            if not updates:
-                return True
-
-            values.append(guild_id)
-
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        f"UPDATE settings SET {', '.join(updates)} WHERE guild_id = %s",
-                        values,
-                    )
-                    await conn.commit()
-                    return True
-        except Exception as e:
-            self.logger.error(
-                f"Failed to update guild extended settings: {e}", exc_info=True
-            )
-            return False
-
     @db_retry()
     async def update_guild_templates(
         self,
-        guild_id: str,
         template_stream_online: Optional[str] = None,
         template_stream_offline: Optional[str] = None,
         template_category_to_gta: Optional[str] = None,
@@ -2651,32 +2599,31 @@ class Database:
     ) -> bool:
         """Обновление шаблонов уведомлений гильдии."""
         try:
-            updates = []
-            values = []
+            guild = await self.get_guild()
+            if not guild:  # Guild must exist
+                return False
 
-            if template_stream_online is not None:
-                updates.append("template_stream_online = %s")
-                values.append(template_stream_online)
-            if template_stream_offline is not None:
-                updates.append("template_stream_offline = %s")
-                values.append(template_stream_offline)
-            if template_category_to_gta is not None:
-                updates.append("template_category_to_gta = %s")
-                values.append(template_category_to_gta)
-            if template_category_from_gta is not None:
-                updates.append("template_category_from_gta = %s")
-                values.append(template_category_from_gta)
+            current_templates = guild.get(
+                "notification_templates", Config.template_defaults
+            )
 
-            if not updates:
-                return True
+            if not isinstance(current_templates, dict):
+                current_templates = Config.template_defaults
 
-            values.append(guild_id)
+            if template_stream_online:
+                current_templates["stream_online"] = template_stream_online
+            if template_stream_offline:
+                current_templates["stream_offline"] = template_stream_offline
+            if template_category_to_gta:
+                current_templates["category_to_gta"] = template_category_to_gta
+            if template_category_from_gta:
+                current_templates["category_from_gta"] = template_category_from_gta
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        f"UPDATE settings SET {', '.join(updates)} WHERE guild_id = %s",
-                        values,
+                        "UPDATE settings SET notification_templates = %s",
+                        (json.dumps(current_templates)),
                     )
                     await conn.commit()
                     return True
@@ -2687,11 +2634,11 @@ class Database:
     @db_retry()
     async def update_guild_rates(
         self,
-        guild_id: str,
         p0_rate: Optional[float] = None,
         p1_rate: Optional[float] = None,
         p2_rate: Optional[float] = None,
         p3_rate: Optional[float] = None,
+        probation_rate: Optional[float] = None,
     ) -> bool:
         """Обновление рейтов баллов гильдии."""
         try:
@@ -2710,16 +2657,17 @@ class Database:
             if p3_rate is not None:
                 updates.append("p3_rate = %s")
                 values.append(p3_rate)
+            if probation_rate is not None:
+                updates.append("probation_rate = %s")
+                values.append(probation_rate)
 
             if not updates:
                 return True
 
-            values.append(guild_id)
-
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        f"UPDATE settings SET {', '.join(updates)} WHERE guild_id = %s",
+                        f"UPDATE settings SET {', '.join(updates)}",
                         values,
                     )
                     await conn.commit()
@@ -2834,11 +2782,11 @@ class Database:
                     )
                     results = await cursor.fetchall()
                     for r in results:
-                         r["pr_id"] = str(r["pr_id"])
-                         if r.get("target_id"):
-                             r["target_id"] = str(r["target_id"])
-                         if r.get("streamer_id"):
-                             r["streamer_id"] = str(r["streamer_id"])
+                        r["pr_id"] = str(r["pr_id"])
+                        if r.get("target_id"):
+                            r["target_id"] = str(r["target_id"])
+                        if r.get("streamer_id"):
+                            r["streamer_id"] = str(r["streamer_id"])
                     return results
         except Exception as e:
             self.logger.error(f"Failed to get PR spec sessions: {e}", exc_info=True)
@@ -2934,7 +2882,9 @@ class Database:
                     # Assuming id is web_auth.id
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, a.role, a.nickname 
+                        SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
+                        COALESCE(a.role, 'employee') as role, 
+                        COALESCE(a.nickname, w.username) as nickname 
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         WHERE w.id = %s

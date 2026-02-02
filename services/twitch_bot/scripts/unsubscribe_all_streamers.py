@@ -3,9 +3,9 @@ Script to unsubscribe from ALL EventSub subscriptions for the application.
 """
 
 import asyncio
-import sys
-import os
 import logging
+import os
+import sys
 
 # Add parent directory to path to import config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,6 +17,7 @@ from twitchio import Client
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Unsubscriber")
 
+
 class UnsubscribeBot(Client):
     def __init__(self):
         super().__init__(
@@ -25,20 +26,21 @@ class UnsubscribeBot(Client):
         )
 
     async def event_ready(self):
-        logger.info(f"Authenticated successfully (Client).")
-        
+        logger.info("Authenticated successfully (Client).")
+
         try:
             await self.delete_all_eventsub_subscriptions()
             subs = await self.fetch_eventsub_subscriptions()
             print(subs)
-            
-            logger.info(f"Finished! Deleted all subscriptions.")
-            
+
+            logger.info("Finished! Deleted all subscriptions.")
+
         except Exception as e:
             logger.error(f"An error occurred during cleanup: {e}")
         finally:
             logger.info("Closing client...")
             await self.close()
+
 
 async def main():
     logger.info("Initializing Twitch Client...")
@@ -47,6 +49,7 @@ async def main():
         await bot.start()
     except KeyboardInterrupt:
         await bot.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

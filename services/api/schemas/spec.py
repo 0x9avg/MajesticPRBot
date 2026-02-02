@@ -4,14 +4,18 @@ Spec system schemas for API requests and responses.
 
 from datetime import datetime
 from typing import Optional
+
 from pydantic import BaseModel, Field
+
 from schemas.common import Snowflake
 
 
 class SpecClaimRequest(BaseModel):
     streamer_id: Snowflake = Field(..., description="Twitch streamer ID to claim")
     pr_id: Snowflake = Field(..., description="Discord user ID of assistant")
-    is_probation: bool = Field(default=False, description="Whether this is a probation (trainee) claim")
+    is_probation: bool = Field(
+        default=False, description="Whether this is a probation (trainee) claim"
+    )
 
 
 class SpecUnclaimRequest(BaseModel):
@@ -27,6 +31,7 @@ class SpecTransferRequest(BaseModel):
 
 class SpecSwapRequest(BaseModel):
     """Request to swap streamers between two PRs."""
+
     pr1_id: Snowflake = Field(..., description="First PR assistant ID")
     pr2_id: Snowflake = Field(..., description="Second PR assistant ID")
 
@@ -53,4 +58,3 @@ class ActiveSpecResponse(BaseModel):
 
 
 # Broker event
-

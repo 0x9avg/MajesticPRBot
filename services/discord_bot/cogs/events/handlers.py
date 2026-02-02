@@ -5,7 +5,6 @@ Handles event_join_{id} button clicks and updates event messages.
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
-
 from utils import format_spec_duration, send_pr_action_log
 
 
@@ -25,7 +24,7 @@ class EventsHandlers(commands.Cog):
 
             channel_id = event.get("channel_id")
             message_id = event.get("message_id")
-            
+
             if not channel_id or not message_id:
                 return
 
@@ -52,34 +51,32 @@ class EventsHandlers(commands.Cog):
                 if line.startswith("**Участников:**"):
                     line = f"**Участников:** {current_count}"
                 new_lines.append(line)
-            
+
             # If no participants line found, add it
-            if not any(l.startswith("**Участников:**") for l in new_lines):
+            if not any(_.startswith("**Участников:**") for _ in new_lines):
                 new_lines.append(f"**Участников:** {current_count}")
 
             embed.description = "\n".join(new_lines)
 
             # Update button style based on capacity
-            components = msg.components
             if current_count >= int(required) if str(required).isdigit() else False:
-                # Event is full - disable button
+                # Event is full - update color
                 embed.color = disnake.Color.green()
-            
+
             await msg.edit(embed=embed)
 
         except Exception as e:
             self.bot.logger.error(f"Update event message error: {e}")
 
-    async def _send_pr_action(self, guild_id: int, message: str):
+    async def _send_pr_action(self, message: str):
         """Send message to PR actions log channel."""
-
         await send_pr_action_log(self.bot, message)
 
     @commands.Cog.listener("on_button_click")
     async def on_event_button(self, interaction: MessageInteraction):
         """Handle event join/leave buttons."""
         custom_id = interaction.component.custom_id or ""
-        
+
         # 1. STRICT FILTER
         if not custom_id.startswith(("event_join_", "event_leave_")):
             return
@@ -100,10 +97,15 @@ class EventsHandlers(commands.Cog):
                 event_id = int(custom_id.replace("event_leave_", ""))
                 await self._handle_event_leave(interaction, event_id)
         except Exception as e:
-            self.bot.logger.error(f"Error handling event button {custom_id}: {e}", exc_info=True)
+            self.bot.logger.error(
+                f"Error handling event button {custom_id}: {e}", exc_info=True
+            )
             try:
-                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
-            except: pass
+                await interaction.followup.send(
+                    "❌ Произошла ошибка обработки.", ephemeral=True
+                )
+            except:
+                pass
 
     async def _handle_event_join(self, interaction: MessageInteraction, event_id: int):
         """Handle user joining an event."""
@@ -112,7 +114,7 @@ class EventsHandlers(commands.Cog):
         try:
             # Check if already joined
             result = await self.api.join_event(event_id, user_id)
-            
+
             if result.get("already_joined"):
                 # Already in event - offer to leave
                 leave_btn = disnake.ui.Button(
@@ -132,7 +134,9 @@ class EventsHandlers(commands.Cog):
                 await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
                 return
 
-            await interaction.followup.send("✅ Вы присоединились к событию!", ephemeral=True)
+            await interaction.followup.send(
+                "✅ Вы присоединились к событию!", ephemeral=True
+            )
 
             # Update event message
             await self._update_event_message(event_id)
@@ -141,10 +145,9 @@ class EventsHandlers(commands.Cog):
             event = await self.api.get_event(event_id)
             if event:
                 await self._send_pr_action(
-                    interaction.guild_id,
                     f"📥 **Присоединение к событию**\n"
                     f"📅 Событие: **{event.get('name')}**\n"
-                    f"🎯 PR: <@{user_id}>"
+                    f"🎯 PR: <@{user_id}>",
                 )
 
         except Exception as e:
@@ -157,7 +160,7 @@ class EventsHandlers(commands.Cog):
 
         try:
             result = await self.api.leave_event(event_id, user_id)
-            
+
             if result.get("error"):
                 await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
                 return
@@ -176,11 +179,10 @@ class EventsHandlers(commands.Cog):
             event = await self.api.get_event(event_id)
             if event:
                 await self._send_pr_action(
-                    interaction.guild_id,
                     f"📤 **Выход из события**\n"
                     f"📅 Событие: **{event.get('name')}**\n"
                     f"🎯 PR: <@{user_id}>\n"
-                    f"⏱️ Время: **{duration_str}**"
+                    f"⏱️ Время: **{duration_str}**",
                 )
 
         except Exception as e:

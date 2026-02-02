@@ -4,18 +4,23 @@ Claim/unclaim/transfer streamers for PR assistants.
 Refactored to use database methods.
 """
 
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, Request
+from __future__ import annotations
+from typing import TYPE_CHECKING, Annotated, List
 
-from schemas.spec import (
-    SpecClaimRequest,
-    SpecUnclaimRequest,
-    SpecTransferRequest,
-    SpecSwapRequest,
-    SpecSessionResponse,
-    ActiveSpecResponse,
-)
+if TYPE_CHECKING:
+    from database import Database
+    from services.broker import BrokerService
+
 from config import Config
+from fastapi import APIRouter, Depends, HTTPException, Request
+from schemas.spec import (
+    ActiveSpecResponse,
+    SpecClaimRequest,
+    SpecSessionResponse,
+    SpecSwapRequest,
+    SpecTransferRequest,
+    SpecUnclaimRequest,
+)
 
 router = APIRouter(prefix="/spec", tags=["Spec System"])
 
@@ -31,7 +36,7 @@ def get_broker(request: Request):
 
 
 @router.get("/active", response_model=List[ActiveSpecResponse])
-async def get_active_specs(db=Depends(get_db)):
+async def get_active_specs(db: Annotated["Database", Depends(get_db)]):
     """Get all currently active spec sessions."""
     active = await db.get_active_spec_sessions()
 
@@ -50,8 +55,8 @@ async def get_active_specs(db=Depends(get_db)):
 @router.post("/claim")
 async def claim_streamer(
     data: SpecClaimRequest,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Claim a streamer for a PR assistant (supports Probation Slot Logic)."""
     # Check if streamer exists
@@ -74,7 +79,7 @@ async def claim_streamer(
     # Check slot availability using new assignments list
     assignments = streamer.get("assignments", [])
     requested_slot = "Probation" if data.is_probation else "Main"
-    
+
     # Check if the requested slot is already taken
     for assignment in assignments:
         if assignment.get("is_probation") == data.is_probation:
@@ -109,8 +114,8 @@ async def claim_streamer(
 @router.post("/unclaim")
 async def unclaim_streamer(
     data: SpecUnclaimRequest,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Unclaim a streamer."""
     streamer = await db.get_streamer(data.streamer_id)
@@ -148,8 +153,8 @@ async def unclaim_streamer(
 @router.post("/transfer")
 async def transfer_streamer(
     data: SpecTransferRequest,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Transfer a streamer from one PR to another."""
     streamer = await db.get_streamer(data.streamer_id)
@@ -201,18 +206,18 @@ async def transfer_streamer(
 @router.post("/swap")
 async def swap_streamers(
     data: SpecSwapRequest,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Swap streamers between two PR assistants."""
     if data.pr1_id == data.pr2_id:
         raise HTTPException(status_code=400, detail="Нельзя обменяться с самим собой")
-    
+
     try:
         result = await db.swap_pr_streamers(data.pr1_id, data.pr2_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
     if broker:
         await broker.publish(
             "spec.swapped",
@@ -224,7 +229,7 @@ async def swap_streamers(
                 "pr2_new_streamer": result["pr2_new_streamer"]["streamer_name"],
             },
         )
-    
+
     return {
         "status": "swapped",
         "pr1_id": data.pr1_id,
@@ -235,14 +240,14 @@ async def swap_streamers(
 
 
 @router.get("/sessions/{pr_id}", response_model=List[SpecSessionResponse])
-async def get_pr_sessions(pr_id: int, limit: int = 50, db=Depends(get_db)):
+async def get_pr_sessions(pr_id: int, db: Annotated["Database", Depends(get_db)], limit: int = 50):
     """Get recent spec sessions for a PR assistant."""
     sessions = await db.get_pr_spec_sessions(pr_id, limit)
     return [SpecSessionResponse(**s) for s in sessions]
 
 
 @router.get("/by-pr/{pr_id}")
-async def get_current_streamer_for_pr(pr_id: int, db=Depends(get_db)):
+async def get_current_streamer_for_pr(pr_id: int, db: Annotated["Database", Depends(get_db)]):
     """Get the streamer currently assigned to a PR assistant."""
     streamer = await db.get_pr_current_streamer(pr_id)
 

@@ -13,6 +13,7 @@ import {
   BotDashboard
 } from './pages/Placeholders'
 import UserProfile from './pages/UserProfile'
+import MediaProfile from './pages/MediaProfile'
 
 function App() {
   return (
@@ -24,7 +25,9 @@ function App() {
           <Route element={<MainLayout />}>
             <Route path="/hub" element={<MainHub />} />
             <Route path="/profile" element={<UserProfile />} />
+            <Route path="/profile/:id" element={<UserProfile />} />
             <Route path="/media" element={<MediaList />} />
+            <Route path="/media/:id" element={<MediaProfile />} />
             <Route path="/pr-stats" element={<PRStats />} />
             <Route path="/logs" element={<SpectateLogs />} />
             <Route path="/events/new" element={<CreateEvent />} />

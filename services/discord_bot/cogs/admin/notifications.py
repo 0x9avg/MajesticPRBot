@@ -2,11 +2,17 @@
 Edit notification templates for stream events.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from api_client import APIClient
+    from discord_bot import DiscordBot
+
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
-
-from .core import AdminMainView, get_main_embed
 
 
 # =============================================================================
@@ -62,7 +68,7 @@ class TemplateEditModal(disnake.ui.Modal):
     def __init__(self, bot, event_type: str, current_template: str):
         self.bot = bot
         self.event_type = event_type
-        
+
         label = EVENT_TYPES.get(event_type, event_type)
         title = f"Редактировать: {label}"
         if len(title) > 45:
@@ -130,33 +136,23 @@ class TemplateSelect(disnake.ui.StringSelect):
 class NotificationsView(disnake.ui.View):
     """View for notification template management."""
 
-    def __init__(self, bot: commands.Bot):
+    bot: "DiscordBot"
+
+    def __init__(self, bot: "DiscordBot"):
         super().__init__(timeout=None)
         self.bot = bot
         self.add_item(TemplateSelect())
-        
-        # Buttons
-        self.add_item(disnake.ui.Button(
-            label="Тест 🟢",
-            custom_id="admin_notif_test_on",
-            style=disnake.ButtonStyle.secondary,
-            row=1
-        ))
-        
-        self.add_item(disnake.ui.Button(
-            label="Тест 🔴",
-            custom_id="admin_notif_test_off",
-            style=disnake.ButtonStyle.secondary,
-            row=1
-        ))
-        
-        self.add_item(disnake.ui.Button(
-            label="Назад",
-            custom_id="admin_notif_back",
-            style=disnake.ButtonStyle.secondary,
-            emoji="🔙",
-            row=2
-        ))
+
+        # Back button only
+        self.add_item(
+            disnake.ui.Button(
+                label="Назад",
+                custom_id="admin_home",
+                style=disnake.ButtonStyle.secondary,
+                emoji="🔙",
+                row=1,
+            )
+        )
 
 
 # =============================================================================
@@ -167,7 +163,10 @@ class NotificationsView(disnake.ui.View):
 class AdminNotifications(commands.Cog):
     """Notification template management."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    bot: "DiscordBot"
+    api: "APIClient"
+
+    def __init__(self, bot: "DiscordBot") -> None:
         self.bot = bot
         self.api = bot.api_client
 
@@ -175,13 +174,14 @@ class AdminNotifications(commands.Cog):
     async def on_notifications_button(self, interaction: MessageInteraction):
         """Handle admin_notifications and sub-buttons."""
         custom_id = interaction.component.custom_id or ""
-        
+
         # 1. STRICT FILTER
-        if not custom_id.startswith("admin_notifications") and not custom_id.startswith("admin_notif_"):
+        if not custom_id.startswith("admin_notifications") and not custom_id.startswith(
+            "admin_notif_"
+        ):
             return
 
         # 2. SAFE DEFER
-        # All buttons currently defer (tests, back, entry). None open modal directly (dropdown does).
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
@@ -196,69 +196,39 @@ class AdminNotifications(commands.Cog):
                     view=NotificationsView(self.bot),
                 )
 
-            elif custom_id == "admin_notif_back":
-                from .core import AdminMainView, get_main_embed
-                await interaction.edit_original_response(
-                    embed=get_main_embed(), view=AdminMainView(self.bot)
-                )
-
-            elif custom_id in ["admin_notif_test_on", "admin_notif_test_off"]:
-                # Get settings checks logic
-                settings = await self.bot.api_client.get_guild_settings()
-                channel_id = settings.get("notification_channel_id") if settings else None
-                
-                if not channel_id:
-                    await interaction.followup.send("❌ Канал уведомлений не настроен", ephemeral=True)
-                    return
-                
-                channel = self.bot.get_channel(int(channel_id))
-                if not channel:
-                    await interaction.followup.send("❌ Канал не найден", ephemeral=True)
-                    return
-
-                templates = settings.get("notification_templates", {})
-                
-                if custom_id == "admin_notif_test_on":
-                    template = templates.get("stream_online", "🟢 **{streamer_name}** начал стрим!")
-                    event_msg = "начал стрим!"
-                else:
-                    template = templates.get("stream_offline", "🔴 **{streamer_name}** закончил стрим")
-                    event_msg = "закончил стрим"
-
-                test_msg = template.format(
-                    streamer_name="TestStreamer",
-                    stream_title="Тестовый стрим",
-                    game_name="Grand Theft Auto V",
-                    streamer_link="https://twitch.tv/teststreamer",
-                )
-                
-                await channel.send(f"[ТЕСТ] {test_msg}", delete_after=30)
-                await interaction.followup.send("✅ Тестовое уведомление отправлено!", ephemeral=True)
-
         except Exception as e:
-            self.bot.logger.error(f"Error handling notification button {custom_id}: {e}", exc_info=True)
+            self.bot.logger.error(
+                f"Error handling notification button {custom_id}: {e}", exc_info=True
+            )
             try:
-                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
-            except: pass
+                await interaction.followup.send(
+                    "❌ Произошла ошибка обработки.", ephemeral=True
+                )
+            except:
+                pass
 
     @commands.Cog.listener("on_dropdown")
     async def on_notifications_dropdown(self, interaction: MessageInteraction):
         """Handle notification template select."""
         custom_id = interaction.component.custom_id or ""
-        
+
         if custom_id != "admin_notif_template_select":
             return
-            
+
         # Select opens MODAL -> NO DEFER
-        
+
         try:
             event_type = interaction.values[0]
-            
+
             # Get current template (fallback to default if empty)
             try:
                 settings = await self.bot.api_client.get_guild_settings()
-                templates = settings.get("notification_templates", {}) if settings else {}
-                current = templates.get(event_type) or DEFAULT_TEMPLATES.get(event_type, "")
+                templates = (
+                    settings.get("notification_templates", {}) if settings else {}
+                )
+                current = templates.get(event_type) or DEFAULT_TEMPLATES.get(
+                    event_type, ""
+                )
             except Exception:
                 current = DEFAULT_TEMPLATES.get(event_type, "")
 
@@ -267,12 +237,16 @@ class AdminNotifications(commands.Cog):
                 TemplateEditModal(self.bot, event_type, current)
             )
         except Exception as e:
-            self.bot.logger.error(f"Error handling notification dropdown: {e}", exc_info=True)
-            # Cannot reply if modal fail? Or try ephemeral msg
+            self.bot.logger.error(
+                f"Error handling notification dropdown: {e}", exc_info=True
+            )
             try:
                 if not interaction.response.is_done():
-                    await interaction.response.send_message("❌ Ошибка.", ephemeral=True)
-            except: pass
+                    await interaction.response.send_message(
+                        "❌ Ошибка.", ephemeral=True
+                    )
+            except:
+                pass
 
 
 def setup(bot: commands.Bot) -> None:

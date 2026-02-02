@@ -3,6 +3,7 @@ Auth schemas for API requests and responses.
 """
 
 from pydantic import BaseModel
+
 from schemas.common import Snowflake
 
 

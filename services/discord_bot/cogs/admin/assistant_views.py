@@ -3,11 +3,19 @@ Assistant Management Views for Dashboard.
 New modular system for PR assistant management.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from api_client import APIClient
+    from discord_bot import DiscordBot
+
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 import disnake
 from disnake.ext import commands
-from disnake import MessageInteraction
-from typing import Optional, Dict, List
-from datetime import datetime, timezone, timedelta
 
 
 def format_duration(seconds: int) -> str:
@@ -27,7 +35,10 @@ def format_points(points: float) -> str:
 class AssistantManagementView(disnake.ui.View):
     """Main entry point for assistant management."""
 
-    def __init__(self, bot: commands.Bot):
+    bot: "DiscordBot"
+    api: "APIClient"
+
+    def __init__(self, bot: "DiscordBot"):
         super().__init__(timeout=None)
         self.bot = bot
         self.api = bot.api_client
@@ -42,7 +53,7 @@ class AssistantManagementView(disnake.ui.View):
         # User Select
         self.add_item(
             disnake.ui.UserSelect(
-                custom_id="assistant_select_user",
+                custom_id="assistant_user_select",
                 placeholder="🔍 Выберите ассистента",
                 min_values=1,
                 max_values=1,
@@ -192,6 +203,7 @@ class AssistantOverviewView(disnake.ui.View):
                     + day.get("p1_seconds", 0)
                     + day.get("p2_seconds", 0)
                     + day.get("p3_seconds", 0)
+                    + day.get("probation_seconds", 0)
                 )
                 day_points = day.get("total_points", 0)
 
@@ -309,7 +321,7 @@ class AssistantStatsView(disnake.ui.View):
         self.add_item(
             disnake.ui.Button(
                 label="🔄 Обновить",
-                custom_id="assistant_stats_refresh",
+                custom_id=f"assistant_stats_refresh_{self.user_id}",
                 style=disnake.ButtonStyle.secondary,
                 row=1,
             )
@@ -365,7 +377,7 @@ class AssistantStatsView(disnake.ui.View):
                 period_name = "За месяц"
 
             # Aggregate data
-            p0_total = p1_total = p2_total = p3_total = 0
+            p0_total = p1_total = p2_total = p3_total = probation_total = 0
             points_total = 0.0
             days_count = 0
 
@@ -389,10 +401,11 @@ class AssistantStatsView(disnake.ui.View):
                     p1_total += day.get("p1_seconds", 0)
                     p2_total += day.get("p2_seconds", 0)
                     p3_total += day.get("p3_seconds", 0)
+                    probation_total += day.get("probation_seconds", 0)
                     points_total += day.get("total_points", 0)
                     days_count += 1
 
-            grand_total = p0_total + p1_total + p2_total + p3_total
+            grand_total = p0_total + p1_total + p2_total + p3_total + probation_total
 
             embed = disnake.Embed(
                 title=f"📊 Статистика: {self.user_name}",
@@ -406,6 +419,10 @@ class AssistantStatsView(disnake.ui.View):
                 f"**P1:** {format_duration(p1_total)}\n"
                 f"**P2:** {format_duration(p2_total)}\n"
                 f"**P3:** {format_duration(p3_total)}\n"
+            )
+            if probation_total > 0:
+                time_text += f"**Испытательный:** {format_duration(probation_total)}\n"
+            time_text += (
                 f"───────────\n"
                 f"**Итого:** {format_duration(grand_total)}"
             )
@@ -492,11 +509,20 @@ class AssistantEditModal(disnake.ui.Modal):
                 )
                 return
 
-            # API call
-            if action == "add":
-                await self.api.add_assistant_time(self.user_id, seconds)
-            else:
-                await self.api.subtract_assistant_time(self.user_id, seconds)
+            # API call - create manual session
+            from datetime import datetime
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            
+            await self.api.create_manual_session(
+                pr_id=self.user_id,
+                duration_seconds=seconds,
+                date=today,
+                priority=priority,
+                admin_id=interaction.user.id,
+                target_type="manual",
+                target_id=0,
+                target_name=reason or "Ручная корректировка",
+            )
 
             minutes = seconds // 60
             sign = "+" if action == "add" else "-"

@@ -3,10 +3,17 @@ RabbitMQ Broker Consumer for Twitch Bot.
 Listens for events like streamer.added to update subscriptions dynamically.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .twitch_bot import TwitchBot
+
 import asyncio
 import json
 import logging
-from typing import Optional, Callable, Dict, Any
+from typing import Any, Dict, Optional
 
 import aio_pika
 from aio_pika import ExchangeType
@@ -16,9 +23,11 @@ from config import Config
 class BrokerConsumer:
     """RabbitMQ message consumer for Twitch bot."""
 
+    bot: "TwitchBot | None"
+
     def __init__(
         self,
-        bot=None,
+        bot: "TwitchBot | None" = None,
         host: str = Config.rabbitmq_host,
         port: int = Config.rabbitmq_port,
         user: str = Config.rabbitmq_user,
@@ -108,8 +117,6 @@ class BrokerConsumer:
         if not self.bot:
             self.logger.warning("Bot instance not set for consumer")
             return
-
-        event_type = data.get("event")
 
         if key == "streamer.verify":
             username = data.get("username")

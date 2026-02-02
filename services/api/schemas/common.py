@@ -1,5 +1,7 @@
 from typing import Annotated, Union
+
 from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
+
 
 def validate_snowflake(v: Union[str, int]) -> int:
     """
@@ -14,11 +16,13 @@ def validate_snowflake(v: Union[str, int]) -> int:
     except (ValueError, TypeError):
         raise ValueError(f"Invalid snowflake format: {v}")
 
+
 def serialize_snowflake(v: int) -> str:
     """
     Serializes integer snowflake to string for JSON output.
     """
     return str(v)
+
 
 # Custom Snowflake type
 # - Validates int/str -> int

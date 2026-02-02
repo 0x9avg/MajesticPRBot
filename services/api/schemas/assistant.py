@@ -4,7 +4,9 @@ Assistant schemas for API requests and responses.
 
 from datetime import datetime
 from typing import List, Optional
+
 from pydantic import BaseModel, Field
+
 from schemas.common import Snowflake
 
 
@@ -17,7 +19,9 @@ class AssistantCreate(BaseModel):
 
     pr_id: int
     nickname: str
-    role: str  # 'junior_employee', 'employee', 'senior_employee', 'manager', 'developer'
+    role: (
+        str  # 'junior_employee', 'employee', 'senior_employee', 'manager', 'developer'
+    )
     experience_days: int = 0
 
 
@@ -45,3 +49,26 @@ class AssistantStatsResponse(BaseModel):
     total_spec_formatted: str
     session_count: int
     daily_stats: List[dict] = []
+
+
+class DailyStatsUpdate(BaseModel):
+    """Schema for manual daily stats update by admin."""
+    date: str  # YYYY-MM-DD
+    p0_seconds: Optional[int] = None
+    p1_seconds: Optional[int] = None
+    p2_seconds: Optional[int] = None
+    p3_seconds: Optional[int] = None
+    probation_seconds: Optional[int] = None
+    total_points: Optional[float] = None
+
+
+class ManualSpecSession(BaseModel):
+    """Schema for creating a manual spec session (admin feature)."""
+    target_id: Optional[int] = None  # Streamer ID (optional)
+    target_name: Optional[str] = None  # For display purposes
+    target_type: str = "streamer"  # 'streamer' or 'event'
+    duration_seconds: int
+    date: str  # YYYY-MM-DD
+    is_probation: bool = False
+    priority: int = 0  # For points calculation
+    admin_id: int  # Who created this session (for audit log)

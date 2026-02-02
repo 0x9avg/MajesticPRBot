@@ -3,7 +3,9 @@ Guild schemas for API requests and responses.
 """
 
 from typing import Optional
+
 from pydantic import BaseModel
+
 from schemas.common import Snowflake
 
 
@@ -29,10 +31,10 @@ class GuildRatesUpdate(BaseModel):
     p1_rate: Optional[float] = None
     p2_rate: Optional[float] = None
     p3_rate: Optional[float] = None
+    probation_rate: Optional[float] = None
 
 
 class GuildSettingsResponse(BaseModel):
-    guild_id: Snowflake
     notification_channel_id: Optional[Snowflake] = None
     monitoring_channel_id: Optional[Snowflake] = None
     monitoring_message_id: Optional[Snowflake] = None
@@ -40,14 +42,12 @@ class GuildSettingsResponse(BaseModel):
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
     assistant_role_id: Optional[Snowflake] = None
-    template_stream_online: Optional[str] = None
-    template_stream_offline: Optional[str] = None
-    template_category_to_gta: Optional[str] = None
-    template_category_from_gta: Optional[str] = None
+    notification_templates: Optional[str] = None
     p0_rate: Optional[float] = None
     p1_rate: Optional[float] = None
     p2_rate: Optional[float] = None
     p3_rate: Optional[float] = None
+    probation_rate: Optional[float] = None
 
     class Config:
         from_attributes = True

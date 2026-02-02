@@ -3,9 +3,10 @@ API Client for Twitch Bot.
 HTTP client for communicating with the central API service.
 """
 
-import aiohttp
-from typing import Optional, List, Dict, Any
 import logging
+from typing import Dict, List, Optional
+
+import aiohttp
 
 
 class APIClient:
@@ -89,7 +90,7 @@ class APIClient:
         stream_thumbnail_url: str = None,
     ) -> Optional[Dict]:
         """Create streamer with full data (for Twitch bot use).
-        
+
         Uses unified POST /streamers endpoint with full data mode.
         """
         data = {
@@ -178,16 +179,16 @@ class APIClient:
     async def sync_streamers_status_bulk(self, updates: List[Dict]) -> int:
         """
         Bulk update streamer statuses.
-        
+
         Args:
             updates: List of dicts with streamer status info
-            
+
         Returns:
             Number of streamers updated
         """
         if not updates:
             return 0
-            
+
         result = await self._request("POST", "/streamers/sync_status", data=updates)
         if result:
             return result.get("updated_count", 0)

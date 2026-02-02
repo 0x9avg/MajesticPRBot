@@ -2,9 +2,8 @@
 Handles all broker events (stream state, spec, monitoring).
 """
 
-from disnake.ext import commands
-
 from config import Config
+from disnake.ext import commands
 from utils import format_spec_duration, send_pr_action_log
 
 
@@ -21,7 +20,7 @@ class BrokerHandlers(commands.Cog):
         """Register handlers when bot is ready and broker is connected."""
         if self._handlers_registered or not self.bot.broker:
             return
-        
+
         self._register_handlers()
         self._handlers_registered = True
 
@@ -55,17 +54,23 @@ class BrokerHandlers(commands.Cog):
         async def on_category_change(data):
             old_id = data.get("old_game_id")
             new_id = data.get("new_game_id")
-            
+
             self.logger.info(
                 f"DEBUG Handler: {data.get('streamer_name')} | Old: {old_id} | New: {new_id} | GTA: {Config.gta5_game_id} | NewName: {data.get('new_game_name')}"
             )
-            
+
             await self._refresh_monitoring()
 
-            if str(new_id) == Config.gta5_game_id and str(old_id) != Config.gta5_game_id:
+            if (
+                str(new_id) == Config.gta5_game_id
+                and str(old_id) != Config.gta5_game_id
+            ):
                 self.logger.info("-> Sending category_to_gta")
                 await self._handle_notification("category_to_gta", data)
-            elif str(old_id) == Config.gta5_game_id and str(new_id) != Config.gta5_game_id:
+            elif (
+                str(old_id) == Config.gta5_game_id
+                and str(new_id) != Config.gta5_game_id
+            ):
                 self.logger.info("-> Sending category_from_gta")
                 await self._handle_notification("category_from_gta", data)
 
@@ -111,16 +116,16 @@ class BrokerHandlers(commands.Cog):
         try:
             streamer_name = data.get("streamer_name", "Unknown")
             pr_id = data.get("pr_id")
-            
+
             message = (
                 f"📥 **Закрепление**\n"
                 f"👤 Стример: **{streamer_name}**\n"
                 f"🎯 PR: <@{pr_id}>"
             )
-            
+
             await send_pr_action_log(self.bot, message)
             self.logger.debug(f"PR claim logged: {streamer_name} -> {pr_id}")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to log PR claim: {e}")
 
@@ -131,9 +136,9 @@ class BrokerHandlers(commands.Cog):
             pr_id = data.get("pr_id")
             duration_seconds = data.get("duration_seconds", 0)
             reason = data.get("reason", "unknown")
-            
+
             duration_str = format_spec_duration(duration_seconds)
-            
+
             if reason == "stream_end":
                 emoji = "⚫"
                 title = "Стрим завершен"
@@ -143,17 +148,17 @@ class BrokerHandlers(commands.Cog):
             else:
                 emoji = "📤"
                 title = "Откреплен"
-            
+
             message = (
                 f"{emoji} **{title}**\n"
                 f"👤 Стример: **{streamer_name}**\n"
                 f"🎯 PR: <@{pr_id}>\n"
                 f"⏱️ Спек: **{duration_str}**"
             )
-            
+
             await send_pr_action_log(self.bot, message)
             self.logger.debug(f"PR unclaim logged: {title} - {streamer_name}")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to log PR unclaim: {e}")
 
@@ -164,28 +169,30 @@ class BrokerHandlers(commands.Cog):
             from_pr_id = data.get("from_pr_id")
             to_pr_id = data.get("to_pr_id")
             duration_seconds = data.get("duration_seconds", 0)
-            
+
             duration_str = format_spec_duration(duration_seconds)
-            
+
             # Unclaim message
             await send_pr_action_log(
                 self.bot,
                 f"📤 **Открепление (передача)**\n"
                 f"👤 Стример: **{streamer_name}**\n"
                 f"🎯 PR: <@{from_pr_id}>\n"
-                f"⏱️ Спек: **{duration_str}**"
+                f"⏱️ Спек: **{duration_str}**",
             )
-            
+
             # Claim message
             await send_pr_action_log(
                 self.bot,
                 f"📥 **Закрепление (передача)**\n"
                 f"👤 Стример: **{streamer_name}**\n"
-                f"🎯 PR: <@{to_pr_id}>"
+                f"🎯 PR: <@{to_pr_id}>",
             )
-            
-            self.logger.debug(f"PR transfer logged: {streamer_name} {from_pr_id} -> {to_pr_id}")
-            
+
+            self.logger.debug(
+                f"PR transfer logged: {streamer_name} {from_pr_id} -> {to_pr_id}"
+            )
+
         except Exception as e:
             self.logger.error(f"Failed to log PR transfer: {e}")
 

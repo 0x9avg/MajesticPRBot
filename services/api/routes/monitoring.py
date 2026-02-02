@@ -2,10 +2,16 @@
 Monitoring and Dashboard routes for API.
 """
 
-from fastapi import APIRouter, Depends, Request
+from __future__ import annotations
+from typing import TYPE_CHECKING, Annotated
 
-from schemas.monitoring import MonitoringRefreshResponse
+if TYPE_CHECKING:
+    from database import Database
+    from services.broker import BrokerService
+
 from config import Config
+from fastapi import APIRouter, Depends, Request
+from schemas.monitoring import MonitoringRefreshResponse
 
 router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
 
@@ -23,19 +29,21 @@ def get_broker(request: Request):
 @router.post("/refresh", response_model=MonitoringRefreshResponse)
 async def refresh_monitoring(
     data: MonitoringRefreshResponse,
-    db=Depends(get_db),
-    broker=Depends(get_broker),
+    db: Annotated["Database", Depends(get_db)],
+    broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """
     Trigger monitoring message refresh.
     Sends event to Discord bot to update monitoring embeds.
     """
     if broker:
-        await broker.publish("monitoring.refresh", {
-            "event": "monitoring.refresh",
-            "guild_id": Config.guild_id,
-            "force": data.force,
-        })
+        await broker.publish(
+            "monitoring.refresh",
+            {
+                "event": "monitoring.refresh",
+                "force": data.force,
+            },
+        )
         return {"status": "refresh_requested", "force": data.force}
-    
+
     return {"status": "broker_unavailable"}

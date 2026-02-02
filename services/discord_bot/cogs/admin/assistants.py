@@ -2,57 +2,76 @@
 Integrates assistant_views.py with the new admin navigation system.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from api_client import APIClient
+    from discord_bot import DiscordBot
+
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
 
 from .assistant_views import (
+    AssistantActionsView,
+    AssistantEditModal,
     AssistantManagementView,
     AssistantOverviewView,
     AssistantStatsView,
-    AssistantEditModal,
-    AssistantActionsView,
     TopAssistantsView,
 )
 from .core import AdminMainView, get_main_embed
 
 
 # =============================================================================
-# EditDailyStatsModal (from old_bot)
+# EditDailyStatsModal
 # =============================================================================
 
 
 class EditDailyStatsModal(disnake.ui.Modal):
-    """Modal for editing daily stats (P0-P3 points) for a specific date."""
+    """Modal for editing daily stats (P0-P3 + probation points) for a specific date."""
 
-    def __init__(self, bot, pr_id: int, date_str: str, current_stats: dict):
+    bot: "DiscordBot"
+    api: "APIClient"
+
+    def __init__(
+        self, bot: "DiscordBot", pr_id: int, date_str: str, current_stats: dict
+    ):
         self.bot = bot
         self.pr_id = pr_id
         self.date_str = date_str
 
         components = [
             disnake.ui.TextInput(
-                label=f"P0 баллы ({date_str})",
-                value=str(current_stats.get("p0", 0)),
+                label=f"P0 секунды ({date_str})",
+                value=str(current_stats.get("p0_seconds", 0)),
                 custom_id="p0",
                 style=disnake.TextInputStyle.short,
             ),
             disnake.ui.TextInput(
-                label=f"P1 баллы ({date_str})",
-                value=str(current_stats.get("p1", 0)),
+                label=f"P1 секунды ({date_str})",
+                value=str(current_stats.get("p1_seconds", 0)),
                 custom_id="p1",
                 style=disnake.TextInputStyle.short,
             ),
             disnake.ui.TextInput(
-                label=f"P2 баллы ({date_str})",
-                value=str(current_stats.get("p2", 0)),
+                label=f"P2 секунды ({date_str})",
+                value=str(current_stats.get("p2_seconds", 0)),
                 custom_id="p2",
                 style=disnake.TextInputStyle.short,
             ),
             disnake.ui.TextInput(
-                label=f"P3 баллы ({date_str})",
-                value=str(current_stats.get("p3", 0)),
+                label=f"P3 секунды ({date_str})",
+                value=str(current_stats.get("p3_seconds", 0)),
                 custom_id="p3",
+                style=disnake.TextInputStyle.short,
+            ),
+            disnake.ui.TextInput(
+                label=f"Испытательный секунды ({date_str})",
+                value=str(current_stats.get("probation_seconds", 0)),
+                custom_id="probation",
                 style=disnake.TextInputStyle.short,
             ),
         ]
@@ -61,18 +80,20 @@ class EditDailyStatsModal(disnake.ui.Modal):
     async def callback(self, interaction: disnake.ModalInteraction):
         await interaction.response.defer(ephemeral=True)
         try:
-            stats = {}
-            for i in range(4):
-                val = interaction.text_values.get(f"p{i}", "0")
-                stats[f"p{i}"] = float(val.replace(",", "."))
+            p0 = int(interaction.text_values.get("p0", "0"))
+            p1 = int(interaction.text_values.get("p1", "0"))
+            p2 = int(interaction.text_values.get("p2", "0"))
+            p3 = int(interaction.text_values.get("p3", "0"))
+            probation = int(interaction.text_values.get("probation", "0"))
 
             await self.bot.api_client.update_daily_stats(
                 pr_id=self.pr_id,
-                date_str=self.date_str,
-                p0=stats["p0"],
-                p1=stats["p1"],
-                p2=stats["p2"],
-                p3=stats["p3"],
+                date=self.date_str,
+                p0_seconds=p0,
+                p1_seconds=p1,
+                p2_seconds=p2,
+                p3_seconds=p3,
+                probation_seconds=probation,
             )
             await interaction.edit_original_message(
                 content=f"✅ Статистика за {self.date_str} обновлена!"
@@ -90,7 +111,10 @@ class EditDailyStatsModal(disnake.ui.Modal):
 class AdminAssistants(commands.Cog):
     """Assistant management integration with admin dashboard."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    bot: "DiscordBot"
+    api: "APIClient"
+
+    def __init__(self, bot: "DiscordBot") -> None:
         self.bot = bot
         self.api = bot.api_client
 
@@ -98,17 +122,22 @@ class AdminAssistants(commands.Cog):
     async def on_assistants_button(self, interaction: MessageInteraction):
         """Handle admin_assistants and all sub-interactions."""
         custom_id = interaction.component.custom_id or ""
-        
+
         # 1. STRICT FILTER
-        if not custom_id.startswith("admin_assistants") and not custom_id.startswith("assistant_") and custom_id != "btn_back_to_menu":
+        if (
+            not custom_id.startswith("admin_assistants")
+            and not custom_id.startswith("assistant_")
+            and custom_id != "btn_back_to_menu"
+        ):
             return
 
         # 2. SAFE DEFER (Exception for Modals)
-        # assistant_edit_{id} and assistant_edit_stats_{id} open Modals -> NO DEFER
         should_defer = True
-        if custom_id.startswith("assistant_edit_stats_") or custom_id.startswith("assistant_edit_"):
+        if custom_id.startswith("assistant_edit_stats_") or custom_id.startswith(
+            "assistant_edit_"
+        ):
             should_defer = False
-        
+
         if should_defer:
             try:
                 if not interaction.response.is_done():
@@ -118,110 +147,162 @@ class AdminAssistants(commands.Cog):
 
         # 3. EXECUTE
         try:
-            if custom_id == "admin_assistants" or custom_id == "assistant_back_to_select" or custom_id == "btn_back_to_menu":
+            if (
+                custom_id == "admin_assistants"
+                or custom_id == "assistant_back_to_select"
+                or custom_id == "btn_back_to_menu"
+            ):
                 view = AssistantManagementView(self.bot)
                 embed = view.get_main_embed()
                 if interaction.response.is_done():
                     await interaction.edit_original_response(embed=embed, view=view)
                 else:
-                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-            
+                    await interaction.response.send_message(
+                        embed=embed, view=view, ephemeral=True
+                    )
+
             elif custom_id == "assistant_top":
                 view = TopAssistantsView(self.bot)
                 embed = await view.get_top_embed()
                 await interaction.edit_original_response(embed=embed, view=view)
 
             elif custom_id == "assistant_top_refresh":
-                 view = TopAssistantsView(self.bot)
-                 embed = await view.get_top_embed()
-                 await interaction.edit_original_response(embed=embed, view=view)
+                view = TopAssistantsView(self.bot)
+                embed = await view.get_top_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
 
             elif custom_id.startswith("assistant_overview_"):
                 user_id = int(custom_id.replace("assistant_overview_", ""))
-                user = await self.bot.fetch_user(user_id) # Might fail if not cached
-                name = user.display_name if user else "Unknown"
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    name = user.display_name
+                except:
+                    name = "Unknown"
                 view = AssistantOverviewView(self.bot, user_id, name)
                 embed = await view.get_overview_embed()
                 await interaction.edit_original_response(embed=embed, view=view)
 
-            elif custom_id.startswith("assistant_stats_") and not custom_id.startswith("assistant_stats_refresh"):
-                # assistant_stats_{id}
+            elif custom_id.startswith("assistant_stats_") and not custom_id.startswith(
+                "assistant_stats_refresh"
+            ):
                 user_id = int(custom_id.replace("assistant_stats_", ""))
-                user = await self.bot.fetch_user(user_id)
-                name = user.display_name if user else "Unknown"
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    name = user.display_name
+                except:
+                    name = "Unknown"
                 view = AssistantStatsView(self.bot, user_id, name)
                 embed = await view.get_stats_embed()
                 await interaction.edit_original_response(embed=embed, view=view)
-            
-            elif custom_id == "assistant_stats_refresh":
-                # This one is tricky because we need the user_id from context.
-                # Usually views store state, but we are recreating. 
-                # If we don't have user_id in ID, we can't easily refresh specific stats.
-                # However, AssistantStatsView has "assistant_stats_refresh" button.
-                # If we use a stateless listener, we need the ID in the custom_id.
-                # The current View definition uses static "assistant_stats_refresh".
-                # This is a design flaw in the View if processed globally.
-                # For now, let's try to extract from message embed footer? Or fail gracefully.
-                # Or simplistic approach: just say "Re-open stats".
-                await interaction.followup.send("🔄 Пожалуйста, откройте статистику заново через меню.", ephemeral=True)
+
+            elif custom_id.startswith("assistant_stats_refresh_"):
+                user_id = int(custom_id.replace("assistant_stats_refresh_", ""))
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    name = user.display_name
+                except:
+                    name = "Unknown"
+                view = AssistantStatsView(self.bot, user_id, name)
+                embed = await view.get_stats_embed()
+                await interaction.edit_original_response(embed=embed, view=view)
 
             elif custom_id.startswith("assistant_actions_"):
                 user_id = int(custom_id.replace("assistant_actions_", ""))
-                user = await self.bot.fetch_user(user_id)
-                name = user.display_name if user else "Unknown"
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    name = user.display_name
+                except:
+                    name = "Unknown"
                 view = AssistantActionsView(self.bot, user_id, name)
                 embed = await view.get_actions_embed()
                 await interaction.edit_original_response(embed=embed, view=view)
 
-
             elif custom_id.startswith("assistant_edit_stats_"):
                 # OPEN EDIT DAILY STATS MODAL
                 user_id = int(custom_id.replace("assistant_edit_stats_", ""))
-                user = await self.bot.fetch_user(user_id)
-                name = user.display_name if user else "Unknown"
-                # For now, open with today's date and default stats
                 from datetime import datetime, timezone
+
                 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                current_stats = {"p0": 0, "p1": 0, "p2": 0, "p3": 0}  # API could fetch current
-                await interaction.response.send_modal(EditDailyStatsModal(self.bot, user_id, today, current_stats))
+                current_stats = {
+                    "p0_seconds": 0,
+                    "p1_seconds": 0,
+                    "p2_seconds": 0,
+                    "p3_seconds": 0,
+                    "probation_seconds": 0,
+                }
+                await interaction.response.send_modal(
+                    EditDailyStatsModal(self.bot, user_id, today, current_stats)
+                )
 
             elif custom_id.startswith("assistant_edit_"):
-                # OPEN TIME EDIT MODAL (general edit)
+                # OPEN TIME EDIT MODAL
                 user_id = int(custom_id.replace("assistant_edit_", ""))
-                user = await self.bot.fetch_user(user_id)
-                name = user.display_name if user else "Unknown"
-                await interaction.response.send_modal(AssistantEditModal(self.bot, user_id, name))
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                    name = user.display_name
+                except:
+                    name = "Unknown"
+                await interaction.response.send_modal(
+                    AssistantEditModal(self.bot, user_id, name)
+                )
 
             elif custom_id.startswith("assistant_history_"):
-                # Not implemented in views yet?
-                await interaction.followup.send("📝 История пока недоступна.", ephemeral=True)
+                await interaction.followup.send(
+                    "📝 История пока недоступна.", ephemeral=True
+                )
 
             elif custom_id == "assistant_bulk_ops":
-                await interaction.followup.send("📦 Массовые операции в разработке.", ephemeral=True)
+                await interaction.followup.send(
+                    "📦 Массовые операции в разработке.", ephemeral=True
+                )
 
             elif custom_id.startswith("assistant_reset_full_"):
                 user_id = int(custom_id.replace("assistant_reset_full_", ""))
-                await self.api.reset_assistant_stats(user_id) # Hypothetical API method?
-                # Actually api might not have this yet. 
-                await interaction.followup.send(f"✅ Статистика сброшена (API call simulated).", ephemeral=True)
+                await self.api.reset_assistant_stats(user_id)
+                await interaction.followup.send(
+                    f"✅ Статистика сброшена.", ephemeral=True
+                )
 
         except Exception as e:
-            self.bot.logger.error(f"Error handling assistant button {custom_id}: {e}", exc_info=True)
+            self.bot.logger.error(
+                f"Error handling assistant button {custom_id}: {e}", exc_info=True
+            )
             try:
-                await interaction.followup.send("❌ Произошла ошибка обработки.", ephemeral=True)
-            except: pass
+                await interaction.followup.send(
+                    "❌ Произошла ошибка обработки.", ephemeral=True
+                )
+            except:
+                pass
 
     @commands.Cog.listener("on_dropdown")
     async def on_assistant_select(self, interaction: MessageInteraction):
         """Handle assistant user select."""
         custom_id = interaction.component.custom_id
-        
+
         if custom_id == "assistant_user_select":
             if not interaction.response.is_done():
                 await interaction.response.defer()
-            user = interaction.values[0]  # User object from UserSelect
-            user_id = user.id
-            user_name = user.display_name
+            
+            # Handle both UserSelect (returns User) and StringSelect (returns str)
+            selected = interaction.values[0]
+            if hasattr(selected, 'id'):
+                # UserSelect returns User object
+                user_id = selected.id
+                user_name = selected.display_name
+            else:
+                # StringSelect returns string ID
+                user_id = int(selected)
+                member = interaction.guild.get_member(user_id)
+                user_name = member.display_name if member else f"User {user_id}"
+
+            # Check if user is registered as assistant in DB
+            assistant = await self.api.get_assistant(user_id)
+            if not assistant:
+                await interaction.followup.send(
+                    f"❌ **{user_name}** не зарегистрирован как ассистент в базе данных.",
+                    ephemeral=True,
+                )
+                return
 
             view = AssistantOverviewView(self.bot, user_id, user_name)
             embed = await view.get_overview_embed()

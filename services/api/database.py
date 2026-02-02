@@ -133,7 +133,7 @@ class Database:
             self.logger.info("Initializing database schema...")
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SET note_verbosity = 0")
+                    await cursor.execute("SET sql_notes = 0")
 
                     # =========================================================
                     # 1. Streamers Table
@@ -357,7 +357,7 @@ class Database:
                         """
                     )
 
-                    await cursor.execute("SET note_verbosity = 0")
+                    await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
 
                     # Initialize default permissions

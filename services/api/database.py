@@ -102,6 +102,7 @@ class Database:
                 minsize=1,
                 maxsize=10,
                 pool_recycle=3600,  # Recreate connections every hour to prevent stale connections
+                autocommit=True,  # Ensure commits are immediately visible
             )
 
             elapsed = time.time() - start_time
@@ -146,6 +147,7 @@ class Database:
                             is_online BOOLEAN DEFAULT FALSE,
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
+                            profile_image_url VARCHAR(512),
                             stream_game_id BIGINT UNSIGNED,
                             stream_game_name VARCHAR(255),
                             stream_started_at TIMESTAMP NULL,
@@ -519,6 +521,7 @@ class Database:
         game_name: Optional[str] = None,
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
+        profile_image_url: Optional[str] = None,
     ) -> None:
         """
         Создание или обновление стримера в базе данных.
@@ -534,11 +537,12 @@ class Database:
             game_name: Название игры
             stream_title: Название стрима
             stream_thumbnail_url: URL превью стрима
+            profile_image_url: URL аватара стримера
         """
 
         try:
             self.logger.debug(
-                f"Creating/updating streamer: {streamer_name} (ID: {streamer_id})"
+                f"Creating/updating streamer: {streamer_name} (ID: {streamer_id}, profile_image: {profile_image_url[:50] if profile_image_url else 'None'}...)"
             )
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -568,9 +572,10 @@ class Database:
                         """
                         INSERT INTO streamers (
                             streamer_id, streamer_name, is_online, stream_started_at, priority, 
-                            added_at, added_by_id, stream_game_id, stream_game_name, stream_title, stream_thumbnail_url
+                            added_at, added_by_id, stream_game_id, stream_game_name, stream_title, 
+                            stream_thumbnail_url, profile_image_url
                         )
-                        VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s) AS new_data
+                        VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
                         ON DUPLICATE KEY UPDATE 
                             streamer_name = new_data.streamer_name,
                             is_online = new_data.is_online,
@@ -580,7 +585,8 @@ class Database:
                             stream_game_id = new_data.stream_game_id,
                             stream_game_name = new_data.stream_game_name,
                             stream_title = new_data.stream_title,
-                            stream_thumbnail_url = new_data.stream_thumbnail_url
+                            stream_thumbnail_url = new_data.stream_thumbnail_url,
+                            profile_image_url = new_data.profile_image_url
                         """,
                         (
                             streamer_id,
@@ -593,6 +599,7 @@ class Database:
                             game_name,
                             stream_title,
                             stream_thumbnail_url,
+                            profile_image_url,
                         ),
                     )
                     await conn.commit()
@@ -618,6 +625,7 @@ class Database:
                         """
                         SELECT 
                             streamer_id, streamer_name, is_online, stream_title, stream_thumbnail_url,
+                            profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
                             priority, added_at, added_by_id, updated_at
                         FROM streamers
@@ -626,6 +634,9 @@ class Database:
                         (streamer_id,),
                     )
                     streamer = await cursor.fetchone()
+                    self.logger.debug(
+                        f"get_streamer({streamer_id}) raw result: {streamer is not None}"
+                    )
                     if not streamer:
                         return None
 
@@ -692,34 +703,45 @@ class Database:
         game_name: Optional[str] = None,
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
+        profile_image_url: Optional[str] = None,
     ) -> None:
         """
-        Обновление статуса стримера.
+        Обновление статуса стримера. Обновляет только переданные поля.
         """
 
         try:
             self.logger.debug(
                 f"Updating streamer {streamer_id} status: online={is_online} game: {game_name} stream: {stream_title}"
             )
+            
+            # Build dynamic SET clause - only update provided fields
+            set_parts = ["is_online = %s"]
+            params = [is_online]
+            
+            # These fields are always updated when online state changes
+            set_parts.append("stream_started_at = %s")
+            params.append(started_at)
+            set_parts.append("stream_game_id = %s")
+            params.append(game_id)
+            set_parts.append("stream_game_name = %s")
+            params.append(game_name)
+            set_parts.append("stream_title = %s")
+            params.append(stream_title)
+            set_parts.append("stream_thumbnail_url = %s")
+            params.append(stream_thumbnail_url)
+            
+            # Only update profile_image_url if explicitly provided
+            if profile_image_url is not None:
+                set_parts.append("profile_image_url = %s")
+                params.append(profile_image_url)
+            
+            params.append(streamer_id)
+            
+            query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
+            
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        UPDATE streamers 
-                        SET is_online = %s, stream_started_at = %s, stream_game_id = %s, 
-                            stream_game_name = %s, stream_title = %s, stream_thumbnail_url = %s
-                        WHERE streamer_id = %s
-                        """,
-                        (
-                            is_online,
-                            started_at,
-                            game_id,
-                            game_name,
-                            stream_title,
-                            stream_thumbnail_url,
-                            streamer_id,
-                        ),
-                    )
+                    await cursor.execute(query, tuple(params))
                     await conn.commit()
         except Exception as e:
             self.logger.error(
@@ -734,6 +756,7 @@ class Database:
     ) -> int:
         """
         Bulk update streamer statuses (max 100 per call).
+        Only updates fields that are explicitly provided in each update dict.
 
         Args:
             updates: List of dicts with keys:
@@ -744,6 +767,7 @@ class Database:
                 - game_name (optional)
                 - stream_title (optional)
                 - stream_thumbnail_url (optional)
+                - profile_image_url (optional) - only updated if provided
 
         Returns:
             Number of streamers updated
@@ -764,23 +788,31 @@ class Database:
                         if not streamer_id:
                             continue
 
-                        await cursor.execute(
-                            """
-                            UPDATE streamers 
-                            SET is_online = %s, stream_started_at = %s, stream_game_id = %s, 
-                                stream_game_name = %s, stream_title = %s, stream_thumbnail_url = %s
-                            WHERE streamer_id = %s
-                            """,
-                            (
-                                update.get("is_online", False),
-                                update.get("started_at"),
-                                update.get("game_id"),
-                                update.get("game_name"),
-                                update.get("stream_title"),
-                                update.get("stream_thumbnail_url"),
-                                streamer_id,
-                            ),
-                        )
+                        # Build dynamic SET clause
+                        set_parts = ["is_online = %s"]
+                        params = [update.get("is_online", False)]
+                        
+                        set_parts.append("stream_started_at = %s")
+                        params.append(update.get("started_at"))
+                        set_parts.append("stream_game_id = %s")
+                        params.append(update.get("game_id"))
+                        set_parts.append("stream_game_name = %s")
+                        params.append(update.get("game_name"))
+                        set_parts.append("stream_title = %s")
+                        params.append(update.get("stream_title"))
+                        set_parts.append("stream_thumbnail_url = %s")
+                        params.append(update.get("stream_thumbnail_url"))
+                        
+                        # Only update profile_image_url if provided
+                        if "profile_image_url" in update and update["profile_image_url"] is not None:
+                            set_parts.append("profile_image_url = %s")
+                            params.append(update["profile_image_url"])
+                        
+                        params.append(streamer_id)
+                        
+                        query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
+                        await cursor.execute(query, tuple(params))
+                        
                         if cursor.rowcount > 0:
                             updated_count += 1
 

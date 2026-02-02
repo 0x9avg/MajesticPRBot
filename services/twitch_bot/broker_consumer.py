@@ -149,8 +149,14 @@ class BrokerConsumer:
                     stream_info = await self.bot.get_stream_info(twitch_id)
                     is_online = stream_info.get("is_online", False)
 
+                    # 2.5 Get user info for profile image
+                    users = await self.bot.fetch_users(ids=[twitch_id])
+                    profile_image_url = (
+                        str(users[0].profile_image) if users and users[0].profile_image else None
+                    )
+
                     # 3. Create full streamer in API (which inserts to DB)
-                    await self.bot.api.create_streamer(
+                    result = await self.bot.api.create_streamer(
                         streamer_id=twitch_id,
                         streamer_name=username,
                         is_online=is_online,
@@ -165,11 +171,17 @@ class BrokerConsumer:
                         game_name=stream_info.get("game_name"),
                         stream_title=stream_info.get("title"),
                         stream_thumbnail_url=stream_info.get("thumbnail_url"),
+                        profile_image_url=profile_image_url,
                     )
 
-                    self.logger.info(
-                        f"Created streamer {username} ({twitch_id}) via API"
-                    )
+                    if result:
+                        self.logger.info(
+                            f"Created streamer {username} ({twitch_id}) via API"
+                        )
+                    else:
+                        self.logger.error(
+                            f"FAILED to create streamer {username} ({twitch_id}) - API returned None"
+                        )
 
                     # 4. Do NOT subscribe here.
                     # The API will emit 'streamer.added', which we handle below.

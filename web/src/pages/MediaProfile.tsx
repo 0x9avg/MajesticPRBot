@@ -61,8 +61,8 @@ export default function MediaProfile() {
 
                     {/* Avatar / Image */}
                     <div className="w-32 h-32 rounded-full border-4 border-[#9146ff] shadow-[0_0_30px_rgba(145,70,255,0.3)] overflow-hidden shrink-0">
-                        {streamer.stream_thumbnail_url ? (
-                            <img src={streamer.stream_thumbnail_url} alt={streamer.streamer_name} className="w-full h-full object-cover" />
+                        {streamer.profile_image_url || streamer.stream_thumbnail_url ? (
+                            <img src={streamer.profile_image_url || streamer.stream_thumbnail_url} alt={streamer.streamer_name} className="w-full h-full object-cover" />
                         ) : (
                             <div className="w-full h-full bg-[#9146ff] flex items-center justify-center">
                                 <Twitch className="w-16 h-16 text-white" />

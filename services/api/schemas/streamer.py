@@ -44,6 +44,7 @@ class StreamerCreate(BaseModel):
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
+    profile_image_url: Optional[str] = None
 
     # Common fields
     priority: int = Field(default=0, ge=0, le=3)
@@ -115,6 +116,7 @@ class StreamerResponse(BaseModel):
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
+    profile_image_url: Optional[str] = None
     added_at: datetime
     added_by_id: Optional[Snowflake] = None
     assigned_pr_id: Optional[Snowflake] = None
@@ -147,3 +149,4 @@ class StreamerStatusUpdate(BaseModel):
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
+    profile_image_url: Optional[str] = None

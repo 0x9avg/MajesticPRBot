@@ -397,11 +397,12 @@ export function PRStats() {
         const sorted = [...assistants];
         sorted.sort((a, b) => {
             if (sortConfig.key === 'role') {
-                const roleWeights = {
+                const roleWeights: Record<string, number> = {
                     'developer': 4,
                     'manager': 3,
                     'senior_employee': 2,
-                    'employee': 1
+                    'employee': 1,
+                    'junior_employee': 0
                 };
                 const weightA = roleWeights[a.role as keyof typeof roleWeights] || 0;
                 const weightB = roleWeights[b.role as keyof typeof roleWeights] || 0;
@@ -420,23 +421,28 @@ export function PRStats() {
     };
 
     const getRoleBadge = (role: string) => {
-        const styles = {
+        const styles: Record<string, string> = {
             developer: 'bg-red-500/20 text-red-400 border-red-500/30',
             manager: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
             senior_employee: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
             employee: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+            junior_employee: 'bg-gray-500/10 text-gray-500 border-gray-500/20',
         };
 
-        const labels = {
+        const labels: Record<string, string> = {
             developer: 'Разработчик',
             manager: 'Менеджер',
             senior_employee: 'Ст. сотрудник',
             employee: 'Сотрудник',
+            junior_employee: 'Мл. сотрудник',
         };
 
+        const style = styles[role] || 'bg-white/10 text-white/60 border-white/10';
+        const label = labels[role] || role;
+
         return (
-            <span className={`px-3 py-1 rounded-full text-xs font-medium border ${styles[role as keyof typeof styles]}`}>
-                {labels[role as keyof typeof labels]}
+            <span className={`px-3 py-1 rounded-full text-xs font-medium border ${style}`}>
+                {label}
             </span>
         );
     };
@@ -529,7 +535,7 @@ export function PRStats() {
                                                 title="Перейти в профиль"
                                             >
                                                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#3b82f6] to-[#e81c5a] flex items-center justify-center text-white font-bold text-sm">
-                                                    {assistant.nickname.charAt(0).toUpperCase()}
+                                                    {(assistant.nickname?.charAt(0) || '?').toUpperCase()}
                                                 </div>
                                                 <span className="font-medium text-white group-hover:text-[#3b82f6] transition-colors">{assistant.nickname}</span>
                                             </div>

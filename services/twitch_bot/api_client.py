@@ -9,6 +9,14 @@ from typing import Dict, List, Optional
 import aiohttp
 
 
+class APIError(Exception):
+    """Custom exception for API errors."""
+    def __init__(self, status: int, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(f"API error {status}: {detail}")
+
+
 class APIClient:
     """HTTP client for API communication."""
 
@@ -41,24 +49,45 @@ class APIClient:
         endpoint: str,
         data: Optional[Dict] = None,
         params: Optional[Dict] = None,
+        raise_on_error: bool = False,
     ) -> Optional[Dict]:
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
 
         try:
+            # Debug: check for non-serializable types
+            if data:
+                import json
+                try:
+                    json.dumps(data)
+                except TypeError as e:
+                    self.logger.error(f"Serialization Error: {e}")
+                    for k, v in data.items():
+                        self.logger.error(f"Field '{k}': type={type(v)}, value={str(v)[:100]}")
+                    return None
+
             async with session.request(method, url, json=data, params=params) as resp:
                 if resp.status == 204:
                     return {"status": "success"}
                 result = await resp.json()
                 if resp.status >= 400:
-                    self.logger.error(f"API error {resp.status}: {result}")
+                    detail = result.get("detail", str(result)) if isinstance(result, dict) else str(result)
+                    self.logger.error(f"API error {resp.status}: {detail}")
+                    if raise_on_error:
+                        raise APIError(resp.status, detail)
                     return None
                 return result
         except aiohttp.ClientError as e:
             self.logger.error(f"API request failed: {e}")
+            if raise_on_error:
+                raise
             return None
+        except APIError:
+            raise
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
+            if raise_on_error:
+                raise
             return None
 
     # =========================================================================
@@ -88,6 +117,7 @@ class APIClient:
         game_name: str = None,
         stream_title: str = None,
         stream_thumbnail_url: str = None,
+        profile_image_url: str = None,
     ) -> Optional[Dict]:
         """Create streamer with full data (for Twitch bot use).
 
@@ -110,6 +140,8 @@ class APIClient:
             data["stream_title"] = stream_title
         if stream_thumbnail_url is not None:
             data["stream_thumbnail_url"] = stream_thumbnail_url
+        if profile_image_url is not None:
+            data["profile_image_url"] = profile_image_url
 
         return await self._request("POST", "/streamers", data=data)
 
@@ -122,6 +154,7 @@ class APIClient:
         game_name: str = None,
         stream_title: str = None,
         stream_thumbnail_url: str = None,
+        profile_image_url: str = None,
     ) -> bool:
         """Update streamer online status using JSON body."""
         data = {"is_online": is_online}
@@ -135,6 +168,8 @@ class APIClient:
             data["stream_title"] = stream_title
         if stream_thumbnail_url is not None:
             data["stream_thumbnail_url"] = stream_thumbnail_url
+        if profile_image_url is not None:
+            data["profile_image_url"] = profile_image_url
 
         result = await self._request(
             "PATCH", f"/streamers/{twitch_id}/status", data=data

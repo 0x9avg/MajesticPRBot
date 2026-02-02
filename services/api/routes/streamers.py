@@ -98,6 +98,7 @@ async def create_streamer(
             game_name=data.game_name,
             stream_title=data.stream_title,
             stream_thumbnail_url=data.stream_thumbnail_url,
+            profile_image_url=data.profile_image_url,
         )
 
         streamer = await db.get_streamer(data.streamer_id)
@@ -354,6 +355,7 @@ async def sync_streamers_status(
                 "game_name": update.get("game_name"),
                 "stream_title": update.get("stream_title"),
                 "stream_thumbnail_url": update.get("stream_thumbnail_url"),
+                "profile_image_url": update.get("profile_image_url"),
             }
         )
 

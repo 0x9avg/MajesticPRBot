@@ -124,6 +124,17 @@ class TwitchBot(AutoClient):
 
             self.logger.info(f"Found {len(online_streams)} streamers online")
 
+            # Batch fetch user profiles (for profile_image_url)
+            user_profiles = {}
+            for i in range(0, len(streamer_ids), 100):
+                chunk = streamer_ids[i : i + 100]
+                users = await self.fetch_users(ids=chunk)
+                for user in users:
+                    user_profiles[str(user.id)] = user
+                await asyncio.sleep(0)
+
+            self.logger.info(f"Fetched {len(user_profiles)} user profiles")
+
             new_subs = []
 
             # Update each streamer and prepare subscriptions
@@ -156,6 +167,7 @@ class TwitchBot(AutoClient):
                     continue
 
                 stream = online_streams.get(str(streamer_id))
+                user = user_profiles.get(str(streamer_id))
                 is_online = stream is not None
 
                 status_updates.append(
@@ -174,6 +186,9 @@ class TwitchBot(AutoClient):
                             stream.thumbnail.url
                             if is_online and stream.thumbnail
                             else None
+                        ),
+                        "profile_image_url": (
+                            str(user.profile_image) if user and user.profile_image else None
                         ),
                     }
                 )

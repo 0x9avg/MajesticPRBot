@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 
 export default function UserProfile() {
     const navigate = useNavigate();
+    const { id } = useParams();
     const [user, setUser] = useState<any>(null);
     const [logs, setLogs] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -18,7 +19,7 @@ export default function UserProfile() {
                     return;
                 }
 
-                // 1. Get Logged In User
+                // 1. Check Auth (we always need to be logged in)
                 const authRes = await fetch('/api/auth/me', {
                     headers: { 'Authorization': `Bearer ${token} ` }
                 });
@@ -32,17 +33,20 @@ export default function UserProfile() {
                 if (!authRes.ok) throw new Error('Failed to load user info');
                 const authUser = await authRes.json();
 
-                // 2. Fetch PR Data
-                // Try fetching by Discord ID first
+                // 2. Determine Target User (Me or route param)
+                // If id is present, we are viewing someone else. If not, we view ourselves.
+                let targetId = id || authUser.discord_id;
                 let assistantData = null;
 
                 try {
-                    const assistantRes = await fetch(`/api/assistants/${authUser.discord_id}`);
+                    // Try fetch by Target ID
+                    const assistantRes = await fetch(`/api/assistants/${targetId}`);
                     if (assistantRes.ok) {
                         const json = await assistantRes.json();
                         assistantData = json.data || json;
-                    } else {
-                        // Fallback: Try finding by nickname (if ID mismatch or fresh DB)
+                    } else if (!id) {
+                        // Only fall back to nickname search if we are viewing "Me" and ID fetch failed
+                        // (Logic preserved from original code for self-profile robustness)
                         const allRes = await fetch('/api/assistants');
                         if (allRes.ok) {
                             const allJson = await allRes.json();
@@ -77,7 +81,7 @@ export default function UserProfile() {
             }
         };
         fetchData();
-    }, [navigate]);
+    }, [navigate, id]);
 
     if (loading) {
         return (

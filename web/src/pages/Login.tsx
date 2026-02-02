@@ -16,6 +16,7 @@ export default function Login() {
         setLoading(true)
 
         try {
+            // Step 1: Login
             const response = await fetch('/api/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -30,6 +31,18 @@ export default function Login() {
             const { access_token, refresh_token } = await response.json()
             localStorage.setItem('access_token', access_token)
             localStorage.setItem('refresh_token', refresh_token)
+
+            // Step 2: Get user info
+            const userResponse = await fetch('/api/auth/me', {
+                headers: {
+                    'Authorization': `Bearer ${access_token}`
+                }
+            })
+
+            if (userResponse.ok) {
+                const userData = await userResponse.json()
+                localStorage.setItem('user', JSON.stringify(userData))
+            }
 
             navigate('/hub')
         } catch (err: any) {

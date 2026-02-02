@@ -133,7 +133,7 @@ class Database:
             self.logger.info("Initializing database schema...")
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SET sql_notes = 0")
+                    await cursor.execute("SET note_verbosity = 0")
 
                     # =========================================================
                     # 1. Streamers Table
@@ -361,7 +361,7 @@ class Database:
                         """
                     )
 
-                    await cursor.execute("SET sql_notes = 1")
+                    await cursor.execute("SET note_verbosity = 0")
                     await conn.commit()
 
                     # Initialize default permissions
@@ -895,6 +895,7 @@ class Database:
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
+                            MIN(a.nickname) as assigned_pr_name,
                             MIN(ss.started_at) as assigned_at
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
@@ -2934,7 +2935,9 @@ class Database:
                     # Assuming id is web_auth.id
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, a.role, a.nickname 
+                        SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
+                        COALESCE(a.role, 'employee') as role, 
+                        COALESCE(a.nickname, w.username) as nickname 
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         WHERE w.id = %s

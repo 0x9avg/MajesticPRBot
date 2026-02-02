@@ -107,6 +107,7 @@ class StreamerResponse(BaseModel):
     added_at: datetime
     added_by_id: Optional[Snowflake] = None
     assigned_pr_id: Optional[Snowflake] = None
+    assigned_pr_name: Optional[str] = None
     assigned_at: Optional[datetime] = None
 
     class Config:

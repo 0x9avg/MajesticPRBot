@@ -1,5 +1,5 @@
 import React from 'react';
-import { Outlet, useNavigate } from 'react-router-dom';
+import { Outlet, useNavigate, useOutletContext } from 'react-router-dom';
 import {
     Radio,
     Users,
@@ -11,11 +11,163 @@ import {
     Activity,
     Wifi,
     ChevronUp,
-    ChevronDown
+    ChevronDown,
+    ExternalLink,
+    Settings
 } from 'lucide-react';
+
+export function MediaDashboard() {
+    const navigate = useNavigate();
+    const [streamers, setStreamers] = React.useState<any[]>([]);
+    const [loading, setLoading] = React.useState(true);
+    const [isMediaOpen, setIsMediaOpen] = React.useState(true);
+
+    React.useEffect(() => {
+        fetchStreamers();
+        const interval = setInterval(fetchStreamers, 10000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const fetchStreamers = async () => {
+        try {
+            const response = await fetch('/api/streamers');
+            if (response.ok) {
+                const json = await response.json();
+                const data = json.streamers || [];
+                // Sort by priority (desc) then by name
+                data.sort((a: any, b: any) => {
+                    if (b.priority !== a.priority) return b.priority - a.priority;
+                    return a.streamer_name.localeCompare(b.streamer_name);
+                });
+                setStreamers(data);
+            }
+        } catch (error) {
+            console.error('Failed to fetch streamers:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Split streamers into two columns for the dashboard
+    const midPoint = Math.ceil(streamers.length / 2);
+    const leftColumn = streamers.slice(0, midPoint);
+    const rightColumn = streamers.slice(midPoint);
+
+    const StreamerCard = ({ streamer }: { streamer: any }) => (
+        <div className="p-3 rounded-xl flex items-center group hover:bg-white/5 transition-all">
+            {/* Left Section: Priority + Name (Flex Grow) */}
+            <div className="flex items-center gap-4 flex-[2] min-w-0 mr-2">
+                {/* Priority Box */}
+                <div className="w-8 h-8 rounded-lg border-2 border-white/20 flex items-center justify-center font-bold text-white/50 select-none shrink-0">
+                    {streamer.priority}
+                </div>
+
+                {/* Name & Link */}
+                <div className="flex items-center gap-2 min-w-0">
+                    <span
+                        className="font-bold text-lg text-white truncate cursor-pointer hover:text-[#3b82f6] transition-colors"
+                        onClick={() => navigate(`/media/${streamer.streamer_id}`)}
+                    >
+                        {streamer.streamer_name}
+                    </span>
+                    <a
+                        href={`https://twitch.tv/${streamer.streamer_name}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="p-1 hover:bg-white/10 rounded-md text-white/40 hover:text-white transition-colors"
+                    >
+                        <ExternalLink className="w-4 h-4" />
+                    </a>
+                </div>
+            </div>
+
+            {/* Middle Section: Status & Action Merged */}
+            <div className="flex-[2] flex items-center px-4 border-l border-white/10 relative">
+                {streamer.assigned_pr_id ? (
+                    <div className="w-full flex justify-center">
+                        <div className="flex flex-col items-center">
+                            <span className="text-sm font-bold text-white/90">
+                                {streamer.assigned_pr_name || 'Сотрудник'}
+                            </span>
+                            <span className="text-xs text-white/40">
+                                ({streamer.assigned_pr_id})
+                            </span>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="w-full relative flex items-center justify-center">
+                        <div className="text-sm font-bold text-white/40 select-none">
+                            Ассистента нет
+                        </div>
+                        <button className="absolute right-0 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap">
+                            Закрепиться
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {/* Right Section: Settings (Border Left) */}
+            <div className="flex justify-center pl-4 border-l border-white/10">
+                <button className="p-2 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors">
+                    <Settings className="w-5 h-5" />
+                </button>
+            </div>
+        </div>
+    );
+
+    if (loading) return null;
+
+    return (
+        <div className="select-none">
+            <h2
+                className="text-2xl font-bold mb-6 flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={() => setIsMediaOpen(!isMediaOpen)}
+            >
+                <span className="w-1 h-8 bg-purple-500 rounded-full inline-block"></span>
+                Медиа
+                <div className={`ml-auto p-2 rounded-full bg-white/5 transition-transform duration-300 ${isMediaOpen ? 'rotate-180' : ''}`}>
+                    <ChevronDown className="w-5 h-5 text-white/60" />
+                </div>
+            </h2>
+
+            <div className={`transition-all duration-300 ${isMediaOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Left Column Table */}
+                    <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden p-2">
+                        <div className="flex flex-col gap-1">
+                            {leftColumn.length > 0 ? (
+                                leftColumn.map(s => <StreamerCard key={s.streamer_id} streamer={s} />)
+                            ) : (
+                                <div className="text-white/40 text-center py-8">Нет данных</div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right Column Table */}
+                    <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden p-2">
+                        <div className="flex flex-col gap-1">
+                            {rightColumn.length > 0 ? (
+                                rightColumn.map(s => <StreamerCard key={s.streamer_id} streamer={s} />)
+                            ) : (
+                                <div className="text-white/40 text-center py-8">Нет данных</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
 
 export function MainHub() {
     const navigate = useNavigate();
+    const { user } = useOutletContext<any>();
+    const userRole = user?.role;
+
+    // Collapsible states
+    const [isMenuOpen, setIsMenuOpen] = React.useState(true);
+    const [isAdminOpen, setIsAdminOpen] = React.useState(true);
+
     const [dashboardStats, setDashboardStats] = React.useState({
         assigned_pr_count: 0,
         unassigned_media_count: 0,
@@ -127,12 +279,21 @@ export function MainHub() {
                 ))}
             </div>
 
-            <div>
-                <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+            {/* Media Dashboard Section */}
+            <MediaDashboard />
+
+            <div className="select-none">
+                <h2
+                    className="text-2xl font-bold mb-6 flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                    onClick={() => setIsMenuOpen(!isMenuOpen)}
+                >
                     <span className="w-1 h-8 bg-[#3b82f6] rounded-full inline-block"></span>
                     Меню
+                    <div className={`ml-auto p-2 rounded-full bg-white/5 transition-transform duration-300 ${isMenuOpen ? 'rotate-180' : ''}`}>
+                        <ChevronDown className="w-5 h-5 text-white/60" />
+                    </div>
                 </h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 transition-all duration-300 ${isMenuOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
                     {categories.map((cat, i) => (
                         <div
                             key={i}
@@ -156,39 +317,48 @@ export function MainHub() {
                 </div>
             </div>
 
-            <div>
-                <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-                    <span className="w-1 h-8 bg-[#e81c5a] rounded-full inline-block"></span>
-                    Управление
-                </h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    {adminCategories.map((cat, i) => (
-                        <div
-                            key={i}
-                            onClick={() => navigate(cat.path)}
-                            className={`relative group cursor-pointer overflow-hidden p-6 rounded-3xl border border-white/5 bg-gradient-to-br ${cat.color} transition-all duration-300 hover:scale-[1.02] hover:shadow-xl`}
-                        >
-                            <div className="relative z-10 flex flex-col h-full">
-                                <div className="mb-4 p-3 bg-white/10 rounded-2xl w-fit">
-                                    <cat.icon className="w-8 h-8 text-white" />
-                                </div>
-                                <h3 className="text-xl font-bold text-white mb-2">{cat.title}</h3>
-                                <p className="text-white/60 text-sm flex-1">{cat.desc}</p>
+            {(userRole === 'manager' || userRole === 'developer') && (
+                <div className="select-none">
+                    <h2
+                        className="text-2xl font-bold mb-6 flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                        onClick={() => setIsAdminOpen(!isAdminOpen)}
+                    >
+                        <span className="w-1 h-8 bg-[#e81c5a] rounded-full inline-block"></span>
+                        Управление
+                        <div className={`ml-auto p-2 rounded-full bg-white/5 transition-transform duration-300 ${isAdminOpen ? 'rotate-180' : ''}`}>
+                            <ChevronDown className="w-5 h-5 text-white/60" />
+                        </div>
+                    </h2>
+                    <div className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 transition-all duration-300 ${isAdminOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
+                        {adminCategories.map((cat, i) => (
+                            <div
+                                key={i}
+                                onClick={() => navigate(cat.path)}
+                                className={`relative group cursor-pointer overflow-hidden p-6 rounded-3xl border border-white/5 bg-gradient-to-br ${cat.color} transition-all duration-300 hover:scale-[1.02] hover:shadow-xl`}
+                            >
+                                <div className="relative z-10 flex flex-col h-full">
+                                    <div className="mb-4 p-3 bg-white/10 rounded-2xl w-fit">
+                                        <cat.icon className="w-8 h-8 text-white" />
+                                    </div>
+                                    <h3 className="text-xl font-bold text-white mb-2">{cat.title}</h3>
+                                    <p className="text-white/60 text-sm flex-1">{cat.desc}</p>
 
-                                <div className="mt-4 flex justify-end">
-                                    <ArrowRight className="w-6 h-6 text-white/40 group-hover:text-white group-hover:translate-x-1 transition-all" />
+                                    <div className="mt-4 flex justify-end">
+                                        <ArrowRight className="w-6 h-6 text-white/40 group-hover:text-white group-hover:translate-x-1 transition-all" />
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    ))}
+                        ))}
+                    </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 }
 
 export function MediaList() { return <h2 className="text-3xl font-bold">Список медиа</h2>; }
 export function PRStats() {
+    const navigate = useNavigate();
     const [assistants, setAssistants] = React.useState<any[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [sortConfig, setSortConfig] = React.useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'role', direction: 'desc' });
@@ -353,11 +523,15 @@ export function PRStats() {
                                         className="border-b border-white/5 hover:bg-white/5 transition-colors"
                                     >
                                         <td className="p-4">
-                                            <div className="flex items-center gap-2">
+                                            <div
+                                                className="flex items-center gap-2 cursor-pointer group"
+                                                onClick={() => navigate(`/profile/${assistant.pr_id}`)}
+                                                title="Перейти в профиль"
+                                            >
                                                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#3b82f6] to-[#e81c5a] flex items-center justify-center text-white font-bold text-sm">
                                                     {assistant.nickname.charAt(0).toUpperCase()}
                                                 </div>
-                                                <span className="font-medium text-white">{assistant.nickname}</span>
+                                                <span className="font-medium text-white group-hover:text-[#3b82f6] transition-colors">{assistant.nickname}</span>
                                             </div>
                                         </td>
                                         <td className="p-4">{getRoleBadge(assistant.role)}</td>

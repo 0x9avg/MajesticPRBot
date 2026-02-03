@@ -70,6 +70,17 @@ class APIClient:
                 if resp.status == 204:
                     return {"status": "success"}
                 result = await resp.json()
+                
+                # Unwrap API Envelope
+                if isinstance(result, dict) and "status" in result and "data" in result:
+                    if result["status"] == "success" or resp.status < 400:
+                        return result["data"]
+                    else:
+                         self.logger.warning(f"API Error ({resp.status}): {result.get('message')}")
+                         if raise_on_error:
+                             raise APIError(resp.status, result.get("message", "Unknown error"))
+                         return result # Return full envelope on error
+
                 if resp.status >= 400:
                     detail = result.get("detail", str(result)) if isinstance(result, dict) else str(result)
                     self.logger.error(f"API error {resp.status}: {detail}")

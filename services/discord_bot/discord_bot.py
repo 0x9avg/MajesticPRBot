@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 import disnake
 from config import Config
 from disnake.ext import commands
+from utils import UserAuthCache
 
 
 class DiscordBot(commands.Bot):
@@ -47,16 +48,17 @@ class DiscordBot(commands.Bot):
         self.api_client = api_client
         self.broker = broker_consumer
         self.logger = logger or Config.setup_logging("DiscordBot")
+        self.auth_cache = UserAuthCache(ttl_seconds=300)
 
         intents = disnake.Intents.all()
 
         self.logger.debug("Initializing Discord bot")
         super().__init__(command_prefix="!", intents=intents)
 
-        # Add global checks for single-server enforcement
+        # Add global checks for single-server enforcement AND user authorization
         self.add_check(self._check_guild_text_command)
         self.add_app_command_check(
-            self._check_guild_interaction,
+            self._check_guild_and_auth_interaction,
             slash_commands=True,
             user_commands=True,
             message_commands=True,
@@ -75,6 +77,40 @@ class DiscordBot(commands.Bot):
         if not inter.guild_id:
             return False
         return str(inter.guild_id) == Config.guild_id
+
+    async def _check_guild_and_auth_interaction(
+        self, inter: disnake.ApplicationCommandInteraction
+    ) -> bool:
+        """
+        Global check for slash commands:
+        1. Must be from target guild.
+        2. User must exist in database (assistants table).
+        """
+        # Guild check first
+        if not inter.guild_id or str(inter.guild_id) != Config.guild_id:
+            return False
+
+        user_id = inter.user.id
+
+        # Check cache first
+        cached = self.auth_cache.get(user_id)
+        if cached is not None:
+            return cached
+
+        # API lookup
+        try:
+            assistant = await self.api_client.get_assistant(user_id)
+            is_authorized = assistant is not None and "pr_id" in assistant
+            self.auth_cache.set(user_id, is_authorized)
+            
+            if not is_authorized:
+                self.logger.debug(f"Auth denied for user {user_id}: not in database")
+            
+            return is_authorized
+        except Exception as e:
+            self.logger.error(f"Auth check failed for {user_id}: {e}")
+            # On error, deny access (fail-safe)
+            return False
 
     @property
     def api(self):
@@ -130,6 +166,18 @@ class DiscordBot(commands.Bot):
         self, interaction: disnake.ApplicationCommandInteraction, error: Exception
     ):
         """Global error handler for slash commands."""
+        # Handle authorization / check failures
+        if isinstance(error, commands.CheckFailure):
+            try:
+                msg = "❌ **Доступ запрещен**\nВы не зарегистрированы в системе."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except:
+                pass
+            return
+
         if isinstance(error, commands.CommandOnCooldown):
             # Format time remaining
             seconds = int(error.retry_after)

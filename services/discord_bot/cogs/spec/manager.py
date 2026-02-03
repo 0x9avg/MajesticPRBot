@@ -169,13 +169,14 @@ class Spec(commands.Cog):
             streamer_id, pr_id, is_probation=is_probation
         )
 
-        if result and result.get("status") == "claimed":
+        if result and "streamer_id" in result:
             streamer_name = result.get("streamer_name")
             spec_type = "Стажерский" if is_probation else "Основной"
 
             # Update notification message to show "Claimed by X"
             try:
                 streamer = await self.api.get_streamer(streamer_id)
+                # streamer can be None if not found
                 if streamer and hasattr(interaction, "message") and interaction.message:
                     new_components = create_notification_component(
                         message="",
@@ -187,6 +188,7 @@ class Spec(commands.Cog):
                         show_claim_button=True,
                         assigned_pr_id=pr_id,
                         assigned_pr_name=interaction.user.display_name,
+                        is_probation=is_probation,
                     )
                     await interaction.message.edit(components=new_components)
             except Exception as e:
@@ -209,10 +211,11 @@ class Spec(commands.Cog):
         """Handle unclaim button click."""
         try:
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
+            pr_id = interaction.user.id
 
-            result = await self.api.unclaim_streamer(streamer_id, reason="manual")
+            result = await self.api.unclaim_streamer(streamer_id, pr_id=pr_id, reason="manual")
 
-            if result and result.get("status") == "unclaimed":
+            if result and "duration_seconds" in result:
                 duration_str = format_spec_duration(result.get("duration_seconds", 0))
 
                 await interaction.followup.send(
@@ -298,7 +301,7 @@ class Spec(commands.Cog):
                     transfer_data["streamer_id"], from_pr_id, interaction.user.id
                 )
 
-                if result and result.get("status") == "transferred":
+                if result and "to_pr_id" in result:
                     msg = f"✅ Ты принял стримера **{result.get('streamer_name')}**!"
                     try:
                         await interaction.message.edit(content=msg, components=[])
@@ -422,6 +425,12 @@ class Spec(commands.Cog):
     async def update_monitoring(self):
         """Update monitoring message with current streamer statuses."""
         try:
+            # Get monitoring status from API (server-driven UI)
+            status = await self.api.get_monitoring_status()
+            if not status:
+                self.logger.warning("Failed to get monitoring status from API")
+                return
+            
             settings = await self.api.get_guild_settings()
             if not settings:
                 return
@@ -437,24 +446,15 @@ class Spec(commands.Cog):
                 self.logger.warning("Monitoring channel not found")
                 return
 
-            # Get streamers
-            streamers = await self.api.list_all_streamers()
-            online_streamers = []
-            available_streamers = []
-            gta_count = 0
+            # Use API-provided data
+            online_streamers = status.get("online_streamers", [])
+            available_streamers = status.get("available_for_claim", [])
+            total_count = status.get("total_streamers", 0)
+            gta_count = status.get("gta_count", 0)
 
-            for s in streamers:
-                if s.get("is_online"):
-                    online_streamers.append(s)
-                    is_gta = str(s.get("game_id")) == Config.gta5_game_id
-                    if is_gta:
-                        gta_count += 1
-                        if not s.get("assigned_pr_id"):
-                            available_streamers.append(s)
-
-            # Build components
+            # Build components using API data
             container = create_streamers_component(
-                online_streamers, len(streamers), gta_count
+                online_streamers, total_count, gta_count
             )
             select_row = create_monitoring_select(available_streamers, [])
             final_components = [container, select_row]

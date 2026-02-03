@@ -20,6 +20,9 @@ class SpecClaimRequest(BaseModel):
 
 class SpecUnclaimRequest(BaseModel):
     streamer_id: Snowflake = Field(..., description="Twitch streamer ID to unclaim")
+    pr_id: Optional[Snowflake] = Field(
+        None, description="Discrod user ID of assistant (optional)"
+    )
     reason: str = Field(default="manual", description="Reason for unclaiming")
 
 

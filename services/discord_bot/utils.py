@@ -3,7 +3,7 @@
 import datetime
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import disnake
 from config import Config
@@ -11,6 +11,45 @@ from disnake.ext import commands
 
 # Module logger
 logger = logging.getLogger(__name__)
+
+
+class UserAuthCache:
+    """
+    Simple TTL cache for user authorization status.
+    Prevents API spam by caching user existence checks.
+    """
+
+    def __init__(self, ttl_seconds: int = 300):
+        self._cache: Dict[int, Tuple[bool, float]] = {}
+        self._ttl = ttl_seconds
+
+    def get(self, user_id: int) -> Optional[bool]:
+        """
+        Get cached authorization status.
+        Returns True (authorized), False (unauthorized), or None (not cached/expired).
+        """
+        if user_id not in self._cache:
+            return None
+        
+        is_authorized, timestamp = self._cache[user_id]
+        if time.time() - timestamp > self._ttl:
+            # Expired
+            del self._cache[user_id]
+            return None
+        
+        return is_authorized
+
+    def set(self, user_id: int, is_authorized: bool) -> None:
+        """Cache authorization status for a user."""
+        self._cache[user_id] = (is_authorized, time.time())
+
+    def invalidate(self, user_id: int) -> None:
+        """Remove a user from cache (e.g., after role change)."""
+        self._cache.pop(user_id, None)
+
+    def clear(self) -> None:
+        """Clear entire cache."""
+        self._cache.clear()
 
 
 def format_spec_duration(seconds: int) -> str:
@@ -207,11 +246,33 @@ def create_streamers_component(
             streamer.get("stream_thumbnail_url")
             or "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
         )
-        assigned_pr_id = streamer.get("assigned_pr_id")
+        assignments = streamer.get("assignments", [])
+        
+        main_pr = None
+        prob_pr = None
+        
+        if assignments:
+            for a in assignments:
+                if a.get("is_probation"):
+                    prob_pr = a.get("pr_id")
+                else:
+                    main_pr = a.get("pr_id")
+        elif streamer.get("assigned_pr_id"):
+             # Legacy fallback
+             main_pr = streamer.get("assigned_pr_id")
 
-        pr_line = (
-            f"👤 PR: <@{assigned_pr_id}>" if assigned_pr_id else "👤 PR: *свободен*"
-        )
+        lines = []
+        # Line 1: Main or Free
+        if main_pr:
+            lines.append(f"👤 PR: <@{main_pr}>")
+        else:
+            lines.append("👤 PR: *свободен*")
+            
+        # Line 2: Probation (if exists)
+        if prob_pr:
+            lines.append(f"👤 PR стажировка: <@{prob_pr}>")
+            
+        pr_line = "\n".join(lines)
 
         components.append(
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
@@ -298,24 +359,11 @@ def create_notification_component(
     show_claim_button: bool = False,
     assigned_pr_id: int = None,
     assigned_pr_name: str = None,
+    is_probation: bool = False,
+    include_embed: bool = True,
 ) -> list:
     """Create notification components (Embed + ActionRow)."""
     streamer_link = f"https://twitch.tv/{streamer_name}"
-
-    # Use default placeholder if no thumbnail
-    if not thumbnail_url:
-        thumbnail_url = "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
-
-    container = disnake.ui.Container(
-        disnake.ui.TextDisplay(content=f"### {streamer_name}"),
-        disnake.ui.TextDisplay(
-            content=f"### [**{stream_title[:80] if stream_title else 'Без названия'}**]({streamer_link})"
-        ),
-        disnake.ui.TextDisplay(content=f"**Игра:**\n{game_name or 'Не указана'}"),
-        disnake.ui.TextDisplay(content=f"**Ссылка:**\n{streamer_link}"),
-        disnake.ui.MediaGallery(disnake.MediaGalleryItem(media=thumbnail_url)),
-        accent_colour=disnake.Colour.purple(),
-    )
 
     result = []
 
@@ -324,14 +372,30 @@ def create_notification_component(
         text_display = disnake.ui.TextDisplay(content=message)
         result.append(text_display)
 
-    result.append(container)
+    if include_embed:
+        # Use default placeholder if no thumbnail
+        if not thumbnail_url:
+            thumbnail_url = "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
+
+        container = disnake.ui.Container(
+            disnake.ui.TextDisplay(content=f"### {streamer_name}"),
+            disnake.ui.TextDisplay(
+                content=f"### [**{stream_title[:80] if stream_title else 'Без названия'}**]({streamer_link})"
+            ),
+            disnake.ui.TextDisplay(content=f"**Игра:**\n{game_name or 'Не указана'}"),
+            disnake.ui.TextDisplay(content=f"**Ссылка:**\n{streamer_link}"),
+            disnake.ui.MediaGallery(disnake.MediaGalleryItem(media=thumbnail_url)),
+            accent_colour=disnake.Colour.purple(),
+        )
+        result.append(container)
 
     # Add claim button if requested and we have streamer_id
     if show_claim_button and streamer_id:
         if assigned_pr_id:
             # Already claimed - show who claimed it
+            emoji = "🟡" if is_probation else "🔵"
             claim_label = (
-                f"✅ Взял: {assigned_pr_name}" if assigned_pr_name else "✅ Взят"
+                f"{emoji} Взял: {assigned_pr_name}" if assigned_pr_name else f"{emoji} Взят"
             )
             result.append(
                 disnake.ui.ActionRow(

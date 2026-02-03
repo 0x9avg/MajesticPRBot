@@ -65,6 +65,17 @@ class APIClient:
                     return {"status": "success"}
 
                 result = await resp.json()
+                
+                # Unwrap API Envelope
+                if isinstance(result, dict) and "status" in result and "data" in result:
+                    if result["status"] == "success" or resp.status < 400:
+                        return result["data"]
+                    else:
+                        # Envelope with error status
+                        error_msg = result.get("message", "Unknown API error")
+                        self.logger.warning(f"API Error ({resp.status}): {error_msg}")
+                        return result # Return full envelope for custom error handling if needed
+
                 if not isinstance(result, (dict, list)) and result is not None:
                     self.logger.warning(
                         f"API returned non-structured JSON: {type(result)} val: {result} for {url}"
@@ -120,9 +131,11 @@ class APIClient:
     async def list_all_streamers(self) -> List[Dict]:
         """Get all streamers."""
         result = await self._request("GET", "/streamers")
+        # Direct result now contains the data payload (which has "streamers" list in it? No, list_all_streamers returns envelope with data which has streamers list)
+        # API Response: data = {"total": X, "online_count": Y, "streamers": [...]}
         if result and "streamers" in result:
-            return result["streamers"]
-        return result if isinstance(result, list) else []
+             return result["streamers"]
+        return []
 
     async def get_streamer(self, twitch_id: int) -> Optional[Dict]:
         """Get a specific streamer."""
@@ -226,16 +239,20 @@ class APIClient:
         )
 
     async def unclaim_streamer(
-        self, streamer_id: int, reason: str = "manual"
+        self, streamer_id: int, pr_id: Optional[int] = None, reason: str = "manual"
     ) -> Optional[Dict]:
         """Unclaim a streamer."""
+        data = {
+            "streamer_id": streamer_id,
+            "reason": reason,
+        }
+        if pr_id is not None:
+            data["pr_id"] = pr_id
+            
         return await self._request(
             "POST",
             "/spec/unclaim",
-            data={
-                "streamer_id": streamer_id,
-                "reason": reason,
-            },
+            data=data,
         )
 
     async def transfer_streamer(
@@ -286,16 +303,12 @@ class APIClient:
     async def get_assistants(self) -> List[Dict]:
         """Get all assistants."""
         result = await self._request("GET", "/assistants")
-        if result and "data" in result:
-            return result["data"]
+        # API returns list of assistants directly in data
         return result if isinstance(result, list) else []
 
     async def get_assistant(self, user_id: int) -> Optional[Dict]:
         """Get a specific assistant by ID."""
-        result = await self._request("GET", f"/assistants/{user_id}")
-        if result and "data" in result:
-            return result["data"]
-        return None
+        return await self._request("GET", f"/assistants/{user_id}")
 
     async def get_assistant_capabilities(self, user_id: int) -> Dict[str, bool]:
         """Get assistant capabilities/permissions."""
@@ -339,6 +352,23 @@ class APIClient:
     async def get_dashboard_status(self) -> Optional[Dict]:
         """Get dashboard status."""
         return await self._request("GET", "/dashboard/status")
+
+    async def get_monitoring_status(self) -> Optional[Dict]:
+        """Get monitoring view model for Discord display."""
+        return await self._request("GET", "/monitoring/status")
+
+    async def render_notification(
+        self, event_type: str, streamer_id: int
+    ) -> Optional[Dict]:
+        """
+        Get pre-rendered notification from API.
+        Returns message text and component spec for Discord.
+        """
+        return await self._request(
+            "GET",
+            f"/notifications/render/{event_type}",
+            params={"streamer_id": streamer_id},
+        )
 
     # TODO: Fix /stats/leaderboard is not existing
     async def get_leaderboard(self, limit: int = 10) -> Optional[Dict]:

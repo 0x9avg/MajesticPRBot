@@ -1,9 +1,10 @@
 """
 Guild settings routes for API.
-Refactored to use database methods.
+Split into /settings, /templates, /rates resources per roadmap.
 """
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING, Annotated
 
 if TYPE_CHECKING:
@@ -12,10 +13,16 @@ if TYPE_CHECKING:
 
 from config import Config
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from middleware import get_trace_id
+from schemas.envelope import success_envelope
 from schemas.guild import (
+    GuildRatesResponse,
     GuildRatesUpdate,
+    GuildSettingsOnlyResponse,
     GuildSettingsResponse,
     GuildSettingsUpdate,
+    GuildTemplatesResponse,
     GuildTemplatesUpdate,
 )
 
@@ -32,27 +39,74 @@ def get_broker(request: Request):
     return request.app.state.broker
 
 
-@router.get("", response_model=GuildSettingsResponse)
-async def get_guild_settings(db: Annotated["Database", Depends(get_db)]):
-    """Get current guild settings."""
+# =============================================================================
+# Full Guild (backward compatibility / aggregated view)
+# =============================================================================
+
+
+@router.get("")
+async def get_guild_all(
+    request: Request,
+    db: Annotated["Database", Depends(get_db)],
+):
+    """Get all guild settings (aggregated view)."""
+    trace_id = get_trace_id(request)
+
     settings = await db.get_guild()
 
     if not settings:
-        # Create default settings if not exist
         await db.create_or_update_guild()
         settings = await db.get_guild()
 
-    return GuildSettingsResponse(**settings)
+    data = GuildSettingsResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message="Guild settings retrieved",
+            trace_id=trace_id,
+        )
+    )
 
 
-@router.patch("", response_model=GuildSettingsResponse)
+# =============================================================================
+# /settings - Core wiring (channel/role/message IDs)
+# =============================================================================
+
+
+@router.get("/settings")
+async def get_guild_settings(
+    request: Request,
+    db: Annotated["Database", Depends(get_db)],
+):
+    """Get core wiring settings (channel/role/message IDs)."""
+    trace_id = get_trace_id(request)
+
+    settings = await db.get_guild()
+
+    if not settings:
+        await db.create_or_update_guild()
+        settings = await db.get_guild()
+
+    data = GuildSettingsOnlyResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message="Guild settings retrieved",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.patch("/settings")
 async def update_guild_settings(
+    request: Request,
     data: GuildSettingsUpdate,
     db: Annotated["Database", Depends(get_db)],
     broker: Annotated["BrokerService", Depends(get_broker)],
 ):
-    """Update guild channel settings."""
-    # Update core settings
+    """Update core wiring settings."""
+    trace_id = get_trace_id(request)
+
     await db.create_or_update_guild(
         notification_channel_id=data.notification_channel_id,
         monitoring_channel_id=data.monitoring_channel_id,
@@ -66,18 +120,61 @@ async def update_guild_settings(
     settings = await db.get_guild()
 
     if broker:
-        await broker.emit_guild_settings_updated(data.model_dump(exclude_none=True))
+        await broker.emit_guild_settings_updated(
+            data.model_dump(exclude_none=True),
+            trace_id=trace_id,
+        )
 
-    return GuildSettingsResponse(**settings)
+    response_data = GuildSettingsOnlyResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=response_data.model_dump(mode="json"),
+            message="Guild settings updated",
+            code="GUILD_SETTINGS_UPDATED",
+            trace_id=trace_id,
+        )
+    )
 
 
-@router.patch("/templates", response_model=GuildSettingsResponse)
+# =============================================================================
+# /templates - Notification templates
+# =============================================================================
+
+
+@router.get("/templates")
+async def get_guild_templates(
+    request: Request,
+    db: Annotated["Database", Depends(get_db)],
+):
+    """Get notification templates."""
+    trace_id = get_trace_id(request)
+
+    settings = await db.get_guild()
+
+    if not settings:
+        await db.create_or_update_guild()
+        settings = await db.get_guild()
+
+    data = GuildTemplatesResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message="Guild templates retrieved",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.patch("/templates")
 async def update_guild_templates(
+    request: Request,
     data: GuildTemplatesUpdate,
     db: Annotated["Database", Depends(get_db)],
     broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Update notification templates."""
+    trace_id = get_trace_id(request)
+
     await db.update_guild_templates(
         template_stream_online=data.template_stream_online,
         template_stream_offline=data.template_stream_offline,
@@ -88,20 +185,83 @@ async def update_guild_templates(
     settings = await db.get_guild()
 
     if broker:
-        await broker.emit_guild_settings_updated(
-            {"notification_templates": data.model_dump(exclude_none=True)},
+        await broker.emit_guild_templates_updated(
+            data.model_dump(exclude_none=True),
+            trace_id=trace_id,
         )
 
-    return GuildSettingsResponse(**settings)
+    response_data = GuildTemplatesResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=response_data.model_dump(mode="json"),
+            message="Guild templates updated",
+            code="GUILD_TEMPLATES_UPDATED",
+            trace_id=trace_id,
+        )
+    )
 
 
-@router.patch("/rates", response_model=GuildSettingsResponse)
+@router.get("/templates/{event_type}")
+async def get_template_by_type(
+    request: Request,
+    event_type: str,
+    db: Annotated["Database", Depends(get_db)],
+):
+    """Get a specific notification template by event type."""
+    trace_id = get_trace_id(request)
+
+    if event_type not in Config.allowed_event_types:
+        raise HTTPException(status_code=400, detail="Недопустимый тип события")
+
+    template = await db.get_notification_template(event_type)
+    return JSONResponse(
+        content=success_envelope(
+            data={"event_type": event_type, "template": template},
+            message=f"Template for {event_type}",
+            trace_id=trace_id,
+        )
+    )
+
+
+# =============================================================================
+# /rates - Point rates
+# =============================================================================
+
+
+@router.get("/rates")
+async def get_guild_rates(
+    request: Request,
+    db: Annotated["Database", Depends(get_db)],
+):
+    """Get point rates per priority."""
+    trace_id = get_trace_id(request)
+
+    settings = await db.get_guild()
+
+    if not settings:
+        await db.create_or_update_guild()
+        settings = await db.get_guild()
+
+    data = GuildRatesResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message="Guild rates retrieved",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.patch("/rates")
 async def update_guild_rates(
+    request: Request,
     data: GuildRatesUpdate,
     db: Annotated["Database", Depends(get_db)],
     broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Update point rates per priority."""
+    trace_id = get_trace_id(request)
+
     await db.update_guild_rates(
         p0_rate=data.p0_rate,
         p1_rate=data.p1_rate,
@@ -113,18 +273,17 @@ async def update_guild_rates(
     settings = await db.get_guild()
 
     if broker:
-        await broker.emit_guild_settings_updated(
-            {"rates": data.model_dump(exclude_none=True)}
+        await broker.emit_guild_rates_updated(
+            data.model_dump(exclude_none=True),
+            trace_id=trace_id,
         )
 
-    return GuildSettingsResponse(**settings)
-
-
-@router.get("/templates/{event_type}")
-async def get_template(event_type: str, db: Annotated["Database", Depends(get_db)]):
-    """Get a specific notification template."""
-    if event_type not in Config.allowed_event_types:
-        raise HTTPException(status_code=400, detail="Недопустимый тип события")
-
-    template = await db.get_notification_template(event_type)
-    return {"event_type": event_type, "template": template}
+    response_data = GuildRatesResponse(**settings)
+    return JSONResponse(
+        content=success_envelope(
+            data=response_data.model_dump(mode="json"),
+            message="Guild rates updated",
+            code="GUILD_RATES_UPDATED",
+            trace_id=trace_id,
+        )
+    )

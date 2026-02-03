@@ -119,9 +119,7 @@ class StreamerResponse(BaseModel):
     profile_image_url: Optional[str] = None
     added_at: datetime
     added_by_id: Optional[Snowflake] = None
-    assigned_pr_id: Optional[Snowflake] = None
-    assigned_pr_name: Optional[str] = None
-    assigned_at: Optional[datetime] = None
+    assignments: List[dict] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

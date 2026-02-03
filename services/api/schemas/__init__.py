@@ -2,7 +2,21 @@
 Schemas package - Pydantic models for API requests and responses.
 """
 
+# Envelope (API response wrapper)
+from schemas.envelope import (
+    APIEnvelope,
+    FieldError,
+    ResponseStatus,
+    accepted_envelope,
+    conflict_envelope,
+    error_envelope,
+    not_found_envelope,
+    success_envelope,
+    validation_failed_envelope,
+)
+
 # Auth
+
 # Assistants
 from schemas.assistant import (
     AssistantBase,
@@ -42,10 +56,21 @@ from schemas.streamer import (
 )
 
 __all__ = [
+    # Envelope
+    "APIEnvelope",
+    "FieldError",
+    "ResponseStatus",
+    "success_envelope",
+    "accepted_envelope",
+    "error_envelope",
+    "conflict_envelope",
+    "not_found_envelope",
+    "validation_failed_envelope",
     # Auth
     "LoginRequest",
     "TokenResponse",
     "UserResponse",
+
     # Streamers
     "StreamerBase",
     "StreamerCreate",

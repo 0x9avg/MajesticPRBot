@@ -1,5 +1,6 @@
 """
 RabbitMQ Broker Service for publishing events.
+All events include trace_id for distributed tracing.
 """
 
 import asyncio
@@ -99,11 +100,15 @@ class BrokerService:
             return False
 
     # =========================================================================
-    # Convenience methods for specific events
+    # Convenience methods for specific events (all include trace_id)
     # =========================================================================
 
     async def emit_streamer_added(
-        self, streamer_id: int, streamer_name: str, data: dict = None
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        data: dict = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit streamer.added event."""
         return await self.publish(
@@ -113,10 +118,16 @@ class BrokerService:
                 "streamer_id": streamer_id,
                 "streamer_name": streamer_name,
                 "data": data or {},
+                "trace_id": trace_id,
             },
         )
 
-    async def emit_streamer_removed(self, streamer_id: int, streamer_name: str) -> bool:
+    async def emit_streamer_removed(
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        trace_id: str = None,
+    ) -> bool:
         """Emit streamer.removed event."""
         return await self.publish(
             "streamer.removed",
@@ -124,11 +135,16 @@ class BrokerService:
                 "event": "streamer.removed",
                 "streamer_id": streamer_id,
                 "streamer_name": streamer_name,
+                "trace_id": trace_id,
             },
         )
 
     async def emit_streamer_updated(
-        self, streamer_id: int, streamer_name: str, data: dict = None
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        data: dict = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit streamer.updated event."""
         return await self.publish(
@@ -138,6 +154,7 @@ class BrokerService:
                 "streamer_id": streamer_id,
                 "streamer_name": streamer_name,
                 "data": data or {},
+                "trace_id": trace_id,
             },
         )
 
@@ -147,6 +164,7 @@ class BrokerService:
         streamer_name: str,
         is_online: bool,
         data: dict = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit stream.state.changed event."""
         return await self.publish(
@@ -157,6 +175,7 @@ class BrokerService:
                 "streamer_name": streamer_name,
                 "is_online": is_online,
                 "data": data or {},
+                "trace_id": trace_id,
             },
         )
 
@@ -166,6 +185,7 @@ class BrokerService:
         streamer_name: str,
         pr_id: int,
         data: dict = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit spec.claimed event."""
         return await self.publish(
@@ -176,6 +196,7 @@ class BrokerService:
                 "streamer_name": streamer_name,
                 "pr_id": pr_id,
                 "data": data or {},
+                "trace_id": trace_id,
             },
         )
 
@@ -186,6 +207,7 @@ class BrokerService:
         pr_id: int,
         duration_seconds: int,
         reason: str,
+        trace_id: str = None,
     ) -> bool:
         """Emit spec.unclaimed event."""
         return await self.publish(
@@ -197,21 +219,60 @@ class BrokerService:
                 "pr_id": pr_id,
                 "duration_seconds": duration_seconds,
                 "reason": reason,
+                "trace_id": trace_id,
             },
         )
 
-    async def emit_guild_settings_updated(self, data: dict = None) -> bool:
+    async def emit_guild_settings_updated(
+        self,
+        data: dict = None,
+        trace_id: str = None,
+    ) -> bool:
         """Emit guild.settings.updated event."""
         return await self.publish(
             "guild.settings.updated",
             {
                 "event": "guild.settings.updated",
                 "data": data or {},
+                "trace_id": trace_id,
+            },
+        )
+
+    async def emit_guild_templates_updated(
+        self,
+        data: dict = None,
+        trace_id: str = None,
+    ) -> bool:
+        """Emit guild.templates.updated event."""
+        return await self.publish(
+            "guild.templates.updated",
+            {
+                "event": "guild.templates.updated",
+                "data": data or {},
+                "trace_id": trace_id,
+            },
+        )
+
+    async def emit_guild_rates_updated(
+        self,
+        data: dict = None,
+        trace_id: str = None,
+    ) -> bool:
+        """Emit guild.rates.updated event."""
+        return await self.publish(
+            "guild.rates.updated",
+            {
+                "event": "guild.rates.updated",
+                "data": data or {},
+                "trace_id": trace_id,
             },
         )
 
     async def emit_streamer_verify(
-        self, username: str, added_by_data: dict = None
+        self,
+        username: str,
+        added_by_data: dict = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit streamer.verify event for async ID resolution."""
         return await self.publish(
@@ -220,6 +281,7 @@ class BrokerService:
                 "event": "streamer.verify",
                 "username": username,
                 "added_by": added_by_data or {},
+                "trace_id": trace_id,
             },
         )
 
@@ -235,6 +297,7 @@ class BrokerService:
         game_name: str = None,
         stream_title: str = None,
         thumbnail_url: str = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit stream.state.online event."""
         return await self.publish(
@@ -248,6 +311,7 @@ class BrokerService:
                 "game_name": game_name,
                 "stream_title": stream_title,
                 "thumbnail_url": thumbnail_url,
+                "trace_id": trace_id,
             },
         )
 
@@ -255,6 +319,7 @@ class BrokerService:
         self,
         streamer_id: int,
         streamer_name: str,
+        trace_id: str = None,
     ) -> bool:
         """Emit stream.state.offline event."""
         return await self.publish(
@@ -264,6 +329,7 @@ class BrokerService:
                 "streamer_id": streamer_id,
                 "streamer_name": streamer_name,
                 "is_online": False,
+                "trace_id": trace_id,
             },
         )
 
@@ -276,6 +342,7 @@ class BrokerService:
         new_game_name: str,
         stream_title: str = None,
         thumbnail_url: str = None,
+        trace_id: str = None,
     ) -> bool:
         """Emit stream.state.category event."""
         return await self.publish(
@@ -289,14 +356,16 @@ class BrokerService:
                 "new_game_name": new_game_name,
                 "stream_title": stream_title,
                 "thumbnail_url": thumbnail_url,
+                "trace_id": trace_id,
             },
         )
 
-    async def emit_monitoring_refresh(self) -> bool:
+    async def emit_monitoring_refresh(self, trace_id: str = None) -> bool:
         """Request monitoring refresh."""
         return await self.publish(
             "monitoring.refresh",
             {
                 "event": "refresh",
+                "trace_id": trace_id,
             },
         )

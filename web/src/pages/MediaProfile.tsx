@@ -16,8 +16,8 @@ export default function MediaProfile() {
                 if (!response.ok) {
                     throw new Error('Стример не найден');
                 }
-                const data = await response.json();
-                setStreamer(data);
+                const json = await response.json();
+                setStreamer(json.data || json);
             } catch (err: any) {
                 setError(err.message);
             } finally {

@@ -86,10 +86,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Tracing middleware (must be after CORS to access request)
+from middleware import TracingMiddleware
+
+app.add_middleware(TracingMiddleware)
+
+# Exception handlers (for envelope responses)
+from middleware.exceptions import register_exception_handlers
+
+register_exception_handlers(app)
+
 # Include routers
 from routes import router as api_router
 
 app.include_router(api_router)
+
 
 
 @app.get("/health")

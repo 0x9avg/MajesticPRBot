@@ -7,6 +7,9 @@ if TYPE_CHECKING:
 
 from config import Config
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
+from middleware import get_trace_id
+from schemas.envelope import accepted_envelope, success_envelope
 from schemas.streamer import (
     StreamerCreate,
     StreamerListResponse,
@@ -28,12 +31,15 @@ def get_broker(request: Request):
     return request.app.state.broker
 
 
-@router.get("", response_model=StreamerListResponse)
+@router.get("")
 async def list_streamers(
+    request: Request,
     db: Annotated["Database", Depends(get_db)],
     online_only: bool = Query(False, description="Filter only online streamers"),
 ):
     """Get all streamers."""
+    trace_id = get_trace_id(request)
+
     if online_only:
         streamers = await db.list_online_streamers()
     else:
@@ -45,33 +51,46 @@ async def list_streamers(
         1 for s in streamers if str(s.get("game_id")) == Config.gta5_game_id
     )
 
-    return StreamerListResponse(
+    data = StreamerListResponse(
         total=len(streamers),
         online_count=online_count,
         gta_count=gta_count,
         streamers=[StreamerResponse(**s) for s in streamers],
     )
 
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message=f"Found {len(streamers)} streamers",
+            trace_id=trace_id,
+        )
+    )
 
-@router.get("/{twitch_id}", response_model=StreamerResponse)
-async def get_streamer(twitch_id: int, db: Annotated["Database", Depends(get_db)]):
+
+@router.get("/{twitch_id}")
+async def get_streamer(
+    request: Request,
+    twitch_id: int,
+    db: Annotated["Database", Depends(get_db)],
+):
     """Get a specific streamer by Twitch ID."""
-    try:
-        streamer = await db.get_streamer(twitch_id)
-        if not streamer:
-            raise HTTPException(status_code=404, detail="Стример не найден")
-        return StreamerResponse(**streamer)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error getting streamer {twitch_id}: {e}")
-        import traceback
+    trace_id = get_trace_id(request)
 
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    streamer = await db.get_streamer(twitch_id)
+    if not streamer:
+        raise HTTPException(status_code=404, detail="Стример не найден")
+
+    data = StreamerResponse(**streamer)
+    return JSONResponse(
+        content=success_envelope(
+            data=data.model_dump(mode="json"),
+            message="Streamer found",
+            trace_id=trace_id,
+        )
+    )
 
 
-@router.post("", response_model=StreamerResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_streamer(
     request: Request,
     data: StreamerCreate,
@@ -85,6 +104,8 @@ async def create_streamer(
     1. URL mode (Discord/Web): Provide `twitch_url` → triggers async verification
     2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` → direct creation
     """
+    trace_id = get_trace_id(request)
+
     # Mode B: Full data from Twitch bot - direct creation
     if data.is_full_mode:
         await db.create_streamer(
@@ -114,9 +135,19 @@ async def create_streamer(
                 data.streamer_id,
                 data.streamer_name,
                 {"priority": data.priority},
+                trace_id=trace_id,
             )
 
-        return StreamerResponse(**streamer)
+        response_data = StreamerResponse(**streamer)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=success_envelope(
+                data=response_data.model_dump(mode="json"),
+                message=f"Streamer {data.streamer_name} added",
+                code="STREAMER_ADDED",
+                trace_id=trace_id,
+            ),
+        )
 
     # Mode A: URL mode - needs Twitch verification
     username = data.twitch_url
@@ -124,17 +155,19 @@ async def create_streamer(
     if broker:
         # Emit verification event so Twitch Bot can resolve ID
         await broker.emit_streamer_verify(
-            username, {"priority": data.priority, "added_by_id": data.added_by_id}
+            username,
+            {"priority": data.priority, "added_by_id": data.added_by_id},
+            trace_id=trace_id,
         )
-
-        from fastapi.responses import JSONResponse
 
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            content={
-                "status": "pending_verification",
-                "message": f"Request to add {username} sent for verification",
-            },
+            content=accepted_envelope(
+                data={"username": username},
+                message=f"Request to add {username} sent for verification",
+                code="STREAMER_ADD_PENDING",
+                trace_id=trace_id,
+            ),
         )
 
     raise HTTPException(
@@ -142,14 +175,17 @@ async def create_streamer(
     )
 
 
-@router.patch("/{twitch_id}", response_model=StreamerResponse)
+@router.patch("/{twitch_id}")
 async def update_streamer(
+    request: Request,
     twitch_id: int,
     data: StreamerUpdate,
     db: Annotated["Database", Depends(get_db)],
     broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Update streamer properties."""
+    trace_id = get_trace_id(request)
+
     streamer = await db.get_streamer(twitch_id)
     if not streamer:
         raise HTTPException(status_code=404, detail="Стример не найден")
@@ -174,18 +210,30 @@ async def update_streamer(
             twitch_id,
             streamer["streamer_name"],
             update_data,
+            trace_id=trace_id,
         )
 
-    return StreamerResponse(**streamer)
+    response_data = StreamerResponse(**streamer)
+    return JSONResponse(
+        content=success_envelope(
+            data=response_data.model_dump(mode="json"),
+            message="Streamer updated",
+            code="STREAMER_UPDATED",
+            trace_id=trace_id,
+        )
+    )
 
 
-@router.delete("/{twitch_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{twitch_id}")
 async def remove_streamer(
+    request: Request,
     twitch_id: int,
     db: Annotated["Database", Depends(get_db)],
     broker: Annotated["BrokerService", Depends(get_broker)],
 ):
     """Delete a streamer."""
+    trace_id = get_trace_id(request)
+
     streamer = await db.get_streamer(twitch_id)
     if not streamer:
         raise HTTPException(status_code=404, detail="Стример не найден")
@@ -195,13 +243,22 @@ async def remove_streamer(
     await db.remove_streamer(twitch_id)
 
     if broker:
-        await broker.emit_streamer_removed(twitch_id, streamer_name)
+        await broker.emit_streamer_removed(twitch_id, streamer_name, trace_id=trace_id)
 
-    return None
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=success_envelope(
+            data={"streamer_id": twitch_id, "streamer_name": streamer_name},
+            message=f"Streamer {streamer_name} removed",
+            code="STREAMER_REMOVED",
+            trace_id=trace_id,
+        ),
+    )
 
 
 @router.patch("/{twitch_id}/status")
 async def update_streamer_status(
+    request: Request,
     twitch_id: int,
     data: StreamerStatusUpdate,
     db: Annotated["Database", Depends(get_db)],
@@ -213,6 +270,8 @@ async def update_streamer_status(
     Accepts JSON body for proper REST semantics.
     Now also publishes appropriate RabbitMQ events based on state changes.
     """
+    trace_id = get_trace_id(request)
+
     # Get current state BEFORE update
     streamer = await db.get_streamer(twitch_id)
     if not streamer:
@@ -260,20 +319,21 @@ async def update_streamer_status(
 
         # Execute auto-unassign if needed
         if should_unassign:
-            unassign_result = await db.unassign_pr_from_streamer(
-                twitch_id, end_reason=unassign_reason
+            unassign_results = await db.unassign_pr_from_streamer(
+                twitch_id, pr_id=None, end_reason=unassign_reason
             )
-            if unassign_result:
+            for result in unassign_results:
                 broker.logger.info(
-                    f"AUTO-UNASSIGN: {streamer_name} | Reason: {unassign_reason} | PR: {unassign_result['pr_id']} | Duration: {unassign_result['duration_seconds']}s"
+                    f"AUTO-UNASSIGN: {streamer_name} | Reason: {unassign_reason} | PR: {result['pr_id']} | Duration: {result['duration_seconds']}s"
                 )
                 # Emit spec unclaimed event for Discord bot to update UI
                 await broker.emit_spec_unclaimed(
                     streamer_id=twitch_id,
                     streamer_name=streamer_name,
-                    pr_id=unassign_result["pr_id"],
-                    duration_seconds=unassign_result["duration_seconds"],
+                    pr_id=result["pr_id"],
+                    duration_seconds=result["duration_seconds"],
                     reason=unassign_reason,
+                    trace_id=trace_id,
                 )
 
         # === BROKER NOTIFICATIONS ===
@@ -287,12 +347,14 @@ async def update_streamer_status(
                 game_name=data.game_name,
                 stream_title=data.stream_title,
                 thumbnail_url=data.stream_thumbnail_url,
+                trace_id=trace_id,
             )
         elif not data.is_online and old_is_online:
             # Stream went OFFLINE
             await broker.emit_stream_offline(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
+                trace_id=trace_id,
             )
         elif data.is_online and old_is_online and old_game_id != new_game_id:
             # Category changed while online
@@ -304,13 +366,23 @@ async def update_streamer_status(
                 new_game_name=data.game_name,
                 stream_title=data.stream_title,
                 thumbnail_url=data.stream_thumbnail_url,
+                trace_id=trace_id,
             )
 
-    return {"status": "updated"}
+    # trace_id already extracted at the start of function
+    return JSONResponse(
+        content=success_envelope(
+            data={"streamer_id": twitch_id},
+            message="Status updated",
+            code="STATUS_UPDATED",
+            trace_id=trace_id,
+        )
+    )
 
 
 @router.post("/sync_status")
 async def sync_streamers_status(
+    request: Request,
     updates: List[dict],
     db: Annotated["Database", Depends(get_db)],
 ):
@@ -361,4 +433,12 @@ async def sync_streamers_status(
 
     updated_count = await db.update_streamers_status_bulk(valid_updates)
 
-    return {"status": "synced", "updated_count": updated_count}
+    trace_id = get_trace_id(request)
+    return JSONResponse(
+        content=success_envelope(
+            data={"updated_count": updated_count},
+            message=f"Synced {updated_count} streamers",
+            code="SYNC_COMPLETE",
+            trace_id=trace_id,
+        )
+    )

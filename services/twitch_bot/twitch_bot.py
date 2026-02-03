@@ -339,6 +339,11 @@ class TwitchBot(AutoClient):
 
             # Update via API (API will publish the category change event)
             # Use Payload for Game/Title (Event Source) and StreamInfo for Thumbnail/Time (Live Source)
+            # Safely convert category_id to int
+            game_id_int = None
+            if payload.category_id and str(payload.category_id).isdigit():
+                game_id_int = int(payload.category_id)
+
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
                 True,
@@ -347,7 +352,7 @@ class TwitchBot(AutoClient):
                     if stream_info.get("started_at")
                     else None
                 ),
-                game_id=payload.category_id,
+                game_id=game_id_int,
                 game_name=payload.category_name,
                 stream_title=payload.title,
                 stream_thumbnail_url=stream_info.get("thumbnail_url"),

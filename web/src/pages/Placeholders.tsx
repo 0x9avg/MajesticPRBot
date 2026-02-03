@@ -33,7 +33,7 @@ export function MediaDashboard() {
             const response = await fetch('/api/streamers');
             if (response.ok) {
                 const json = await response.json();
-                const data = json.streamers || [];
+                const data = (json.data && json.data.streamers) || json.streamers || [];
                 // Sort by priority (desc) then by name
                 data.sort((a: any, b: any) => {
                     if (b.priority !== a.priority) return b.priority - a.priority;

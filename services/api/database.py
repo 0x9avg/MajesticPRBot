@@ -674,17 +674,7 @@ class Database:
                         else []
                     )
 
-                    # Legacy compatibility: set assigned_pr_id to Main slot if exists
-                    main_assignment = next(
-                        (a for a in result["assignments"] if not a["is_probation"]),
-                        None,
-                    )
-                    result["assigned_pr_id"] = (
-                        main_assignment["pr_id"] if main_assignment else None
-                    )
-                    result["assigned_at"] = (
-                        main_assignment["assigned_at"] if main_assignment else None
-                    )
+
 
                     return result
         except Exception as e:
@@ -912,8 +902,18 @@ class Database:
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
-                            MIN(a.nickname) as assigned_pr_name,
-                            MIN(ss.started_at) as assigned_at
+                            COALESCE(
+                                JSON_ARRAYAGG(
+                                    CASE WHEN a.pr_id IS NOT NULL THEN
+                                        JSON_OBJECT(
+                                            'pr_id', a.pr_id,
+                                            'is_probation', COALESCE(ss.is_probation, FALSE),
+                                            'assigned_at', ss.started_at
+                                        )
+                                    ELSE NULL END
+                                ),
+                                JSON_ARRAY()
+                            ) as assignments
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
                         LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
@@ -924,7 +924,14 @@ class Database:
                         ORDER BY s.priority DESC, s.streamer_name ASC
                         """
                     )
-                    return await cursor.fetchall()
+                    results = await cursor.fetchall()
+                    # Clean up assignments (remove nulls)
+                    for r in results:
+                        if isinstance(r.get("assignments"), str):
+                             r["assignments"] = json.loads(r["assignments"])
+                        if r.get("assignments"):
+                             r["assignments"] = [x for x in r["assignments"] if x is not None]
+                    return results
         except Exception as e:
             self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
             raise
@@ -1233,24 +1240,27 @@ class Database:
 
     @db_retry()
     async def unassign_pr_from_streamer(
-        self, streamer_id: int, end_reason: str = "unknown"
-    ) -> Optional[Dict[str, Any]]:
+        self,
+        streamer_id: int,
+        pr_id: Optional[int] = None,
+        end_reason: str = "unknown",
+    ) -> List[Dict[str, Any]]:
         """
-        Снятие PR-ассистента со стримера и обновление статистики.
+        Снятие PR-ассистента(ов) со стримера и обновление статистики.
 
         Args:
             streamer_id: Twitch ID стримера
+            pr_id: ID ассистента для точечного снятия. Если None - снимает всех.
             end_reason: Причина завершения
 
         Returns:
-            Словарь с данными сессии или None
+            Список словарей с данными сессий
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get assigned PR and session info (including is_probation)
-                    await cursor.execute(
-                        """
+                    # 1. Build query to find assignments to unassign
+                    query = """
                         SELECT a.pr_id, s.started_at, s.is_probation, st.streamer_name, st.priority
                         FROM assistants a
                         JOIN spec_sessions s ON s.pr_id = a.pr_id 
@@ -1259,74 +1269,107 @@ class Database:
                             AND s.ended_at IS NULL
                         JOIN streamers st ON st.streamer_id = a.assigned_to_id
                         WHERE a.assigned_to_type = 'streamer' AND a.assigned_to_id = %s
-                        """,
-                        (streamer_id,),
-                    )
-                    result = await cursor.fetchone()
+                    """
+                    params = [streamer_id]
 
-                    if not result:
-                        return None  # No one assigned
+                    if pr_id is not None:
+                        query += " AND a.pr_id = %s"
+                        params.append(pr_id)
 
-                    pr_id = result["pr_id"]
-                    started_at = result["started_at"]
-                    is_probation = result.get("is_probation", False)
-                    streamer_name = result["streamer_name"]
-                    priority = result.get("priority", 0)
+                    await cursor.execute(query, tuple(params))
+                    results = await cursor.fetchall()
 
-                    # Calculate duration
+                    if not results:
+                        return []
+
+                    unassigned_sessions = []
+                    
+                    # Prepare time calculation
                     await cursor.execute("SELECT NOW() as now")
                     now_result = await cursor.fetchone()
                     now = now_result["now"]
-
-                    if started_at and started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=timezone.utc)
                     if now.tzinfo is None:
                         now = now.replace(tzinfo=timezone.utc)
 
-                    duration_seconds = 0
-                    if started_at:
-                        duration_seconds = int((now - started_at).total_seconds())
+                    pr_ids_to_process = []
 
-                    # Close spec session
-                    await cursor.execute(
-                        """
-                        UPDATE spec_sessions 
-                        SET ended_at = NOW(), end_reason = %s
-                        WHERE pr_id = %s AND target_type = 'streamer' AND target_id = %s AND ended_at IS NULL
-                        """,
-                        (end_reason, pr_id, streamer_id),
-                    )
+                    for res in results:
+                        p_id = res["pr_id"]
+                        started_at = res["started_at"]
+                        is_probation = res.get("is_probation", False)
+                        streamer_name = res["streamer_name"]
+                        priority = res.get("priority", 0)
 
-                    # Free assistant
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET assigned_to_type = NULL, assigned_to_id = NULL
-                        WHERE pr_id = %s
-                        """,
-                        (pr_id,),
-                    )
+                        if started_at and started_at.tzinfo is None:
+                            started_at = started_at.replace(tzinfo=timezone.utc)
+
+                        duration_seconds = 0
+                        if started_at:
+                            duration_seconds = int((now - started_at).total_seconds())
+
+                        unassigned_sessions.append({
+                            "pr_id": p_id,
+                            "duration_seconds": duration_seconds,
+                            "streamer_name": streamer_name,
+                            "is_probation": is_probation,
+                            "started_at": started_at,
+                            "priority": priority,
+                        })
+                        pr_ids_to_process.append(p_id)
+
+                    # 2. Batch Update - Close Sessions
+                    if pr_ids_to_process:
+                        format_strings = ",".join(["%s"] * len(pr_ids_to_process))
+                        
+                        await cursor.execute(
+                            f"""
+                            UPDATE spec_sessions 
+                            SET ended_at = %s, end_reason = %s
+                            WHERE target_type = 'streamer' 
+                              AND target_id = %s 
+                              AND ended_at IS NULL
+                              AND pr_id IN ({format_strings})
+                            """,
+                            (now, end_reason, streamer_id, *pr_ids_to_process),
+                        )
+
+                        # 3. Batch Update - Free Assistants
+                        await cursor.execute(
+                            f"""
+                            UPDATE assistants 
+                            SET assigned_to_type = NULL, assigned_to_id = NULL
+                            WHERE pr_id IN ({format_strings})
+                            """,
+                            tuple(pr_ids_to_process),
+                        )
+                        
                     await conn.commit()
 
-            # Record Stats (Outside transaction) - now with is_probation
-            if duration_seconds > 0:
-                await self.record_spec_session(
-                    pr_id,
-                    started_at,
-                    now,
-                    priority,
-                    is_probation=is_probation,
-                )
+            # Record Stats (Outside transaction)
+            for sess in unassigned_sessions:
+                if sess["duration_seconds"] > 0:
+                    await self.record_spec_session(
+                        sess["pr_id"],
+                        sess["started_at"],
+                        now,
+                        sess["priority"],
+                        is_probation=sess["is_probation"],
+                    )
 
-            return {
-                "pr_id": pr_id,
-                "duration_seconds": duration_seconds,
-                "streamer_name": streamer_name,
-                "is_probation": is_probation,
-            }
+            # Return simplified results matching expected schema
+            return [
+                {
+                    "pr_id": s["pr_id"],
+                    "duration_seconds": s["duration_seconds"],
+                    "streamer_name": s["streamer_name"],
+                    "is_probation": s["is_probation"],
+                }
+                for s in unassigned_sessions
+            ]
+
         except Exception as e:
             self.logger.error(
-                f"Failed to unassign PR from streamer {streamer_id}: {e}",
+                f"Failed to unassign PR(s) from streamer {streamer_id}: {e}",
                 exc_info=True,
             )
             raise
@@ -1500,9 +1543,13 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url, s.stream_game_id, s.stream_game_name, s.stream_started_at, s.priority, s.added_at, s.added_by_id, s.updated_at 
+                        SELECT s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url, s.stream_game_id, s.stream_game_name, s.stream_started_at, s.priority, s.added_at, s.added_by_id, s.updated_at, ss.started_at as assigned_at
                         FROM assistants a
                         JOIN streamers s ON s.streamer_id = a.assigned_to_id
+                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
+                             AND ss.target_type = 'streamer' 
+                             AND ss.target_id = s.streamer_id 
+                             AND ss.ended_at IS NULL
                         WHERE a.pr_id = %s AND a.assigned_to_type = 'streamer'
                         """,
                         (pr_id,),

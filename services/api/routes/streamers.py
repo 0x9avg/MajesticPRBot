@@ -194,12 +194,18 @@ async def update_streamer(
     update_data = {}
     if data.priority is not None:
         update_data["priority"] = data.priority
+    if data.is_pinned is not None:
+        update_data["is_pinned"] = data.is_pinned
+    if data.stream_points_override is not None:
+        update_data["stream_points_override"] = data.stream_points_override
 
     if update_data:
         # Update via database method
         await db.update_streamer(
             twitch_id,
             priority=update_data.get("priority"),
+            is_pinned=update_data.get("is_pinned"),
+            stream_points_override=update_data.get("stream_points_override"),
         )
 
     # Get updated streamer

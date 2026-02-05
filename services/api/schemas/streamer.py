@@ -104,12 +104,16 @@ class StreamerCreate(BaseModel):
 
 class StreamerUpdate(BaseModel):
     priority: Optional[int] = Field(None, ge=0, le=3)
+    is_pinned: Optional[bool] = None
+    stream_points_override: Optional[float] = None
 
 
 class StreamerResponse(BaseModel):
     streamer_id: Snowflake
     streamer_name: str
     is_online: bool
+    is_pinned: bool = False
+    stream_points_override: Optional[float] = None
     started_at: Optional[datetime] = None
     priority: int
     game_id: Optional[Snowflake] = None

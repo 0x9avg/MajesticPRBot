@@ -145,6 +145,8 @@ class Database:
                             streamer_id BIGINT UNSIGNED PRIMARY KEY,
                             streamer_name VARCHAR(25) NOT NULL,
                             is_online BOOLEAN DEFAULT FALSE,
+                            is_pinned BOOLEAN DEFAULT FALSE,
+                            stream_points_override FLOAT DEFAULT NULL,
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
                             profile_image_url VARCHAR(512),
@@ -159,6 +161,22 @@ class Database:
                         )
                         """
                     )
+
+                    # Migration: Add columns if they don't exist
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN stream_points_override FLOAT DEFAULT NULL"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
 
                     # =========================================================
                     # 2. Settings Table
@@ -570,6 +588,7 @@ class Database:
         profile_image_url: Optional[str] = None,
     ) -> None:
         """
+
         Создание или обновление стримера в базе данных.
 
         Args:
@@ -670,7 +689,8 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT 
-                            streamer_id, streamer_name, is_online, stream_title, stream_thumbnail_url,
+                            streamer_id, streamer_name, is_online, is_pinned, stream_points_override,
+                            stream_title, stream_thumbnail_url,
                             profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
                             priority, added_at, added_by_id, updated_at
@@ -770,6 +790,11 @@ class Database:
             if profile_image_url is not None:
                 set_parts.append("profile_image_url = %s")
                 params.append(profile_image_url)
+
+            # Reset pin and overrides if stream goes offline
+            if is_online is False:
+                set_parts.append("is_pinned = FALSE")
+                set_parts.append("stream_points_override = NULL")
             
             params.append(streamer_id)
             
@@ -864,15 +889,45 @@ class Database:
     async def update_streamer(
         self,
         streamer_id: int,
-        priority: int,
+        priority: Optional[int] = None,
+        is_pinned: Optional[bool] = None,
+        stream_points_override: Optional[float] = None,
     ) -> bool:
         """Обновление настроек стримера."""
         try:
+            set_parts = []
+            params = []
+
+            if priority is not None:
+                set_parts.append("priority = %s")
+                params.append(priority)
+            
+            if is_pinned is not None:
+                set_parts.append("is_pinned = %s")
+                params.append(is_pinned)
+            
+            if stream_points_override is not None:
+                # Handle clearing the override (if passed as specific value to clear, or handle None carefully)
+                # But here passing None usually means 'no change'.
+                # To clear it, we might need a specific sentinel or just assume the frontend passes -1 or something, 
+                # but better to assume standard update logic: if passed, update it.
+                # If we want to clear it, we pass None? No, None means no change here.
+                # Let's assume frontend passes a value. If value is -1, set to NULL?
+                # Or simply: optional float.
+                # Wait, Pydantic will pass None if not provided.
+                set_parts.append("stream_points_override = %s")
+                params.append(stream_points_override)
+
+            if not set_parts:
+                return False
+
+            params.append(streamer_id)
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "UPDATE streamers SET priority = %s WHERE streamer_id = %s",
-                        (priority, streamer_id),
+                        f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s",
+                        tuple(params),
                     )
                     await conn.commit()
                     return cursor.rowcount > 0
@@ -885,6 +940,7 @@ class Database:
     @db_retry()
     async def remove_streamer(self, streamer_id: int) -> bool:
         """
+
         Удаление стримера из базы данных.
 
         Returns:
@@ -945,6 +1001,7 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
+                            s.is_pinned, s.stream_points_override,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
@@ -967,7 +1024,7 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         GROUP BY s.streamer_id
-                        ORDER BY s.priority DESC, s.streamer_name ASC
+                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
                     results = await cursor.fetchall()
@@ -994,6 +1051,7 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
+                            s.is_pinned, s.stream_points_override,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             a.pr_id as assigned_pr_id, 
@@ -1005,6 +1063,7 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         WHERE s.is_online = TRUE
+                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
                     return await cursor.fetchall()

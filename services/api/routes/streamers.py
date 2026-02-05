@@ -34,7 +34,7 @@ def get_broker(request: Request):
 @router.get("")
 async def list_streamers(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
     online_only: bool = Query(False, description="Filter only online streamers"),
 ):
     """Get all streamers."""
@@ -71,7 +71,7 @@ async def list_streamers(
 async def get_streamer(
     request: Request,
     twitch_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get a specific streamer by Twitch ID."""
     trace_id = get_trace_id(request)
@@ -94,8 +94,8 @@ async def get_streamer(
 async def create_streamer(
     request: Request,
     data: StreamerCreate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """
     Add a new streamer.
@@ -180,8 +180,8 @@ async def update_streamer(
     request: Request,
     twitch_id: int,
     data: StreamerUpdate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Update streamer properties."""
     trace_id = get_trace_id(request)
@@ -228,8 +228,8 @@ async def update_streamer(
 async def remove_streamer(
     request: Request,
     twitch_id: int,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Delete a streamer."""
     trace_id = get_trace_id(request)
@@ -261,8 +261,8 @@ async def update_streamer_status(
     request: Request,
     twitch_id: int,
     data: StreamerStatusUpdate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """
     Update streamer online status.
@@ -384,7 +384,7 @@ async def update_streamer_status(
 async def sync_streamers_status(
     request: Request,
     updates: List[dict],
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """
     Bulk update streamer statuses.

@@ -23,7 +23,7 @@ def get_db(request: Request):
 @router.get("/dashboard")
 async def get_dashboard_stats(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get aggregated statistics for the main dashboard."""
     trace_id = get_trace_id(request)

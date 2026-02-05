@@ -55,7 +55,7 @@ async def render_notification(
     request: Request,
     event_type: str,
     streamer_id: int = Query(..., description="Streamer ID"),
-    db: Annotated["Database", Depends(get_db)] = None,
+    db: "Database" = Depends(get_db),
 ):
     """
     Render a notification message for the given event type and streamer.
@@ -125,7 +125,7 @@ async def render_notification(
 @router.get("/channel")
 async def get_notification_channel(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get the configured notification channel ID."""
     trace_id = get_trace_id(request)

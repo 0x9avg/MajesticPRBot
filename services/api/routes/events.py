@@ -28,7 +28,7 @@ def get_db(request: Request):
 async def create_event(
     request: Request,
     data: EventCreate,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Create a new event."""
     trace_id = get_trace_id(request)
@@ -74,7 +74,7 @@ async def create_event(
 @router.get("/active")
 async def get_active_events(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get active events for a guild."""
     trace_id = get_trace_id(request)
@@ -92,7 +92,7 @@ async def get_active_events(
 @router.get("/scheduled")
 async def get_events_to_start(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get events that need start notification."""
     trace_id = get_trace_id(request)
@@ -111,7 +111,7 @@ async def get_events_to_start(
 async def get_user_active_event(
     request: Request,
     user_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Check if user is in an active event."""
     trace_id = get_trace_id(request)
@@ -130,7 +130,7 @@ async def get_user_active_event(
 async def get_event(
     request: Request,
     event_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get a specific event by ID."""
     trace_id = get_trace_id(request)
@@ -152,7 +152,7 @@ async def get_event(
 async def get_event_participants(
     request: Request,
     event_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get event participants."""
     trace_id = get_trace_id(request)
@@ -172,7 +172,7 @@ async def join_event(
     request: Request,
     event_id: int,
     data: EventJoinRequest,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Join an event."""
     trace_id = get_trace_id(request)
@@ -198,7 +198,7 @@ async def leave_event(
     request: Request,
     event_id: int,
     data: EventJoinRequest,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Leave an event."""
     trace_id = get_trace_id(request)
@@ -218,7 +218,7 @@ async def leave_event(
 async def end_event(
     request: Request,
     event_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """End an event."""
     trace_id = get_trace_id(request)
@@ -238,7 +238,7 @@ async def end_event(
 async def mark_notification_sent(
     request: Request,
     event_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Mark event notification as sent."""
     trace_id = get_trace_id(request)
@@ -259,7 +259,7 @@ async def update_event_message(
     request: Request,
     event_id: int,
     message_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Update event message ID."""
     trace_id = get_trace_id(request)

@@ -30,7 +30,7 @@ def get_db(request: Request):
 @router.get("")
 async def get_all_assistants(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get all PR staff members with their statistics."""
     trace_id = get_trace_id(request)
@@ -55,7 +55,7 @@ async def get_all_assistants(
 async def get_assistant(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get a specific assistant by PR ID."""
     trace_id = get_trace_id(request)
@@ -82,7 +82,7 @@ async def get_assistant(
 async def create_or_update_assistant(
     request: Request,
     assistant: AssistantCreate,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Create or update a PR staff member."""
     trace_id = get_trace_id(request)
@@ -123,7 +123,7 @@ async def update_assignment(
     request: Request,
     pr_id: int,
     assignment: AssistantAssignment,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Update assistant assignment to a streamer or event."""
     trace_id = get_trace_id(request)
@@ -176,7 +176,7 @@ async def update_assignment(
 async def delete_assistant(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Delete an assistant."""
     trace_id = get_trace_id(request)
@@ -201,7 +201,7 @@ async def delete_assistant(
 async def get_assistant_logs(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get activity logs for a specific assistant."""
     trace_id = get_trace_id(request)
@@ -220,7 +220,7 @@ async def get_assistant_logs(
 async def get_assistant_capabilities(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get assistant capabilities/permissions from role_permissions table (RBAC)."""
     trace_id = get_trace_id(request)
@@ -260,7 +260,7 @@ async def get_assistant_capabilities(
 async def reset_assistant_stats(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Reset all stats for an assistant (Manager/Admin feature)."""
     trace_id = get_trace_id(request)
@@ -287,7 +287,7 @@ async def update_daily_stats(
     request: Request,
     pr_id: int,
     data: "DailyStatsUpdate",
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Manually update daily stats for a specific date (Manager feature)."""
     trace_id = get_trace_id(request)
@@ -328,7 +328,7 @@ async def create_manual_session(
     request: Request,
     pr_id: int,
     data: "ManualSpecSession",
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Create a manual spec session (Admin feature for corrections)."""
     trace_id = get_trace_id(request)

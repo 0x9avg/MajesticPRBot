@@ -34,8 +34,8 @@ def get_broker(request: Request):
 async def refresh_monitoring(
     request: Request,
     data: MonitoringRefreshResponse,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """
     Trigger monitoring message refresh.
@@ -74,7 +74,7 @@ async def refresh_monitoring(
 @router.get("/status")
 async def get_monitoring_status(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """
     Get monitoring view model.

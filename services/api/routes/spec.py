@@ -42,7 +42,7 @@ def get_broker(request: Request):
 @router.get("/active")
 async def get_active_specs(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get all currently active spec sessions."""
     trace_id = get_trace_id(request)
@@ -72,8 +72,8 @@ async def get_active_specs(
 async def claim_streamer(
     request: Request,
     data: SpecClaimRequest,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Claim a streamer for a PR assistant (supports Probation Slot Logic)."""
     trace_id = get_trace_id(request)
@@ -141,8 +141,8 @@ async def claim_streamer(
 async def unclaim_streamer(
     request: Request,
     data: SpecUnclaimRequest,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Unclaim a streamer."""
     trace_id = get_trace_id(request)
@@ -212,8 +212,8 @@ async def unclaim_streamer(
 async def transfer_streamer(
     request: Request,
     data: SpecTransferRequest,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Transfer a streamer from one PR to another."""
     trace_id = get_trace_id(request)
@@ -281,8 +281,8 @@ async def transfer_streamer(
 async def swap_streamers(
     request: Request,
     data: SpecSwapRequest,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Swap streamers between two PR assistants."""
     trace_id = get_trace_id(request)
@@ -326,7 +326,7 @@ async def swap_streamers(
 async def get_pr_sessions(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
     limit: int = 50,
 ):
     """Get recent spec sessions for a PR assistant."""
@@ -348,7 +348,7 @@ async def get_pr_sessions(
 async def get_current_streamer_for_pr(
     request: Request,
     pr_id: int,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get the streamer currently assigned to a PR assistant."""
     trace_id = get_trace_id(request)

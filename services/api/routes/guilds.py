@@ -47,7 +47,7 @@ def get_broker(request: Request):
 @router.get("")
 async def get_guild_all(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get all guild settings (aggregated view)."""
     trace_id = get_trace_id(request)
@@ -76,7 +76,7 @@ async def get_guild_all(
 @router.get("/settings")
 async def get_guild_settings(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get core wiring settings (channel/role/message IDs)."""
     trace_id = get_trace_id(request)
@@ -101,8 +101,8 @@ async def get_guild_settings(
 async def update_guild_settings(
     request: Request,
     data: GuildSettingsUpdate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Update core wiring settings."""
     trace_id = get_trace_id(request)
@@ -144,7 +144,7 @@ async def update_guild_settings(
 @router.get("/templates")
 async def get_guild_templates(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get notification templates."""
     trace_id = get_trace_id(request)
@@ -188,8 +188,8 @@ async def get_guild_templates(
 async def update_guild_templates(
     request: Request,
     data: GuildTemplatesUpdate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Update notification templates."""
     trace_id = get_trace_id(request)
@@ -243,7 +243,7 @@ async def update_guild_templates(
 async def get_template_by_type(
     request: Request,
     event_type: str,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get a specific notification template by event type."""
     trace_id = get_trace_id(request)
@@ -269,7 +269,7 @@ async def get_template_by_type(
 @router.get("/rates")
 async def get_guild_rates(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
+    db: "Database" = Depends(get_db),
 ):
     """Get point rates per priority."""
     trace_id = get_trace_id(request)
@@ -294,8 +294,8 @@ async def get_guild_rates(
 async def update_guild_rates(
     request: Request,
     data: GuildRatesUpdate,
-    db: Annotated["Database", Depends(get_db)],
-    broker: Annotated["BrokerService", Depends(get_broker)],
+    db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Update point rates per priority."""
     trace_id = get_trace_id(request)

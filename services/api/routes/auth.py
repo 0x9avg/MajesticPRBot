@@ -37,8 +37,8 @@ def get_auth(request: Request):
 async def login(
     request: Request,
     login_data: LoginRequest,
-    db: Annotated["Database", Depends(get_db)],
-    auth: Annotated["AuthService", Depends(get_auth)],
+    db: "Database" = Depends(get_db),
+    auth: "AuthService" = Depends(get_auth),
 ):
     """Authenticate user and return tokens."""
     # Get user
@@ -118,9 +118,9 @@ async def login(
 @router.post("/logout")
 async def logout(
     request: Request,
-    db: Annotated["Database", Depends(get_db)],
-    auth: Annotated["AuthService", Depends(get_auth)],
-    credentials: Annotated["HTTPAuthorizationCredentials", Depends(security)],
+    db: "Database" = Depends(get_db),
+    auth: "AuthService" = Depends(get_auth),
+    credentials: "HTTPAuthorizationCredentials" = Depends(security),
 ):
     """Logout user and revoke all sessions."""
     try:
@@ -144,9 +144,9 @@ async def logout(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(
-    db: Annotated["Database", Depends(get_db)],
-    auth: Annotated["AuthService", Depends(get_auth)],
-    credentials: Annotated["HTTPAuthorizationCredentials", Depends(security)],
+    db: "Database" = Depends(get_db),
+    auth: "AuthService" = Depends(get_auth),
+    credentials: "HTTPAuthorizationCredentials" = Depends(security),
 ):
     """Get current authenticated user info."""
     try:

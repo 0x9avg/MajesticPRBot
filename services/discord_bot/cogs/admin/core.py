@@ -123,14 +123,7 @@ class AdminCore(commands.Cog):
         await self._ensure_control_panel()
 
     async def _ensure_control_panel(self):
-        """
-        Ensure control panel message exists and is up-to-date.
-        Robust algorithm:
-        1. Get settings from API
-        2. Try to fetch existing message
-        3. If found: edit it to update view
-        4. If not found: create new message and save ID to API
-        """
+        """Ensure control panel message exists and is up-to-date."""
         try:
             settings = await self.api.get_guild_settings()
             if not settings:
@@ -150,7 +143,7 @@ class AdminCore(commands.Cog):
             old_msg_id = settings.get("control_panel_message_id")
             old_msg = None
 
-            # Try to fetch existing message
+
             if old_msg_id:
                 try:
                     old_msg = await channel.fetch_message(int(old_msg_id))
@@ -162,7 +155,7 @@ class AdminCore(commands.Cog):
                     old_msg = None
 
             if old_msg:
-                # Update existing message
+
                 try:
                     embed = get_main_embed()
                     await old_msg.edit(embed=embed, view=AdminMainView(self.bot))
@@ -170,7 +163,7 @@ class AdminCore(commands.Cog):
                 except Exception as e:
                     self.bot.logger.error(f"Failed to edit control panel: {e}")
             else:
-                # Create new panel
+
                 embed = get_main_embed()
                 msg = await channel.send(embed=embed, view=AdminMainView(self.bot))
 

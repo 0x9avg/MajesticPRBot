@@ -1,7 +1,6 @@
-"""
-API Client for Discord Bot.
+"""API Client for Discord Bot.
+
 HTTP client for communicating with the central API service.
-Полностью независимый - не импортирует из других сервисов.
 """
 
 import logging
@@ -29,7 +28,6 @@ class APIClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
         if self._session is None or self._session.closed:
             headers = {"Content-Type": "application/json"}
             if self.api_token:
@@ -41,7 +39,6 @@ class APIClient:
         return self._session
 
     async def close(self) -> None:
-        """Close the HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
             self.logger.debug("API client session closed")
@@ -53,7 +50,6 @@ class APIClient:
         data: Optional[Dict] = None,
         params: Optional[Dict] = None,
     ) -> Optional[Dict]:
-        """Make HTTP request to API."""
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
         if endpoint == "/health":
@@ -102,9 +98,7 @@ class APIClient:
             self.logger.error(f"Unexpected error in API request: {e}", exc_info=True)
             return None
 
-    # =========================================================================
-    # System / Service API
-    # =========================================================================
+
 
     async def get_health(self) -> Dict[str, Any]:
         """Get API health status."""
@@ -124,21 +118,16 @@ class APIClient:
         # Fallback to refreshing monitoring.
         return await self.refresh_monitoring(force=True)
 
-    # =========================================================================
-    # Streamers API
-    # =========================================================================
+
 
     async def list_all_streamers(self) -> List[Dict]:
         """Get all streamers."""
         result = await self._request("GET", "/streamers")
-        # Direct result now contains the data payload (which has "streamers" list in it? No, list_all_streamers returns envelope with data which has streamers list)
-        # API Response: data = {"total": X, "online_count": Y, "streamers": [...]}
         if result and "streamers" in result:
              return result["streamers"]
         return []
 
     async def get_streamer(self, twitch_id: int) -> Optional[Dict]:
-        """Get a specific streamer."""
         return await self._request("GET", f"/streamers/{twitch_id}")
 
     async def add_streamer(
@@ -147,7 +136,6 @@ class APIClient:
         priority: int = 0,
         added_by_id: int = 0,
     ) -> Optional[Dict]:
-        """Add a streamer (API resolves Twitch ID)."""
         return await self._request(
             "POST",
             "/streamers",
@@ -171,7 +159,6 @@ class APIClient:
         return await self._request("PATCH", f"/streamers/{streamer_id}", data=data)
 
     async def delete_streamer(self, twitch_id: int) -> bool:
-        """Delete a streamer."""
         result = await self._request("DELETE", f"/streamers/{twitch_id}")
         return result is not None and result.get("status") == "success"
 
@@ -180,9 +167,7 @@ class APIClient:
         result = await self.get_streamer(twitch_id)
         return result is not None and "detail" not in result
 
-    # =========================================================================
-    # Guild Settings API
-    # =========================================================================
+
 
     async def get_guild_settings(self) -> Optional[Dict]:
         """Get guild settings."""
@@ -194,7 +179,7 @@ class APIClient:
 
     async def update_guild_settings(self, **kwargs) -> Optional[Dict]:
         """Update guild settings."""
-        return await self._request("PATCH", "/guild", data=kwargs)
+        return await self._request("PATCH", "/guild/settings", data=kwargs)
 
     async def update_guild_templates(self, templates: Dict[str, str]) -> Optional[Dict]:
         """Update notification templates."""
@@ -220,9 +205,7 @@ class APIClient:
 
         return await self._request("PATCH", "/guild/rates", data=data)
 
-    # =========================================================================
-    # Spec System API
-    # =========================================================================
+
 
     async def claim_streamer(
         self, streamer_id: int, pr_id: int, is_probation: bool = False
@@ -296,9 +279,7 @@ class APIClient:
             return result.get("streamer")
         return None
 
-    # =========================================================================
-    # Assistants API
-    # =========================================================================
+
 
     async def get_assistants(self) -> List[Dict]:
         """Get all assistants."""
@@ -341,9 +322,7 @@ class APIClient:
             "POST", f"/assistants/{user_id}/subtract-time", params={"seconds": seconds}
         )
 
-    # =========================================================================
-    # Monitoring API
-    # =========================================================================
+
 
     async def refresh_monitoring(self, force: bool = False) -> Optional[Dict]:
         """Request monitoring refresh."""
@@ -375,9 +354,7 @@ class APIClient:
         """Get PR leaderboard."""
         return await self._request("GET", "/stats/leaderboard", params={"limit": limit})
 
-    # =========================================================================
-    # Event API
-    # =========================================================================
+
 
     async def create_event(
         self,
@@ -452,9 +429,7 @@ class APIClient:
         result = await self._request("GET", f"/events/{event_id}/participants")
         return result if isinstance(result, list) else []
 
-    # =========================================================================
-    # Extended Streamers API
-    # =========================================================================
+
 
     async def update_streamer_priority(self, streamer_id: int, priority: int) -> bool:
         """Update streamer priority."""
@@ -475,9 +450,7 @@ class APIClient:
             return streamer.get("assigned_pr_id")
         return None
 
-    # =========================================================================
-    # Extended Assistants API
-    # =========================================================================
+
 
     async def get_pr_total_time(self, pr_id: int) -> int:
         """Get total spec time for a PR in seconds."""
@@ -564,9 +537,7 @@ class APIClient:
         )
         return result is not None and "detail" not in result
 
-    # =========================================================================
-    # Extended Guild API
-    # =========================================================================
+
 
     async def get_pr_actions_channel(self) -> Optional[int]:
         """Get PR actions channel ID."""
@@ -610,9 +581,7 @@ class APIClient:
         result = await self._request("PATCH", "/guild/templates", data=data)
         return result is not None
 
-    # =========================================================================
-    # Channel Management API
-    # =========================================================================
+
 
     async def set_notification_channel(self, channel_id: int) -> bool:
         """Set notification channel."""

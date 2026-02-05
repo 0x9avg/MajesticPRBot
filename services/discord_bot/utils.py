@@ -1,4 +1,4 @@
-"""Utility functions for Discord Bot (Ported from Legacy)."""
+"""Utility functions for Discord Bot."""
 
 import datetime
 import logging
@@ -257,9 +257,7 @@ def create_streamers_component(
                     prob_pr = a.get("pr_id")
                 else:
                     main_pr = a.get("pr_id")
-        elif streamer.get("assigned_pr_id"):
-             # Legacy fallback
-             main_pr = streamer.get("assigned_pr_id")
+
 
         lines = []
         # Line 1: Main or Free

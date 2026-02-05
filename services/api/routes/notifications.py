@@ -26,7 +26,7 @@ def get_db(request: Request):
 
 # Default templates
 DEFAULT_TEMPLATES = {
-    "stream_online": "**{streamer_name}** начал стрим! Играет в **{game_name}**\n{streamer_link}",
+    "stream_online": "**{streamer_name}** начал стрим!",
     "stream_offline": "**{streamer_name}** закончил стрим.",
     "category_to_gta": "🎮 **{streamer_name}** переключился на GTA 5!",
     "category_from_gta": "📴 **{streamer_name}** вышел из GTA 5.",

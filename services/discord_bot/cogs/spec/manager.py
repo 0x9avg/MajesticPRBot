@@ -1,5 +1,5 @@
 """Spec Manager - Claim/Unclaim system for PR assistants.
-Ported from Legacy to Microservices (API-based).
+
 All interactions via BUTTONS only (per GEMINI.md - no slash commands except /setup).
 """
 
@@ -63,11 +63,11 @@ class Spec(commands.Cog):
         """Handle all spec-related button clicks."""
         custom_id = interaction.component.custom_id or ""
 
-        # Filter: only handle spec_ and probation_choice_ buttons
+
         if not custom_id.startswith(("spec_", "probation_choice_")):
             return
 
-        # Defer for all except probation choice (which shows ephemeral view)
+
         if not custom_id.startswith("probation_choice_"):
             try:
                 if not interaction.response.is_done():
@@ -96,8 +96,8 @@ class Spec(commands.Cog):
             self.logger.error(f"Spec button error {custom_id}: {e}", exc_info=True)
             try:
                 await interaction.followup.send("❌ Ошибка.", ephemeral=True)
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to send error response: {e}")
 
     async def _handle_claim_button(
         self, interaction: disnake.MessageInteraction, custom_id: str
@@ -162,8 +162,8 @@ class Spec(commands.Cog):
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
-        except:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Defer failed: {e}")
 
         result = await self.api.claim_streamer(
             streamer_id, pr_id, is_probation=is_probation
@@ -289,8 +289,8 @@ class Spec(commands.Cog):
                     )
                     try:
                         await interaction.message.edit(content=msg, components=[])
-                    except:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Failed to edit message: {e}")
                     await self.update_monitoring()
                 else:
                     error = result.get("detail", "Ошибка") if result else "API Error"
@@ -305,8 +305,8 @@ class Spec(commands.Cog):
                     msg = f"✅ Ты принял стримера **{result.get('streamer_name')}**!"
                     try:
                         await interaction.message.edit(content=msg, components=[])
-                    except:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Failed to edit message: {e}")
                     await self.update_monitoring()
                 else:
                     error = result.get("detail", "Ошибка") if result else "API Error"
@@ -330,8 +330,8 @@ class Spec(commands.Cog):
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
-        except:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Defer failed: {e}")
 
         try:
             selected = interaction.values[0]

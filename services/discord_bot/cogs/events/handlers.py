@@ -1,6 +1,4 @@
-"""Events Handlers - Event Join/Leave Buttons.
-Handles event_join_{id} button clicks and updates event messages.
-"""
+"""Events Handlers - Event Join/Leave Buttons."""
 
 import disnake
 from disnake import MessageInteraction
@@ -77,18 +75,18 @@ class EventsHandlers(commands.Cog):
         """Handle event join/leave buttons."""
         custom_id = interaction.component.custom_id or ""
 
-        # 1. STRICT FILTER
+
         if not custom_id.startswith(("event_join_", "event_leave_")):
             return
 
-        # 2. SAFE DEFER
+
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
         except Exception as e:
             self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
 
-        # 3. EXECUTE
+
         try:
             if custom_id.startswith("event_join_"):
                 event_id = int(custom_id.replace("event_join_", ""))
@@ -104,8 +102,8 @@ class EventsHandlers(commands.Cog):
                 await interaction.followup.send(
                     "❌ Произошла ошибка обработки.", ephemeral=True
                 )
-            except:
-                pass
+            except Exception as e:
+                self.bot.logger.debug(f"Failed to send error response: {e}")
 
     async def _handle_event_join(self, interaction: MessageInteraction, event_id: int):
         """Handle user joining an event."""

@@ -187,6 +187,7 @@ class AdminNotifications(commands.Cog):
                 await interaction.response.defer(ephemeral=True)
         except Exception as e:
             self.bot.logger.warning(f"Failed to defer {custom_id}: {e}")
+            return
 
         # 3. EXECUTE
         try:

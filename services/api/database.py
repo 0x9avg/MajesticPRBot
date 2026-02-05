@@ -166,6 +166,7 @@ class Database:
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS settings (
+                            id INT PRIMARY KEY DEFAULT 1,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
                             monitoring_message_id BIGINT UNSIGNED,
@@ -365,6 +366,9 @@ class Database:
                     # Initialize default permissions
                     await self._init_default_permissions(conn)
 
+                    # Ensure singleton settings row
+                    await self._ensure_singleton_settings(conn)
+
                     self.logger.info("Database initialized successfully (V2 Final)")
         except Exception as e:
             self.logger.error(f"Failed to initialize database: {e}", exc_info=True)
@@ -432,6 +436,48 @@ class Database:
                 )
             await conn.commit()
             self.logger.debug("  ✓ Default permissions initialized")
+
+    async def _ensure_singleton_settings(self, conn):
+        """Ensure settings table has exactly one row."""
+        async with conn.cursor() as cursor:
+            # Check how many rows exist
+            await cursor.execute("SELECT COUNT(*) as count FROM settings")
+            result = await cursor.fetchone()
+            row_count = result["count"]
+
+            if row_count == 0:
+                # No settings row - initialize with defaults
+                self.logger.debug("  ℹ No settings row found, will be created on first update")
+            elif row_count == 1:
+                # Perfect - single row exists
+                self.logger.debug("  ✓ Settings table has exactly 1 row")
+            else:
+                # Multiple rows - keep first, delete rest
+                self.logger.warning(
+                    f"  ⚠ Settings table has {row_count} rows, cleaning up to keep only 1..."
+                )
+                # Get the first row
+                await cursor.execute("SELECT * FROM settings LIMIT 1")
+                survivor = await cursor.fetchone()
+
+                # Delete all rows
+                await cursor.execute("DELETE FROM settings")
+
+                # Re-insert the survivor (or create default if needed)
+                if survivor:
+                    # Build INSERT query dynamically from survivor data
+                    columns = list(survivor.keys())
+                    values = [survivor[col] for col in columns]
+                    placeholders = ", ".join(["%s"] * len(columns))
+                    column_names = ", ".join(columns)
+
+                    await cursor.execute(
+                        f"INSERT INTO settings ({column_names}) VALUES ({placeholders})",
+                        tuple(values),
+                    )
+                    self.logger.info("  ✓ Settings table cleaned up to 1 row")
+
+                await conn.commit()
 
     async def get_role_permissions(self, role: str) -> dict:
         """Get permissions for a role from role_permissions table."""
@@ -1060,20 +1106,18 @@ class Database:
                         else (existing.get("assistant_role_id") if existing else None)
                     )
 
+                    # 1. Try to UPDATE first (Atomic update of existing row)
                     await cursor.execute(
                         """
-                        INSERT INTO settings (notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s) AS new_settings
-                        ON DUPLICATE KEY UPDATE 
-                            notification_channel_id = new_settings.notification_channel_id, 
-                            monitoring_channel_id = new_settings.monitoring_channel_id, 
-                            monitoring_message_id = new_settings.monitoring_message_id,
-                            pr_actions_channel_id = new_settings.pr_actions_channel_id,
-                            control_panel_channel_id = new_settings.control_panel_channel_id,
-                            control_panel_message_id = new_settings.control_panel_message_id,
-                            assistant_role_id = new_settings.assistant_role_id
-
-
+                        UPDATE settings SET
+                            notification_channel_id = %s,
+                            monitoring_channel_id = %s,
+                            monitoring_message_id = %s,
+                            pr_actions_channel_id = %s,
+                            control_panel_channel_id = %s,
+                            control_panel_message_id = %s,
+                            assistant_role_id = %s
+                        LIMIT 1
                         """,
                         (
                             final_notification,
@@ -1085,6 +1129,25 @@ class Database:
                             final_pr_role,
                         ),
                     )
+                    
+                    # 2. If no row updated, try to INSERT atomically (only if empty)
+                    if cursor.rowcount == 0:
+                        await cursor.execute(
+                            """
+                            INSERT INTO settings (id, notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
+                            SELECT 1, %s, %s, %s, %s, %s, %s, %s
+                            WHERE NOT EXISTS (SELECT 1 FROM settings)
+                            """,
+                            (
+                                final_notification,
+                                final_monitoring_channel,
+                                final_monitoring_message,
+                                final_pr_actions_channel,
+                                final_control_panel_channel,
+                                final_control_panel_message,
+                                final_pr_role,
+                            ),
+                        )
                     await conn.commit()
                     self.logger.debug("✓ Guild settings saved successfully")
 
@@ -1102,7 +1165,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
                     )
                     return await cursor.fetchone()
         except Exception as e:
@@ -1132,7 +1195,7 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT notification_templates FROM settings")
+                    await cursor.execute("SELECT notification_templates FROM settings WHERE id = 1")
                     result = await cursor.fetchone()
                     if result and result.get("notification_templates"):
                         templates = json.loads(result["notification_templates"])
@@ -1681,7 +1744,7 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT pr_actions_channel_id FROM settings")
+                    await cursor.execute("SELECT pr_actions_channel_id FROM settings WHERE id = 1")
                     result = await cursor.fetchone()
                     return result.get("pr_actions_channel_id") if result else None
         except Exception as e:
@@ -2120,7 +2183,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT p0_rate, p1_rate, p2_rate, p3_rate FROM settings",
+                        "SELECT p0_rate, p1_rate, p2_rate, p3_rate FROM settings WHERE id = 1",
                     )
                     result = await cursor.fetchone()
                     if result and result["p0_rate"] is not None:
@@ -2147,6 +2210,7 @@ class Database:
                         """
                         UPDATE settings 
                         SET p0_rate = %s, p1_rate = %s, p2_rate = %s, p3_rate = %s
+                        WHERE id = 1
                         """,
                         (rates[0], rates[1], rates[2], rates[3]),
                     )
@@ -2235,7 +2299,7 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT probation_rate FROM settings")
+                    await cursor.execute("SELECT probation_rate FROM settings WHERE id = 1")
                     result = await cursor.fetchone()
                     return result.get("probation_rate", 1.2) if result else 1.2
         except Exception:
@@ -2358,14 +2422,22 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # 1. Try to UPDATE first
                     await cursor.execute(
-                        """
-                        INSERT INTO settings (assistant_role_id)
-                        VALUES (%s) AS new
-                        ON DUPLICATE KEY UPDATE assistant_role_id = new.assistant_role_id
-                        """,
+                        "UPDATE settings SET assistant_role_id = %s LIMIT 1",
                         (role_id,),
                     )
+                    
+                    # 2. If no row updated, INSERT atomically if empty
+                    if cursor.rowcount == 0:
+                        await cursor.execute(
+                            """
+                            INSERT INTO settings (id, assistant_role_id) 
+                            SELECT 1, %s 
+                            WHERE NOT EXISTS (SELECT 1 FROM settings)
+                            """,
+                            (role_id,),
+                        )
                     await conn.commit()
         except Exception as e:
             self.logger.error(f"Failed to set assistant role: {e}", exc_info=True)
@@ -2682,27 +2754,35 @@ class Database:
             if not guild:  # Guild must exist
                 return False
 
-            current_templates = guild.get(
-                "notification_templates", Config.template_defaults
-            )
+            # Get existing templates from DB
+            raw_templates = guild.get("notification_templates")
 
-            if not isinstance(current_templates, dict):
-                current_templates = Config.template_defaults
+            # Parse JSON string if needed, otherwise start with empty dict
+            if isinstance(raw_templates, str):
+                try:
+                    current_templates = json.loads(raw_templates)
+                except json.JSONDecodeError:
+                    current_templates = {}
+            elif isinstance(raw_templates, dict):
+                current_templates = raw_templates.copy()
+            else:
+                current_templates = {}
 
-            if template_stream_online:
+            # Update only the provided fields
+            if template_stream_online is not None:
                 current_templates["stream_online"] = template_stream_online
-            if template_stream_offline:
+            if template_stream_offline is not None:
                 current_templates["stream_offline"] = template_stream_offline
-            if template_category_to_gta:
+            if template_category_to_gta is not None:
                 current_templates["category_to_gta"] = template_category_to_gta
-            if template_category_from_gta:
+            if template_category_from_gta is not None:
                 current_templates["category_from_gta"] = template_category_from_gta
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         "UPDATE settings SET notification_templates = %s",
-                        (json.dumps(current_templates)),
+                        (json.dumps(current_templates),),
                     )
                     await conn.commit()
                     return True

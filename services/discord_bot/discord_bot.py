@@ -1,7 +1,4 @@
-"""
-Discord Bot - полностью независимый микросервис.
-Общается с внешним миром только через API и RabbitMQ.
-"""
+"""Discord Bot - полностью независимый микросервис."""
 
 from __future__ import annotations
 
@@ -24,15 +21,6 @@ from utils import UserAuthCache
 class DiscordBot(commands.Bot):
     """
     Discord Bot микросервис.
-
-    НЕ имеет прямых ссылок на:
-    - database
-    - twitch_bot
-    - другие сервисы
-
-    Использует только:
-    - api_client для HTTP запросов к API
-    - broker для получения событий через RabbitMQ
     """
 
     api_client: "APIClient"
@@ -174,8 +162,8 @@ class DiscordBot(commands.Bot):
                     await interaction.followup.send(msg, ephemeral=True)
                 else:
                     await interaction.response.send_message(msg, ephemeral=True)
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to send forbidden message: {e}")
             return
 
         if isinstance(error, commands.CommandOnCooldown):
@@ -197,8 +185,8 @@ class DiscordBot(commands.Bot):
                     await interaction.followup.send(embed=embed, ephemeral=True)
                 else:
                     await interaction.response.send_message(embed=embed, ephemeral=True)
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to send cooldown message: {e}")
             return
 
         # Log other errors
@@ -211,8 +199,8 @@ class DiscordBot(commands.Bot):
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.response.send_message(msg, ephemeral=True)
-        except:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Failed to send error message: {e}")
 
     async def close(self):
         """Cleanup on shutdown."""

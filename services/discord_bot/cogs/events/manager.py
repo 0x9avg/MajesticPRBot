@@ -218,6 +218,29 @@ class EventCreateModal(disnake.ui.Modal):
 
             await interaction.edit_original_message(content="✅ Событие создано!")
 
+            # Refresh the persistent Control Panel Message
+            try:
+                guild_settings = await self.bot.api_client.get_guild_settings()
+                if guild_settings:
+                    cp_channel_id = guild_settings.get("control_panel_channel_id")
+                    cp_message_id = guild_settings.get("control_panel_message_id")
+                    
+                    if cp_channel_id and cp_message_id:
+                        channel = self.bot.get_channel(int(cp_channel_id))
+                        if channel:
+                            try:
+                                msg = await channel.fetch_message(int(cp_message_id))
+                                from .manager import get_events_embed, EventsView
+                                embed = await get_events_embed(self.bot.api_client)
+                                await msg.edit(embed=embed, view=EventsView(self.bot))
+                                self.bot.logger.info(f"✓ Updated control panel message in {channel.name}")
+                            except disnake.NotFound:
+                                self.bot.logger.warning("Control Panel message not found (deleted?)")
+                            except Exception as e:
+                                self.bot.logger.error(f"Failed to edit control panel: {e}")
+            except Exception as e:
+                self.bot.logger.error(f"Control panel refresh error: {e}")
+
             # Refresh monitoring
             await self.bot.api_client.refresh_monitoring()
 
@@ -278,6 +301,27 @@ class EventEndSelect(disnake.ui.StringSelect):
                         pass
 
             await interaction.edit_original_response(content="✅ Событие завершено!")
+
+            # Refresh the persistent Control Panel Message
+            try:
+                guild_settings = await interaction.bot.api_client.get_guild_settings()
+                if guild_settings:
+                    cp_channel_id = guild_settings.get("control_panel_channel_id")
+                    cp_message_id = guild_settings.get("control_panel_message_id")
+                    
+                    if cp_channel_id and cp_message_id:
+                        channel = interaction.bot.get_channel(int(cp_channel_id))
+                        if channel:
+                            try:
+                                msg = await channel.fetch_message(int(cp_message_id))
+                                from .manager import get_events_embed, EventsView
+                                embed = await get_events_embed(interaction.bot.api_client)
+                                await msg.edit(embed=embed, view=EventsView(interaction.bot))
+                                interaction.bot.logger.info(f"✓ Updated control panel message in {channel.name}")
+                            except disnake.NotFound:
+                                interaction.bot.logger.warning("Control Panel message not found (deleted?)")
+            except Exception as e:
+                interaction.bot.logger.error(f"Failed to refresh persistent panel: {e}")
 
             # Refresh monitoring
             await interaction.bot.api_client.refresh_monitoring()

@@ -155,7 +155,26 @@ async def get_guild_templates(
         await db.create_or_update_guild()
         settings = await db.get_guild()
 
-    data = GuildTemplatesResponse(**settings)
+    # Parse notification_templates JSON and map to schema fields
+    raw_templates = settings.get("notification_templates") if settings else None
+    templates_dict = {}
+
+    if isinstance(raw_templates, str):
+        import json
+        try:
+            templates_dict = json.loads(raw_templates)
+        except json.JSONDecodeError:
+            templates_dict = {}
+    elif isinstance(raw_templates, dict):
+        templates_dict = raw_templates
+
+    # Map DB keys to schema keys, using defaults for missing
+    data = GuildTemplatesResponse(
+        stream_online=templates_dict.get("stream_online", Config.template_defaults.get("stream_online")),
+        stream_offline=templates_dict.get("stream_offline", Config.template_defaults.get("stream_offline")),
+        category_to_gta=templates_dict.get("category_to_gta", Config.template_defaults.get("category_to_gta")),
+        category_from_gta=templates_dict.get("category_from_gta", Config.template_defaults.get("category_from_gta")),
+    )
     return JSONResponse(
         content=success_envelope(
             data=data.model_dump(mode="json"),
@@ -176,10 +195,10 @@ async def update_guild_templates(
     trace_id = get_trace_id(request)
 
     await db.update_guild_templates(
-        template_stream_online=data.template_stream_online,
-        template_stream_offline=data.template_stream_offline,
-        template_category_to_gta=data.template_category_to_gta,
-        template_category_from_gta=data.template_category_from_gta,
+        template_stream_online=data.stream_online,
+        template_stream_offline=data.stream_offline,
+        template_category_to_gta=data.category_to_gta,
+        template_category_from_gta=data.category_from_gta,
     )
 
     settings = await db.get_guild()
@@ -190,7 +209,26 @@ async def update_guild_templates(
             trace_id=trace_id,
         )
 
-    response_data = GuildTemplatesResponse(**settings)
+    # Parse notification_templates JSON and map to schema fields
+    raw_templates = settings.get("notification_templates") if settings else None
+    templates_dict = {}
+
+    if isinstance(raw_templates, str):
+        import json
+        try:
+            templates_dict = json.loads(raw_templates)
+        except json.JSONDecodeError:
+            templates_dict = {}
+    elif isinstance(raw_templates, dict):
+        templates_dict = raw_templates
+
+    # Map DB keys to schema keys, using defaults for missing
+    response_data = GuildTemplatesResponse(
+        stream_online=templates_dict.get("stream_online", Config.template_defaults.get("stream_online")),
+        stream_offline=templates_dict.get("stream_offline", Config.template_defaults.get("stream_offline")),
+        category_to_gta=templates_dict.get("category_to_gta", Config.template_defaults.get("category_to_gta")),
+        category_from_gta=templates_dict.get("category_from_gta", Config.template_defaults.get("category_from_gta")),
+    )
     return JSONResponse(
         content=success_envelope(
             data=response_data.model_dump(mode="json"),

@@ -3,15 +3,14 @@ import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import MainLayout from './components/MainLayout'
 import ProtectedRoute from './components/ProtectedRoute'
-import {
-  MainHub,
-  MediaList,
-  PRStats,
-  SpectateLogs,
-  CreateEvent,
-  AdminPanel,
-  BotDashboard
-} from './pages/Placeholders'
+import MainHub from './pages/hub/MainHub'
+import MediaList from './pages/media/MediaList'
+import PRStats from './pages/stats/PRStats'
+import SpectateLogs from './pages/logs/SpectateLogs'
+import CreateEvent from './pages/admin/components/CreateEvent'
+import AdminPanel from './pages/admin/AdminPanel'
+import BotDashboard from './pages/dashboard/BotDashboard'
+
 import UserProfile from './pages/UserProfile'
 import MediaProfile from './pages/MediaProfile'
 

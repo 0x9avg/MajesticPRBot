@@ -1,66 +1,198 @@
-
-import { UserPlus, ShieldAlert, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
+import { UserPlus, ShieldAlert, AlertCircle, Copy, Check } from 'lucide-react';
 import { CustomSelect } from '../../../components/CustomInputs';
 
-const UserRegistration = () => (
-    <div className="max-w-2xl mx-auto space-y-8 animate-[fadeIn_0.3s_ease-in-out]">
-        <div className="flex items-center gap-4 border-b border-white/10 pb-6">
-            <div className="w-12 h-12 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
-                <UserPlus className="w-6 h-6" />
+const UserRegistration = () => {
+    const [formData, setFormData] = useState({
+        username: '',
+        nickname: '',
+        role: '',
+        discord_id: ''
+    });
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [createdUser, setCreatedUser] = useState<{ username: string, password: string } | null>(null);
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = () => {
+        if (createdUser) {
+            navigator.clipboard.writeText(`Login: ${createdUser.username}\nPassword: ${createdUser.password}`);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        }
+    };
+
+    const handleSubmit = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+
+            // Validate
+            if (!formData.username || !formData.nickname || !formData.role || !formData.discord_id) {
+                setError("Заполните все поля");
+                return;
+            }
+
+            // API Call
+            const token = localStorage.getItem('access_token');
+            const response = await fetch('/api/admin/users', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    username: formData.username,
+                    nickname: formData.nickname,
+                    role: formData.role,
+                    discord_id: parseInt(formData.discord_id)
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || data.message || "Ошибка при создании пользователя");
+            }
+
+            setCreatedUser(data.data);
+            setFormData({ username: '', nickname: '', role: '', discord_id: '' });
+
+        } catch (err: any) {
+            setError(err.message || "Ошибка при создании пользователя");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="space-y-8 animate-[fadeIn_0.3s_ease-in-out]">
+            <div className="flex items-center gap-4 border-b border-white/10 pb-6">
+                <div className="w-12 h-12 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+                    <UserPlus className="w-6 h-6" />
+                </div>
+                <div>
+                    <h2 className="text-2xl font-bold text-white">Регистрация пользователя</h2>
+                    <p className="text-white/60">Добавление нового сотрудника в систему</p>
+                </div>
             </div>
-            <div>
-                <h2 className="text-2xl font-bold text-white">Регистрация пользователя</h2>
-                <p className="text-white/60">Добавление нового сотрудника в систему</p>
+
+            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-6">
+                {createdUser && (
+                    <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-6 mb-6 animate-fade-in relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                                onClick={handleCopy}
+                                className="p-2 hover:bg-green-500/20 rounded-lg text-green-400 transition-colors"
+                                title="Копировать данные"
+                            >
+                                {copied ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
+                            </button>
+                        </div>
+
+                        <div className="flex items-start gap-4">
+                            <div className="p-3 bg-green-500/20 rounded-lg">
+                                <Check className="w-6 h-6 text-green-400" />
+                            </div>
+                            <div className="space-y-4 w-full">
+                                <div>
+                                    <h3 className="text-lg font-semibold text-green-400 mb-1">Пользователь успешно создан!</h3>
+                                    <p className="text-green-300/60 text-sm">Сохраните данные для входа, пароль показан единожды.</p>
+                                </div>
+
+                                <div className="bg-black/40 rounded-lg p-4 font-mono text-sm space-y-2 border border-green-500/10">
+                                    <div className="flex justify-between">
+                                        <span className="text-white/40">Login:</span>
+                                        <span className="text-white select-all">{createdUser.username}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-white/40">Password:</span>
+                                        <span className="text-white select-all font-bold tracking-wider">{createdUser.password}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {error && (
+                    <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl flex items-center gap-3 mb-6">
+                        <AlertCircle className="w-5 h-5" />
+                        {error}
+                    </div>
+                )}
+
+                <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-6">
+                        <div>
+                            <label className="text-sm font-medium text-white/60 mb-2 block">Имя пользователя (Login)</label>
+                            <input
+                                type="text"
+                                className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                                placeholder="user_login"
+                                value={formData.username}
+                                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium text-white/60 mb-2 block">Отображаемое имя (Nickname)</label>
+                            <input
+                                type="text"
+                                className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                                placeholder="Ivan Ivanov"
+                                value={formData.nickname}
+                                onChange={(e) => setFormData({ ...formData, nickname: e.target.value })}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-6">
+                        <div>
+                            <label className="text-sm font-medium text-white/60 mb-2 block">Роль</label>
+                            <CustomSelect
+                                options={[
+                                    { value: 'junior_employee', label: 'Мл. Сотрудник' },
+                                    { value: 'employee', label: 'Сотрудник' },
+                                    { value: 'senior_employee', label: 'Ст. Сотрудник' },
+                                    { value: 'manager', label: 'Менеджер' },
+                                    { value: 'developer', label: 'Разработчик' }
+                                ]}
+                                value={formData.role}
+                                onChange={(value) => setFormData({ ...formData, role: value as string })}
+                                placeholder="Выберите роль"
+                                icon={<ShieldAlert className="w-4 h-4" />}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="text-sm font-medium text-white/60 mb-2 block">Discord ID</label>
+                        <input
+                            type="text"
+                            className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                            placeholder="000000000000000000"
+                            value={formData.discord_id}
+                            onChange={(e) => setFormData({ ...formData, discord_id: e.target.value.replace(/\D/g, '') })}
+                        />
+                    </div>
+
+                    <div className="pt-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 px-4 py-3 rounded-lg max-w-sm">
+                            <AlertCircle className="w-5 h-5 text-yellow-500 shrink-0" />
+                            <p className="text-xs text-yellow-200/80 leading-relaxed">Пароль будет сгенерирован автоматически и показан после создания.</p>
+                        </div>
+                        <button
+                            onClick={handleSubmit}
+                            disabled={loading}
+                            className={`px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                            {loading ? 'Создание...' : 'Создать пользователя'}
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
-
-        <div className="space-y-6">
-            <div className="grid grid-cols-2 gap-6">
-                <div>
-                    <label className="text-sm font-medium text-white/60 mb-2 block">Имя пользователя (Login)</label>
-                    <input type="text" className="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors" placeholder="user_login" />
-                </div>
-                <div>
-                    <label className="text-sm font-medium text-white/60 mb-2 block">Отображаемое имя (Nickname)</label>
-                    <input type="text" className="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors" placeholder="Ivan Ivanov" />
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-6">
-                <div>
-                    <label className="text-sm font-medium text-white/60 mb-2 block">Роль</label>
-                    <CustomSelect
-                        options={[
-                            { value: 'junior_employee', label: 'Мл. Сотрудник' },
-                            { value: 'employee', label: 'Сотрудник' },
-                            { value: 'senior_employee', label: 'Ст. Сотрудник' },
-                            { value: 'manager', label: 'Менеджер' },
-                            { value: 'developer', label: 'Разработчик' }
-                        ]}
-                        value={''}
-                        onChange={() => { }}
-                        placeholder="Выберите роль"
-                        icon={<ShieldAlert className="w-4 h-4" />}
-                    />
-                </div>
-            </div>
-
-            <div>
-                <label className="text-sm font-medium text-white/60 mb-2 block">Discord ID</label>
-                <input type="text" className="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors" placeholder="000000000000000000" />
-            </div>
-
-            <div className="pt-4 flex items-center justify-between">
-                <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 px-4 py-3 rounded-lg max-w-sm">
-                    <AlertCircle className="w-5 h-5 text-yellow-500 shrink-0" />
-                    <p className="text-xs text-yellow-200/80 leading-relaxed">Пароль будет сгенерирован автоматически и показан после создания.</p>
-                </div>
-                <button className="px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all">
-                    Создать пользователя
-                </button>
-            </div>
-        </div>
-    </div>
-);
+    );
+};
 
 export default UserRegistration;

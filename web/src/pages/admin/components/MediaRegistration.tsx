@@ -1,25 +1,64 @@
-import React from 'react';
-import { Radio, Share2 } from 'lucide-react';
-import { CustomSelect } from '../../../components/CustomInputs';
+import { useState } from 'react';
+import { Radio, Check, AlertCircle } from 'lucide-react';
+
 
 const MediaRegistration = () => {
-    const [platform, setPlatform] = React.useState('twitch');
-    const [priority, setPriority] = React.useState(0);
+    const [priority, setPriority] = useState(0);
+    const [urlInput, setUrlInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
-    const getPlatformPrefix = (p: string) => {
-        switch (p) {
-            case 'twitch': return 'https://twitch.tv/';
-            case 'youtube': return 'https://youtube.com/@';
-            case 'tiktok': return 'https://tiktok.com/@';
-            case 'kick': return 'https://kick.com/';
-            case 'telegram': return 'https://t.me/';
-            case 'discord': return 'https://discord.gg/';
-            default: return 'https://';
+    const handleRegister = async () => {
+        if (!urlInput) {
+            setMessage({ type: 'error', text: 'Укажите ссылку на профиль' });
+            return;
+        }
+
+        setLoading(true);
+        setMessage(null);
+
+        try {
+            const token = localStorage.getItem('access_token');
+            // Use full URL as provided by user
+            const fullUrl = urlInput;
+
+            // Backend in URL mode expects 'twitch_url' and 'priority'
+            const response = await fetch('/api/streamers', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    twitch_url: fullUrl,
+                    priority: priority
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || 'Ошибка при добавлении медиа');
+            }
+
+            // 202 Accepted = Verification Pending
+            if (response.status === 202) {
+                setMessage({ type: 'success', text: `Запрос на добавление отправлен на проверку` });
+                setUrlInput('');
+            } else {
+                setMessage({ type: 'success', text: `Медиа успешно добавлено` });
+                setUrlInput('');
+            }
+
+        } catch (err: any) {
+            setMessage({ type: 'error', text: err.message || 'Произошла ошибка' });
+        } finally {
+            setLoading(false);
         }
     };
 
     return (
-        <div className="max-w-2xl mx-auto space-y-8 animate-[fadeIn_0.3s_ease-in-out]">
+        <div className="space-y-8 animate-[fadeIn_0.3s_ease-in-out]">
             <div className="flex items-center gap-4 border-b border-white/10 pb-6">
                 <div className="w-12 h-12 rounded-xl bg-orange-500/20 text-orange-400 flex items-center justify-center border border-orange-500/30">
                     <Radio className="w-6 h-6" />
@@ -30,30 +69,26 @@ const MediaRegistration = () => {
                 </div>
             </div>
 
-            <div className="space-y-6">
-                <div>
-                    <label className="text-sm font-medium text-white/60 mb-2 block">Название канала / Никнейм</label>
-                    <input type="text" className="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors" placeholder="Channel Name" />
-                </div>
+            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-6">
+                {message && (
+                    <div className={`px-4 py-3 rounded-xl flex items-center gap-3 ${message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'} mb-6`}>
+                        {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                        {message.text}
+                    </div>
+                )}
 
-                <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-6">
                     <div>
-                        <label className="text-sm font-medium text-white/60 mb-2 block">Платформа</label>
-                        <CustomSelect
-                            options={[
-                                { value: 'twitch', label: 'Twitch' },
-                                { value: 'youtube', label: 'YouTube' },
-                                { value: 'tiktok', label: 'TikTok' },
-                                { value: 'kick', label: 'Kick' },
-                                { value: 'telegram', label: 'Telegram' },
-                                { value: 'discord', label: 'Discord' }
-                            ]}
-                            value={platform}
-                            onChange={(val) => setPlatform(val as string)}
-                            placeholder="Платформа"
-                            icon={<Share2 className="w-4 h-4" />}
+                        <label className="text-sm font-medium text-white/60 mb-2 block">Ссылка на профиль</label>
+                        <input
+                            type="text"
+                            className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors"
+                            placeholder="https://twitch.tv/..."
+                            value={urlInput}
+                            onChange={(e) => setUrlInput(e.target.value)}
                         />
                     </div>
+
                     <div>
                         <label className="text-sm font-medium text-white/60 mb-2 block">Приоритет</label>
                         <div className="flex gap-2">
@@ -74,22 +109,16 @@ const MediaRegistration = () => {
                             ))}
                         </div>
                     </div>
-                </div>
 
-                <div>
-                    <label className="text-sm font-medium text-white/60 mb-2 block">Ссылка на профиль</label>
-                    <div className="flex gap-2">
-                        <span className="bg-white/5 border border-white/10 rounded-xl px-4 flex items-center text-white/40 select-none">
-                            {getPlatformPrefix(platform)}
-                        </span>
-                        <input type="text" className="flex-1 bg-black/20 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors" placeholder="channel" />
+                    <div className="pt-4 flex justify-end">
+                        <button
+                            onClick={handleRegister}
+                            disabled={loading}
+                            className={`px-8 py-3 bg-orange-500 hover:bg-orange-600 text-white font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                            {loading ? 'Добавление...' : 'Добавить медиа'}
+                        </button>
                     </div>
-                </div>
-
-                <div className="pt-4 flex justify-end">
-                    <button className="px-8 py-3 bg-orange-500 hover:bg-orange-600 text-white font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all">
-                        Добавить медиа
-                    </button>
                 </div>
             </div>
         </div>

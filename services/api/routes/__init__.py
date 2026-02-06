@@ -5,6 +5,7 @@ Routes package - aggregates all API routers.
 from fastapi import APIRouter
 
 from routes.auth import router as auth_router
+from routes.admin import router as admin_router
 from routes.streamers import router as streamers_router
 from routes.assistants import router as assistants_router
 from routes.guilds import router as guilds_router
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/api")
 
 # Include all routers
 router.include_router(auth_router)
+router.include_router(admin_router)
 router.include_router(streamers_router)
 router.include_router(assistants_router)
 router.include_router(guilds_router)

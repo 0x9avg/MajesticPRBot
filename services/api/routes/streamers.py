@@ -17,6 +17,7 @@ from schemas.streamer import (
     StreamerStatusUpdate,
     StreamerUpdate,
 )
+from dependencies import get_current_user
 
 router = APIRouter(prefix="/streamers", tags=["Streamers"])
 
@@ -182,6 +183,7 @@ async def update_streamer(
     data: StreamerUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    user: dict = Depends(get_current_user),
 ):
     """Update streamer properties."""
     trace_id = get_trace_id(request)
@@ -190,17 +192,48 @@ async def update_streamer(
     if not streamer:
         raise HTTPException(status_code=404, detail="Стример не найден")
 
-    # Build update data
+    # Build update data & track changes for logging
     update_data = {}
+    changes = {}
+
     if data.priority is not None:
-        update_data["priority"] = data.priority
+        if data.priority != streamer["priority"]:
+            changes["priority"] = {"old": streamer["priority"], "new": data.priority}
+            update_data["priority"] = data.priority
+            
+    if data.is_pinned is not None:
+        if data.is_pinned != streamer.get("is_pinned", False):
+            changes["is_pinned"] = {"old": streamer.get("is_pinned", False), "new": data.is_pinned}
+            update_data["is_pinned"] = data.is_pinned
+
+    if data.stream_points_override is not None:
+        # Handle cases where value might be None/float
+        old_val = streamer.get("stream_points_override")
+        if data.stream_points_override != old_val:
+            changes["stream_points_override"] = {"old": old_val, "new": data.stream_points_override}
+            update_data["stream_points_override"] = data.stream_points_override
 
     if update_data:
         # Update via database method
         await db.update_streamer(
             twitch_id,
             priority=update_data.get("priority"),
+            is_pinned=update_data.get("is_pinned"),
+            stream_points_override=update_data.get("stream_points_override"),
         )
+        
+        # Log to admin_logs
+        if changes:
+             await db.log_admin_action(
+                admin_name=user.get("nickname", user.get("username", "Unknown")),
+                action="update_streamer",
+                admin_role=user.get("role"),
+                target_type="streamer",
+                target_id=str(twitch_id),
+                details=changes,
+                ip_address=request.client.host
+            )
+
 
     # Get updated streamer
     streamer = await db.get_streamer(twitch_id)

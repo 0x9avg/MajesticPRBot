@@ -146,6 +146,8 @@ class Database:
                             streamer_id BIGINT UNSIGNED PRIMARY KEY,
                             streamer_name VARCHAR(25) NOT NULL,
                             is_online BOOLEAN DEFAULT FALSE,
+                            is_pinned BOOLEAN DEFAULT FALSE,
+                            stream_points_override FLOAT DEFAULT NULL,
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
                             profile_image_url VARCHAR(512),
@@ -160,6 +162,21 @@ class Database:
                         )
                         """
                     )
+
+                    # Migration: Add columns if they don't exist
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN stream_points_override FLOAT DEFAULT NULL"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
 
                     # =========================================================
                     # 2. Settings Table
@@ -330,7 +347,6 @@ class Database:
                         """
                     )
 
-                    # Role Permissions (System)
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS role_permissions (
@@ -341,21 +357,19 @@ class Database:
                         """
                     )
 
-                    # =========================================================
-                    # Admin Logs Table (GEMINI.md: Audit Logs for admin actions)
-                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS admin_logs (
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            admin_id BIGINT UNSIGNED NOT NULL,
+                            admin_name VARCHAR(255) NOT NULL,
+                            admin_role VARCHAR(50),
                             action VARCHAR(50) NOT NULL,
                             target_type VARCHAR(50),
                             target_id VARCHAR(100),
                             details JSON,
                             ip_address VARCHAR(45),
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            INDEX idx_admin_id (admin_id),
+                            INDEX idx_admin_name (admin_name),
                             INDEX idx_action (action),
                             INDEX idx_created_at (created_at)
                         )
@@ -365,10 +379,7 @@ class Database:
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
 
-                    # Initialize default permissions
                     await self._init_default_permissions(conn)
-
-                    # Ensure singleton settings row
                     await self._ensure_singleton_settings(conn)
 
                     self.logger.info("Database initialized successfully (V2 Final)")
@@ -412,6 +423,7 @@ class Database:
                     "can_register_users": True,
                     "can_execute_commands": True,
                     "can_view_logs": True,
+                    "can_view_admin_logs": True,
                     "can_manage_permissions": False,
                 },
                 "developer": {
@@ -424,6 +436,7 @@ class Database:
                     "can_access_admin_panel": True,
                     "can_execute_commands": True,
                     "can_view_logs": True,
+                    "can_view_admin_logs": True,
                 },
             }
 
@@ -442,32 +455,29 @@ class Database:
     async def _ensure_singleton_settings(self, conn):
         """Ensure settings table has exactly one row."""
         async with conn.cursor() as cursor:
-            # Check how many rows exist
+
             await cursor.execute("SELECT COUNT(*) as count FROM settings")
+
             result = await cursor.fetchone()
             row_count = result["count"]
 
             if row_count == 0:
-                # No settings row - initialize with defaults
-                self.logger.debug("  ℹ No settings row found, will be created on first update")
+                self.logger.debug(
+                    "  ℹ No settings row found, will be created on first update"
+                )
             elif row_count == 1:
-                # Perfect - single row exists
                 self.logger.debug("  ✓ Settings table has exactly 1 row")
             else:
-                # Multiple rows - keep first, delete rest
                 self.logger.warning(
                     f"  ⚠ Settings table has {row_count} rows, cleaning up to keep only 1..."
                 )
-                # Get the first row
                 await cursor.execute("SELECT * FROM settings LIMIT 1")
+
                 survivor = await cursor.fetchone()
 
-                # Delete all rows
                 await cursor.execute("DELETE FROM settings")
-
-                # Re-insert the survivor (or create default if needed)
                 if survivor:
-                    # Build INSERT query dynamically from survivor data
+
                     columns = list(survivor.keys())
                     values = [survivor[col] for col in columns]
                     placeholders = ", ".join(["%s"] * len(columns))
@@ -496,8 +506,6 @@ class Database:
                     if isinstance(permissions, str):
                         return json.loads(permissions)
                     return permissions
-
-                # Return default (no permissions) for unknown roles
                 return {
                     "can_view_dashboard": False,
                     "can_spec_probation": False,
@@ -510,8 +518,9 @@ class Database:
     @db_retry()
     async def log_admin_action(
         self,
-        admin_id: int,
+        admin_name: str,
         action: str,
+        admin_role: Optional[str] = None,
         target_type: Optional[str] = None,
         target_id: Optional[str] = None,
         details: Optional[dict] = None,
@@ -521,8 +530,9 @@ class Database:
         Log an admin action to the admin_logs table for auditing.
 
         Args:
-            admin_id: Discord ID of the admin performing the action
+            admin_name: Nickname/Username of the admin performing the action
             action: Action name (e.g., 'update_streamer', 'delete_assistant')
+            admin_role: Role of the admin (e.g. 'manager')
             target_type: Type of target entity (e.g., 'streamer', 'assistant')
             target_id: ID of the target entity
             details: Optional JSON details (old_value, new_value, etc.)
@@ -534,11 +544,12 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO admin_logs 
-                            (admin_id, action, target_type, target_id, details, ip_address)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                            (admin_name, admin_role, action, target_type, target_id, details, ip_address)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
-                            admin_id,
+                            admin_name,
+                            admin_role,
                             action,
                             target_type,
                             target_id,
@@ -547,10 +558,128 @@ class Database:
                         ),
                     )
                     await conn.commit()
-                    self.logger.debug(f"Admin log: {action} by {admin_id}")
+                    self.logger.debug(f"Admin log: {action} by {admin_name}")
         except Exception as e:
             self.logger.error(f"Failed to log admin action: {e}", exc_info=True)
-            # Don't raise - logging failure shouldn't break the main operation
+
+    @db_retry()
+    async def get_admin_logs(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        filters: dict = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+    ):
+        """
+        Get admin logs with optional filtering and pagination.
+
+        Args:
+            limit: Number of records to fetch
+            offset: Offset for pagination
+            filters: Optional dictionary with filters:
+                - action: str
+                - admin_name: str (partial match)
+                - start_date: datetime
+                - end_date: datetime
+                - target_type: str
+
+        Returns:
+            List of log dictionaries with admin info
+        """
+        try:
+            filters = filters or {}
+            where_clauses = []
+            params = []
+
+            # Whitelist sorting
+            allowed_sorts = {
+                "created_at": "al.id",
+                "admin_name": "al.admin_name",
+                "action": "al.action",
+                "target_name": "target_name",
+            }
+            sort_column = allowed_sorts.get(sort_by, "al.created_at")
+            sort_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
+
+            if filters.get("action"):
+                actions = filters["action"]
+                if isinstance(actions, list) and len(actions) > 0:
+                    placeholders = ", ".join(["%s"] * len(actions))
+                    where_clauses.append(f"al.action IN ({placeholders})")
+                    params.extend(actions)
+                elif isinstance(actions, str) and actions != "all":
+                    where_clauses.append("al.action = %s")
+                    params.append(actions)
+
+            if filters.get("admin_name"):
+                where_clauses.append("al.admin_name LIKE %s")
+                params.append(f"%{filters['admin_name']}%")
+
+            if filters.get("target_type") and filters["target_type"] != "all":
+                where_clauses.append("al.target_type = %s")
+                params.append(filters["target_type"])
+
+            if filters.get("start_date"):
+                where_clauses.append("al.created_at >= %s")
+                params.append(filters["start_date"])
+
+            if filters.get("end_date"):
+                where_clauses.append("al.created_at <= %s")
+                params.append(filters["end_date"])
+
+            where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+            # Add pagination params
+            params.append(limit)
+            params.append(offset)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    sql_query = f"""
+                        SELECT 
+                            al.id,
+                            al.admin_name,
+                            al.admin_role,
+                            al.action,
+                            al.target_type,
+                            al.target_id,
+                            al.details,
+                            al.ip_address,
+                            al.created_at,
+                            CASE 
+                                WHEN al.target_type = 'streamer' THEN s.streamer_name
+                                WHEN al.target_type = 'event' THEN e.name
+                                ELSE al.target_id
+                            END as target_name
+                        FROM admin_logs al
+                        LEFT JOIN streamers s ON al.target_type = 'streamer' AND al.target_id = CAST(s.streamer_id AS CHAR)
+                        LEFT JOIN events e ON al.target_type = 'event' AND al.target_id = CAST(e.id AS CHAR)
+                        {where_sql}
+                        ORDER BY {sort_column} {sort_dir}
+                        LIMIT %s OFFSET %s
+                        """
+                    await cursor.execute(sql_query, tuple(params))
+
+                    logs = await cursor.fetchall()
+                    result = []
+
+                    for log in logs:
+                        log_dict = dict(log)
+                        if log_dict.get("details"):
+                            try:
+                                if isinstance(log_dict["details"], str):
+                                    log_dict["details"] = json.loads(
+                                        log_dict["details"]
+                                    )
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        result.append(log_dict)
+
+                    return result
+        except Exception as e:
+            self.logger.error(f"Failed to fetch admin logs: {e}", exc_info=True)
+            return []
 
     # =========================================================================
     # Streamer Operations
@@ -572,6 +701,7 @@ class Database:
         profile_image_url: Optional[str] = None,
     ) -> None:
         """
+
         Создание или обновление стримера в базе данных.
 
         Args:
@@ -672,7 +802,8 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT 
-                            streamer_id, streamer_name, is_online, stream_title, stream_thumbnail_url,
+                            streamer_id, streamer_name, is_online, is_pinned, stream_points_override,
+                            stream_title, stream_thumbnail_url,
                             profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
                             priority, added_at, added_by_id, updated_at
@@ -722,8 +853,6 @@ class Database:
                         else []
                     )
 
-
-
                     return result
         except Exception as e:
             self.logger.error(
@@ -745,10 +874,10 @@ class Database:
     ) -> tuple[dict, dict]:
         """
         Атомарное обновление статуса стримера с блокировкой строки.
-        
+
         Использует SELECT ... FOR UPDATE для предотвращения гонок.
         Возвращает (old_state, new_state) для определения изменений.
-        
+
         Returns:
             Tuple of (old_state, new_state) dicts with keys:
             - is_online, game_id, game_name, stream_title, streamer_name
@@ -758,7 +887,7 @@ class Database:
             self.logger.debug(
                 f"Atomic update streamer {streamer_id}: online={is_online} game_id={game_id}"
             )
-            
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     # Lock the row and get current state atomically
@@ -775,11 +904,11 @@ class Database:
                         (streamer_id,),
                     )
                     row = await cursor.fetchone()
-                    
+
                     if not row:
                         # Streamer not found
                         return (None, None)
-                    
+
                     old_state = {
                         "streamer_name": row["streamer_name"],
                         "is_online": row["is_online"],
@@ -787,11 +916,11 @@ class Database:
                         "game_name": row["game_name"],
                         "stream_title": row["stream_title"],
                     }
-                    
+
                     # Build dynamic SET clause
                     set_parts = ["is_online = %s"]
                     params = [is_online]
-                    
+
                     set_parts.append("stream_started_at = %s")
                     params.append(started_at)
                     set_parts.append("stream_game_id = %s")
@@ -802,17 +931,22 @@ class Database:
                     params.append(stream_title)
                     set_parts.append("stream_thumbnail_url = %s")
                     params.append(stream_thumbnail_url)
-                    
+
                     if profile_image_url is not None:
                         set_parts.append("profile_image_url = %s")
                         params.append(profile_image_url)
-                    
+
+                    # Reset pin and overrides if stream goes offline
+                    if is_online is False:
+                        set_parts.append("is_pinned = FALSE")
+                        set_parts.append("stream_points_override = NULL")
+
                     params.append(streamer_id)
-                    
+
                     query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
                     await cursor.execute(query, tuple(params))
                     await conn.commit()
-                    
+
                     new_state = {
                         "streamer_name": old_state["streamer_name"],
                         "is_online": is_online,
@@ -820,9 +954,9 @@ class Database:
                         "game_name": game_name,
                         "stream_title": stream_title,
                     }
-                    
+
                     return (old_state, new_state)
-                    
+
         except Exception as e:
             self.logger.error(
                 f"Failed to update streamer {streamer_id}: {e}", exc_info=True
@@ -871,7 +1005,7 @@ class Database:
                         # Build dynamic SET clause
                         set_parts = ["is_online = %s"]
                         params = [update.get("is_online", False)]
-                        
+
                         set_parts.append("stream_started_at = %s")
                         params.append(update.get("started_at"))
                         set_parts.append("stream_game_id = %s")
@@ -882,17 +1016,20 @@ class Database:
                         params.append(update.get("stream_title"))
                         set_parts.append("stream_thumbnail_url = %s")
                         params.append(update.get("stream_thumbnail_url"))
-                        
+
                         # Only update profile_image_url if provided
-                        if "profile_image_url" in update and update["profile_image_url"] is not None:
+                        if (
+                            "profile_image_url" in update
+                            and update["profile_image_url"] is not None
+                        ):
                             set_parts.append("profile_image_url = %s")
                             params.append(update["profile_image_url"])
-                        
+
                         params.append(streamer_id)
-                        
+
                         query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
                         await cursor.execute(query, tuple(params))
-                        
+
                         if cursor.rowcount > 0:
                             updated_count += 1
 
@@ -908,15 +1045,45 @@ class Database:
     async def update_streamer(
         self,
         streamer_id: int,
-        priority: int,
+        priority: Optional[int] = None,
+        is_pinned: Optional[bool] = None,
+        stream_points_override: Optional[float] = None,
     ) -> bool:
         """Обновление настроек стримера."""
         try:
+            set_parts = []
+            params = []
+
+            if priority is not None:
+                set_parts.append("priority = %s")
+                params.append(priority)
+
+            if is_pinned is not None:
+                set_parts.append("is_pinned = %s")
+                params.append(is_pinned)
+
+            if stream_points_override is not None:
+                # Handle clearing the override (if passed as specific value to clear, or handle None carefully)
+                # But here passing None usually means 'no change'.
+                # To clear it, we might need a specific sentinel or just assume the frontend passes -1 or something,
+                # but better to assume standard update logic: if passed, update it.
+                # If we want to clear it, we pass None? No, None means no change here.
+                # Let's assume frontend passes a value. If value is -1, set to NULL?
+                # Or simply: optional float.
+                # Wait, Pydantic will pass None if not provided.
+                set_parts.append("stream_points_override = %s")
+                params.append(stream_points_override)
+
+            if not set_parts:
+                return False
+
+            params.append(streamer_id)
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "UPDATE streamers SET priority = %s WHERE streamer_id = %s",
-                        (priority, streamer_id),
+                        f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s",
+                        tuple(params),
                     )
                     await conn.commit()
                     return cursor.rowcount > 0
@@ -929,6 +1096,7 @@ class Database:
     @db_retry()
     async def remove_streamer(self, streamer_id: int) -> bool:
         """
+
         Удаление стримера из базы данных.
 
         Returns:
@@ -989,6 +1157,7 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
+                            s.is_pinned, s.stream_points_override,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
@@ -1011,16 +1180,18 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         GROUP BY s.streamer_id
-                        ORDER BY s.priority DESC, s.streamer_name ASC
+                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
                     results = await cursor.fetchall()
                     # Clean up assignments (remove nulls)
                     for r in results:
                         if isinstance(r.get("assignments"), str):
-                             r["assignments"] = json.loads(r["assignments"])
+                            r["assignments"] = json.loads(r["assignments"])
                         if r.get("assignments"):
-                             r["assignments"] = [x for x in r["assignments"] if x is not None]
+                            r["assignments"] = [
+                                x for x in r["assignments"] if x is not None
+                            ]
                     return results
         except Exception as e:
             self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
@@ -1038,6 +1209,7 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
+                            s.is_pinned, s.stream_points_override,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
@@ -1060,8 +1232,7 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         WHERE s.is_online = TRUE
-                        GROUP BY s.streamer_id
-                        ORDER BY s.priority DESC, s.streamer_name ASC
+                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
                     results = await cursor.fetchall()
@@ -1070,7 +1241,9 @@ class Database:
                         if isinstance(r.get("assignments"), str):
                             r["assignments"] = json.loads(r["assignments"])
                         if r.get("assignments"):
-                            r["assignments"] = [x for x in r["assignments"] if x is not None]
+                            r["assignments"] = [
+                                x for x in r["assignments"] if x is not None
+                            ]
                     return results
         except Exception as e:
             self.logger.error(f"Failed to list online streamers: {e}", exc_info=True)
@@ -1133,11 +1306,14 @@ class Database:
                             existing.get("monitoring_channel_id") if existing else None
                         )
                     )
-                    
+
                     # Handle monitoring_message_ids (JSON list)
-                    existing_ids = existing.get("monitoring_message_ids") if existing else None
+                    existing_ids = (
+                        existing.get("monitoring_message_ids") if existing else None
+                    )
                     if isinstance(existing_ids, str):
                         import json as json_module
+
                         existing_ids = json_module.loads(existing_ids)
                     final_monitoring_message_ids = (
                         monitoring_message_ids
@@ -1146,6 +1322,7 @@ class Database:
                     )
                     # Serialize to JSON for MySQL
                     import json as json_module
+
                     final_monitoring_ids_json = (
                         json_module.dumps(final_monitoring_message_ids)
                         if final_monitoring_message_ids is not None
@@ -1182,11 +1359,13 @@ class Database:
                         if assistant_role_id is not None
                         else (existing.get("assistant_role_id") if existing else None)
                     )
-                    
+
                     final_filter_gta = (
                         monitoring_filter_gta
                         if monitoring_filter_gta is not None
-                        else (existing.get("monitoring_filter_gta") if existing else False)
+                        else (
+                            existing.get("monitoring_filter_gta") if existing else False
+                        )
                     )
 
                     # 1. Try to UPDATE first (Atomic update of existing row)
@@ -1214,7 +1393,7 @@ class Database:
                             final_pr_role,
                         ),
                     )
-                    
+
                     # 2. If no row updated, try to INSERT atomically (only if empty)
                     if cursor.rowcount == 0:
                         await cursor.execute(
@@ -1281,7 +1460,9 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT notification_templates FROM settings WHERE id = 1")
+                    await cursor.execute(
+                        "SELECT notification_templates FROM settings WHERE id = 1"
+                    )
                     result = await cursor.fetchone()
                     if result and result.get("notification_templates"):
                         templates = json.loads(result["notification_templates"])
@@ -1432,7 +1613,7 @@ class Database:
                         return []
 
                     unassigned_sessions = []
-                    
+
                     # Prepare time calculation
                     await cursor.execute("SELECT NOW() as now")
                     now_result = await cursor.fetchone()
@@ -1456,20 +1637,22 @@ class Database:
                         if started_at:
                             duration_seconds = int((now - started_at).total_seconds())
 
-                        unassigned_sessions.append({
-                            "pr_id": p_id,
-                            "duration_seconds": duration_seconds,
-                            "streamer_name": streamer_name,
-                            "is_probation": is_probation,
-                            "started_at": started_at,
-                            "priority": priority,
-                        })
+                        unassigned_sessions.append(
+                            {
+                                "pr_id": p_id,
+                                "duration_seconds": duration_seconds,
+                                "streamer_name": streamer_name,
+                                "is_probation": is_probation,
+                                "started_at": started_at,
+                                "priority": priority,
+                            }
+                        )
                         pr_ids_to_process.append(p_id)
 
                     # 2. Batch Update - Close Sessions
                     if pr_ids_to_process:
                         format_strings = ",".join(["%s"] * len(pr_ids_to_process))
-                        
+
                         await cursor.execute(
                             f"""
                             UPDATE spec_sessions 
@@ -1491,7 +1674,7 @@ class Database:
                             """,
                             tuple(pr_ids_to_process),
                         )
-                        
+
                     await conn.commit()
 
             # Record Stats (Outside transaction)
@@ -1830,7 +2013,9 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT pr_actions_channel_id FROM settings WHERE id = 1")
+                    await cursor.execute(
+                        "SELECT pr_actions_channel_id FROM settings WHERE id = 1"
+                    )
                     result = await cursor.fetchone()
                     return result.get("pr_actions_channel_id") if result else None
         except Exception as e:
@@ -2385,7 +2570,9 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT probation_rate FROM settings WHERE id = 1")
+                    await cursor.execute(
+                        "SELECT probation_rate FROM settings WHERE id = 1"
+                    )
                     result = await cursor.fetchone()
                     return result.get("probation_rate", 1.2) if result else 1.2
         except Exception:
@@ -2513,7 +2700,7 @@ class Database:
                         "UPDATE settings SET assistant_role_id = %s LIMIT 1",
                         (role_id,),
                     )
-                    
+
                     # 2. If no row updated, INSERT atomically if empty
                     if cursor.rowcount == 0:
                         await cursor.execute(
@@ -3120,7 +3307,7 @@ class Database:
 
     @db_retry()
     async def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get user by ID (joins assistants for role)."""
+        """Get user by ID (joins assistants for role and role_permissions for permissions)."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -3129,14 +3316,24 @@ class Database:
                         """
                         SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
                         COALESCE(a.role, 'employee') as role, 
-                        COALESCE(a.nickname, w.username) as nickname 
+                        COALESCE(a.nickname, w.username) as nickname,
+                        rp.permissions
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
+                        LEFT JOIN role_permissions rp ON rp.role = COALESCE(a.role, 'employee')
                         WHERE w.id = %s
                         """,
                         (user_id,),
                     )
-                    return await cursor.fetchone()
+                    user = await cursor.fetchone()
+                    if user and user.get("permissions"):
+                        # Parse JSON permissions
+                        try:
+                            if isinstance(user["permissions"], str):
+                                user["permissions"] = json.loads(user["permissions"])
+                        except (json.JSONDecodeError, TypeError):
+                            user["permissions"] = {}
+                    return user
         except Exception as e:
             self.logger.error(f"Failed to get user {user_id}: {e}", exc_info=True)
             raise

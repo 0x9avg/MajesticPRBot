@@ -345,8 +345,7 @@ class Database:
                         )
                         """
                     )
-
-                    # Role Permissions (System)
+                    
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS role_permissions (
@@ -357,21 +356,19 @@ class Database:
                         """
                     )
 
-                    # =========================================================
-                    # Admin Logs Table (GEMINI.md: Audit Logs for admin actions)
-                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS admin_logs (
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            admin_id BIGINT UNSIGNED NOT NULL,
+                            admin_name VARCHAR(255) NOT NULL,
+                            admin_role VARCHAR(50),
                             action VARCHAR(50) NOT NULL,
                             target_type VARCHAR(50),
                             target_id VARCHAR(100),
                             details JSON,
                             ip_address VARCHAR(45),
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            INDEX idx_admin_id (admin_id),
+                            INDEX idx_admin_name (admin_name),
                             INDEX idx_action (action),
                             INDEX idx_created_at (created_at)
                         )
@@ -381,10 +378,7 @@ class Database:
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
 
-                    # Initialize default permissions
                     await self._init_default_permissions(conn)
-
-                    # Ensure singleton settings row
                     await self._ensure_singleton_settings(conn)
 
                     self.logger.info("Database initialized successfully (V2 Final)")
@@ -428,6 +422,7 @@ class Database:
                     "can_register_users": True,
                     "can_execute_commands": True,
                     "can_view_logs": True,
+                    "can_view_admin_logs": True,
                     "can_manage_permissions": False,
                 },
                 "developer": {
@@ -440,6 +435,7 @@ class Database:
                     "can_access_admin_panel": True,
                     "can_execute_commands": True,
                     "can_view_logs": True,
+                    "can_view_admin_logs": True,
                 },
             }
 
@@ -458,32 +454,27 @@ class Database:
     async def _ensure_singleton_settings(self, conn):
         """Ensure settings table has exactly one row."""
         async with conn.cursor() as cursor:
-            # Check how many rows exist
+
             await cursor.execute("SELECT COUNT(*) as count FROM settings")
+
             result = await cursor.fetchone()
             row_count = result["count"]
 
             if row_count == 0:
-                # No settings row - initialize with defaults
                 self.logger.debug("  ℹ No settings row found, will be created on first update")
             elif row_count == 1:
-                # Perfect - single row exists
                 self.logger.debug("  ✓ Settings table has exactly 1 row")
             else:
-                # Multiple rows - keep first, delete rest
                 self.logger.warning(
                     f"  ⚠ Settings table has {row_count} rows, cleaning up to keep only 1..."
                 )
-                # Get the first row
                 await cursor.execute("SELECT * FROM settings LIMIT 1")
+
                 survivor = await cursor.fetchone()
 
-                # Delete all rows
                 await cursor.execute("DELETE FROM settings")
-
-                # Re-insert the survivor (or create default if needed)
                 if survivor:
-                    # Build INSERT query dynamically from survivor data
+
                     columns = list(survivor.keys())
                     values = [survivor[col] for col in columns]
                     placeholders = ", ".join(["%s"] * len(columns))
@@ -512,8 +503,6 @@ class Database:
                     if isinstance(permissions, str):
                         return json.loads(permissions)
                     return permissions
-
-                # Return default (no permissions) for unknown roles
                 return {
                     "can_view_dashboard": False,
                     "can_spec_probation": False,
@@ -526,8 +515,9 @@ class Database:
     @db_retry()
     async def log_admin_action(
         self,
-        admin_id: int,
+        admin_name: str,
         action: str,
+        admin_role: Optional[str] = None,
         target_type: Optional[str] = None,
         target_id: Optional[str] = None,
         details: Optional[dict] = None,
@@ -537,8 +527,9 @@ class Database:
         Log an admin action to the admin_logs table for auditing.
 
         Args:
-            admin_id: Discord ID of the admin performing the action
+            admin_name: Nickname/Username of the admin performing the action
             action: Action name (e.g., 'update_streamer', 'delete_assistant')
+            admin_role: Role of the admin (e.g. 'manager')
             target_type: Type of target entity (e.g., 'streamer', 'assistant')
             target_id: ID of the target entity
             details: Optional JSON details (old_value, new_value, etc.)
@@ -550,11 +541,12 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO admin_logs 
-                            (admin_id, action, target_type, target_id, details, ip_address)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                            (admin_name, admin_role, action, target_type, target_id, details, ip_address)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
-                            admin_id,
+                            admin_name,
+                            admin_role,
                             action,
                             target_type,
                             target_id,
@@ -563,10 +555,119 @@ class Database:
                         ),
                     )
                     await conn.commit()
-                    self.logger.debug(f"Admin log: {action} by {admin_id}")
+                    self.logger.debug(f"Admin log: {action} by {admin_name}")
         except Exception as e:
             self.logger.error(f"Failed to log admin action: {e}", exc_info=True)
-            # Don't raise - logging failure shouldn't break the main operation
+
+    @db_retry()
+    async def get_admin_logs(self, limit: int = 100, offset: int = 0, filters: dict = None, sort_by: str = "created_at", sort_order: str = "desc"):
+        """
+        Get admin logs with optional filtering and pagination.
+
+        Args:
+            limit: Number of records to fetch
+            offset: Offset for pagination
+            filters: Optional dictionary with filters:
+                - action: str
+                - admin_name: str (partial match)
+                - start_date: datetime
+                - end_date: datetime
+                - target_type: str
+
+        Returns:
+            List of log dictionaries with admin info
+        """
+        try:
+            filters = filters or {}
+            where_clauses = []
+            params = []
+
+            # Whitelist sorting
+            allowed_sorts = {
+                "created_at": "al.id",
+                "admin_name": "al.admin_name",
+                "action": "al.action",
+                "target_name": "target_name"
+            }
+            sort_column = allowed_sorts.get(sort_by, "al.created_at")
+            sort_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
+
+            if filters.get("action"):
+                actions = filters["action"]
+                if isinstance(actions, list) and len(actions) > 0:
+                    placeholders = ", ".join(["%s"] * len(actions))
+                    where_clauses.append(f"al.action IN ({placeholders})")
+                    params.extend(actions)
+                elif isinstance(actions, str) and actions != "all":
+                    where_clauses.append("al.action = %s")
+                    params.append(actions)
+
+            if filters.get("admin_name"):
+                where_clauses.append("al.admin_name LIKE %s")
+                params.append(f"%{filters['admin_name']}%")
+            
+            if filters.get("target_type") and filters["target_type"] != "all":
+                where_clauses.append("al.target_type = %s")
+                params.append(filters["target_type"])
+
+            if filters.get("start_date"):
+                where_clauses.append("al.created_at >= %s")
+                params.append(filters["start_date"])
+
+            if filters.get("end_date"):
+                where_clauses.append("al.created_at <= %s")
+                params.append(filters["end_date"])
+
+            where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+            # Add pagination params
+            params.append(limit)
+            params.append(offset)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    sql_query = f"""
+                        SELECT 
+                            al.id,
+                            al.admin_name,
+                            al.admin_role,
+                            al.action,
+                            al.target_type,
+                            al.target_id,
+                            al.details,
+                            al.ip_address,
+                            al.created_at,
+                            CASE 
+                                WHEN al.target_type = 'streamer' THEN s.streamer_name
+                                WHEN al.target_type = 'event' THEN e.name
+                                ELSE al.target_id
+                            END as target_name
+                        FROM admin_logs al
+                        LEFT JOIN streamers s ON al.target_type = 'streamer' AND al.target_id = CAST(s.streamer_id AS CHAR)
+                        LEFT JOIN events e ON al.target_type = 'event' AND al.target_id = CAST(e.id AS CHAR)
+                        {where_sql}
+                        ORDER BY {sort_column} {sort_dir}
+                        LIMIT %s OFFSET %s
+                        """
+                    await cursor.execute(sql_query, tuple(params))
+                    
+                    logs = await cursor.fetchall()
+                    result = []
+                    
+                    for log in logs:
+                        log_dict = dict(log)
+                        if log_dict.get("details"):
+                            try:
+                                if isinstance(log_dict["details"], str):
+                                    log_dict["details"] = json.loads(log_dict["details"])
+                            except (json.JSONDecodeError, TypeError):
+                                pass 
+                        result.append(log_dict)
+                    
+                    return result
+        except Exception as e:
+            self.logger.error(f"Failed to fetch admin logs: {e}", exc_info=True)
+            return []
 
     # =========================================================================
     # Streamer Operations
@@ -3093,7 +3194,7 @@ class Database:
 
     @db_retry()
     async def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get user by ID (joins assistants for role)."""
+        """Get user by ID (joins assistants for role and role_permissions for permissions)."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -3102,14 +3203,24 @@ class Database:
                         """
                         SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
                         COALESCE(a.role, 'employee') as role, 
-                        COALESCE(a.nickname, w.username) as nickname 
+                        COALESCE(a.nickname, w.username) as nickname,
+                        rp.permissions
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
+                        LEFT JOIN role_permissions rp ON rp.role = COALESCE(a.role, 'employee')
                         WHERE w.id = %s
                         """,
                         (user_id,),
                     )
-                    return await cursor.fetchone()
+                    user = await cursor.fetchone()
+                    if user and user.get("permissions"):
+                        # Parse JSON permissions
+                        try:
+                            if isinstance(user["permissions"], str):
+                                user["permissions"] = json.loads(user["permissions"])
+                        except (json.JSONDecodeError, TypeError):
+                            user["permissions"] = {}
+                    return user
         except Exception as e:
             self.logger.error(f"Failed to get user {user_id}: {e}", exc_info=True)
             raise

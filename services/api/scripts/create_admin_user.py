@@ -116,3 +116,12 @@ if __name__ == "__main__":
             discord_id=278198677947023371,
         )
     )
+    # asyncio.run(
+    #     create_admin(
+    #         username="testUser1",
+    #         password="testUser1",
+    #         nickname="testUser1",
+    #         role="employee",
+    #         discord_id=278198677947023370,
+    #     )
+    # )

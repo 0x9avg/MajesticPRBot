@@ -170,4 +170,5 @@ async def get_current_user(
         nickname=user["nickname"],
         role=user["role"],
         require_password_change=bool(user["require_password_change"]),
+        permissions=user.get("permissions", {}),
     )

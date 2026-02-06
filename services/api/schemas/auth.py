@@ -25,3 +25,4 @@ class UserResponse(BaseModel):
     nickname: str
     role: str
     require_password_change: bool
+    permissions: dict[str, bool] = {}

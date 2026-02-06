@@ -103,6 +103,7 @@ class Database:
                 maxsize=10,
                 pool_recycle=3600,  # Recreate connections every hour to prevent stale connections
                 autocommit=True,  # Ensure commits are immediately visible
+                init_command="SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",  # Prevent stale reads
             )
 
             elapsed = time.time() - start_time
@@ -169,7 +170,7 @@ class Database:
                             id INT PRIMARY KEY DEFAULT 1,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
-                            monitoring_message_id BIGINT UNSIGNED,
+                            monitoring_message_ids JSON,
                             pr_actions_channel_id BIGINT UNSIGNED,
                             control_panel_channel_id BIGINT UNSIGNED,
                             control_panel_message_id BIGINT UNSIGNED,
@@ -179,7 +180,8 @@ class Database:
                             p1_rate FLOAT DEFAULT 1.2,
                             p2_rate FLOAT DEFAULT 1.5,
                             p3_rate FLOAT DEFAULT 2.0,
-                            probation_rate FLOAT DEFAULT 1.2
+                            probation_rate FLOAT DEFAULT 1.2,
+                            monitoring_filter_gta BOOLEAN DEFAULT FALSE
                         )
                         """
                     )
@@ -740,45 +742,87 @@ class Database:
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
         profile_image_url: Optional[str] = None,
-    ) -> None:
+    ) -> tuple[dict, dict]:
         """
-        Обновление статуса стримера. Обновляет только переданные поля.
+        Атомарное обновление статуса стримера с блокировкой строки.
+        
+        Использует SELECT ... FOR UPDATE для предотвращения гонок.
+        Возвращает (old_state, new_state) для определения изменений.
+        
+        Returns:
+            Tuple of (old_state, new_state) dicts with keys:
+            - is_online, game_id, game_name, stream_title, streamer_name
         """
 
         try:
             self.logger.debug(
-                f"Updating streamer {streamer_id} status: online={is_online} game: {game_name} stream: {stream_title}"
+                f"Atomic update streamer {streamer_id}: online={is_online} game_id={game_id}"
             )
-            
-            # Build dynamic SET clause - only update provided fields
-            set_parts = ["is_online = %s"]
-            params = [is_online]
-            
-            # These fields are always updated when online state changes
-            set_parts.append("stream_started_at = %s")
-            params.append(started_at)
-            set_parts.append("stream_game_id = %s")
-            params.append(game_id)
-            set_parts.append("stream_game_name = %s")
-            params.append(game_name)
-            set_parts.append("stream_title = %s")
-            params.append(stream_title)
-            set_parts.append("stream_thumbnail_url = %s")
-            params.append(stream_thumbnail_url)
-            
-            # Only update profile_image_url if explicitly provided
-            if profile_image_url is not None:
-                set_parts.append("profile_image_url = %s")
-                params.append(profile_image_url)
-            
-            params.append(streamer_id)
-            
-            query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
             
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # Lock the row and get current state atomically
+                    await cursor.execute(
+                        """
+                        SELECT 
+                            streamer_name, is_online, 
+                            stream_game_id as game_id, stream_game_name as game_name,
+                            stream_title
+                        FROM streamers 
+                        WHERE streamer_id = %s 
+                        FOR UPDATE
+                        """,
+                        (streamer_id,),
+                    )
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        # Streamer not found
+                        return (None, None)
+                    
+                    old_state = {
+                        "streamer_name": row["streamer_name"],
+                        "is_online": row["is_online"],
+                        "game_id": str(row["game_id"]) if row["game_id"] else None,
+                        "game_name": row["game_name"],
+                        "stream_title": row["stream_title"],
+                    }
+                    
+                    # Build dynamic SET clause
+                    set_parts = ["is_online = %s"]
+                    params = [is_online]
+                    
+                    set_parts.append("stream_started_at = %s")
+                    params.append(started_at)
+                    set_parts.append("stream_game_id = %s")
+                    params.append(game_id)
+                    set_parts.append("stream_game_name = %s")
+                    params.append(game_name)
+                    set_parts.append("stream_title = %s")
+                    params.append(stream_title)
+                    set_parts.append("stream_thumbnail_url = %s")
+                    params.append(stream_thumbnail_url)
+                    
+                    if profile_image_url is not None:
+                        set_parts.append("profile_image_url = %s")
+                        params.append(profile_image_url)
+                    
+                    params.append(streamer_id)
+                    
+                    query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
                     await cursor.execute(query, tuple(params))
                     await conn.commit()
+                    
+                    new_state = {
+                        "streamer_name": old_state["streamer_name"],
+                        "is_online": is_online,
+                        "game_id": str(game_id) if game_id else None,
+                        "game_name": game_name,
+                        "stream_title": stream_title,
+                    }
+                    
+                    return (old_state, new_state)
+                    
         except Exception as e:
             self.logger.error(
                 f"Failed to update streamer {streamer_id}: {e}", exc_info=True
@@ -985,7 +1029,7 @@ class Database:
     @db_retry()
     async def list_online_streamers(self) -> List[Dict[str, Any]]:
         """
-        Получение списка всех онлайн стримеров.
+        Получение списка всех онлайн стримеров с агрегированными назначениями.
         """
         try:
             async with self.pool.acquire() as conn:
@@ -996,8 +1040,19 @@ class Database:
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.added_at, s.added_by_id, s.updated_at,
-                            a.pr_id as assigned_pr_id, 
-                            ss.started_at as assigned_at
+                            MIN(a.pr_id) as assigned_pr_id,
+                            COALESCE(
+                                JSON_ARRAYAGG(
+                                    CASE WHEN a.pr_id IS NOT NULL THEN
+                                        JSON_OBJECT(
+                                            'pr_id', a.pr_id,
+                                            'is_probation', COALESCE(ss.is_probation, FALSE),
+                                            'assigned_at', ss.started_at
+                                        )
+                                    ELSE NULL END
+                                ),
+                                JSON_ARRAY()
+                            ) as assignments
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
                         LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
@@ -1005,9 +1060,18 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         WHERE s.is_online = TRUE
+                        GROUP BY s.streamer_id
+                        ORDER BY s.priority DESC, s.streamer_name ASC
                         """
                     )
-                    return await cursor.fetchall()
+                    results = await cursor.fetchall()
+                    # Clean up assignments (remove nulls)
+                    for r in results:
+                        if isinstance(r.get("assignments"), str):
+                            r["assignments"] = json.loads(r["assignments"])
+                        if r.get("assignments"):
+                            r["assignments"] = [x for x in r["assignments"] if x is not None]
+                    return results
         except Exception as e:
             self.logger.error(f"Failed to list online streamers: {e}", exc_info=True)
             raise
@@ -1020,7 +1084,8 @@ class Database:
         self,
         notification_channel_id: Optional[int] = None,
         monitoring_channel_id: Optional[int] = None,
-        monitoring_message_id: Optional[int] = None,
+        monitoring_message_ids: Optional[list] = None,
+        monitoring_filter_gta: Optional[bool] = None,
         pr_actions_channel_id: Optional[int] = None,
         control_panel_channel_id: Optional[int] = None,
         control_panel_message_id: Optional[int] = None,
@@ -1031,7 +1096,8 @@ class Database:
         Args:
             notification_channel_id: Discord channel ID for notifications (optional)
             monitoring_channel_id: Discord channel ID for monitoring (optional)
-            monitoring_message_id: Discord message ID for monitoring embed (optional)
+            monitoring_message_ids: List of Discord message IDs for monitoring (optional)
+            monitoring_filter_gta: Filter monitoring to GTA streamers only (optional)
             pr_actions_channel_id: Discord channel ID for PR actions (optional)
             control_panel_channel_id: Discord channel ID for control panel (optional)
             control_panel_message_id: Discord message ID for control panel embed (optional)
@@ -1039,14 +1105,14 @@ class Database:
         """
         try:
             self.logger.debug(
-                f"""Saving guild settings: notification channel={notification_channel_id}, monitoring channel={monitoring_channel_id}, monitoring message={monitoring_message_id}, 
+                f"""Saving guild settings: notification channel={notification_channel_id}, monitoring channel={monitoring_channel_id}, 
                 PR actions channel={pr_actions_channel_id}, control panel channel={control_panel_channel_id}, control panel message={control_panel_message_id}, assistant role={assistant_role_id}"""
             )
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     # First, get existing settings using the same cursor to ensure consistency
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id FROM settings",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id FROM settings",
                     )
                     existing = await cursor.fetchone()
 
@@ -1067,12 +1133,23 @@ class Database:
                             existing.get("monitoring_channel_id") if existing else None
                         )
                     )
-                    final_monitoring_message = (
-                        monitoring_message_id
-                        if monitoring_message_id is not None
-                        else (
-                            existing.get("monitoring_message_id") if existing else None
-                        )
+                    
+                    # Handle monitoring_message_ids (JSON list)
+                    existing_ids = existing.get("monitoring_message_ids") if existing else None
+                    if isinstance(existing_ids, str):
+                        import json as json_module
+                        existing_ids = json_module.loads(existing_ids)
+                    final_monitoring_message_ids = (
+                        monitoring_message_ids
+                        if monitoring_message_ids is not None
+                        else existing_ids
+                    )
+                    # Serialize to JSON for MySQL
+                    import json as json_module
+                    final_monitoring_ids_json = (
+                        json_module.dumps(final_monitoring_message_ids)
+                        if final_monitoring_message_ids is not None
+                        else None
                     )
                     final_pr_actions_channel = (
                         pr_actions_channel_id
@@ -1105,6 +1182,12 @@ class Database:
                         if assistant_role_id is not None
                         else (existing.get("assistant_role_id") if existing else None)
                     )
+                    
+                    final_filter_gta = (
+                        monitoring_filter_gta
+                        if monitoring_filter_gta is not None
+                        else (existing.get("monitoring_filter_gta") if existing else False)
+                    )
 
                     # 1. Try to UPDATE first (Atomic update of existing row)
                     await cursor.execute(
@@ -1112,7 +1195,8 @@ class Database:
                         UPDATE settings SET
                             notification_channel_id = %s,
                             monitoring_channel_id = %s,
-                            monitoring_message_id = %s,
+                            monitoring_message_ids = %s,
+                            monitoring_filter_gta = %s,
                             pr_actions_channel_id = %s,
                             control_panel_channel_id = %s,
                             control_panel_message_id = %s,
@@ -1122,7 +1206,8 @@ class Database:
                         (
                             final_notification,
                             final_monitoring_channel,
-                            final_monitoring_message,
+                            final_monitoring_ids_json,
+                            final_filter_gta,
                             final_pr_actions_channel,
                             final_control_panel_channel,
                             final_control_panel_message,
@@ -1134,14 +1219,15 @@ class Database:
                     if cursor.rowcount == 0:
                         await cursor.execute(
                             """
-                            INSERT INTO settings (id, notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
-                            SELECT 1, %s, %s, %s, %s, %s, %s, %s
+                            INSERT INTO settings (id, notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
+                            SELECT 1, %s, %s, %s, %s, %s, %s, %s, %s
                             WHERE NOT EXISTS (SELECT 1 FROM settings)
                             """,
                             (
                                 final_notification,
                                 final_monitoring_channel,
-                                final_monitoring_message,
+                                final_monitoring_ids_json,
+                                final_filter_gta,
                                 final_pr_actions_channel,
                                 final_control_panel_channel,
                                 final_control_panel_message,
@@ -1165,7 +1251,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
                     )
                     return await cursor.fetchone()
         except Exception as e:

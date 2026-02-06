@@ -267,21 +267,12 @@ async def update_streamer_status(
     """
     Update streamer online status.
     Called by Twitch bot when receiving EventSub events.
-    Accepts JSON body for proper REST semantics.
-    Now also publishes appropriate RabbitMQ events based on state changes.
+    Uses atomic database update to prevent race conditions.
     """
     trace_id = get_trace_id(request)
 
-    # Get current state BEFORE update
-    streamer = await db.get_streamer(twitch_id)
-    if not streamer:
-        raise HTTPException(status_code=404, detail="Стример не найден")
-
-    old_is_online = streamer.get("is_online", False)
-    old_game_id = str(streamer.get("game_id")) if streamer.get("game_id") else None
-
-    # Update database
-    await db.update_streamer_status(
+    # Atomic update - returns (old_state, new_state) with row locking
+    old_state, new_state = await db.update_streamer_status(
         streamer_id=twitch_id,
         is_online=data.is_online,
         started_at=data.started_at,
@@ -291,13 +282,19 @@ async def update_streamer_status(
         stream_thumbnail_url=data.stream_thumbnail_url,
     )
 
+    if old_state is None:
+        raise HTTPException(status_code=404, detail="Стример не найден")
+
+    # Extract state values
+    streamer_name = old_state["streamer_name"]
+    old_is_online = old_state["is_online"]
+    old_game_id = old_state["game_id"]
+    new_game_id = new_state["game_id"]
+
     # Publish events based on state changes
     if broker:
-        streamer_name = streamer["streamer_name"]
-        new_game_id = str(data.game_id) if data.game_id else None
-
         broker.logger.info(
-            f"DEBUG Check: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id} | GameName: {data.game_name}"
+            f"Atomic update: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id}"
         )
 
         # === AUTO-UNASSIGN LOGIC ===
@@ -326,7 +323,6 @@ async def update_streamer_status(
                 broker.logger.info(
                     f"AUTO-UNASSIGN: {streamer_name} | Reason: {unassign_reason} | PR: {result['pr_id']} | Duration: {result['duration_seconds']}s"
                 )
-                # Emit spec unclaimed event for Discord bot to update UI
                 await broker.emit_spec_unclaimed(
                     streamer_id=twitch_id,
                     streamer_name=streamer_name,
@@ -337,7 +333,7 @@ async def update_streamer_status(
                 )
 
         # === BROKER NOTIFICATIONS ===
-        # Online/Offline state change
+        # Only emit events if there was an actual state change
         if data.is_online and not old_is_online:
             # Stream went ONLINE
             await broker.emit_stream_online(
@@ -357,7 +353,7 @@ async def update_streamer_status(
                 trace_id=trace_id,
             )
         elif data.is_online and old_is_online and old_game_id != new_game_id:
-            # Category changed while online
+            # Category changed while online (atomic check prevents duplicates)
             await broker.emit_category_change(
                 streamer_id=twitch_id,
                 streamer_name=streamer_name,
@@ -369,7 +365,6 @@ async def update_streamer_status(
                 trace_id=trace_id,
             )
 
-    # trace_id already extracted at the start of function
     return JSONResponse(
         content=success_envelope(
             data={"streamer_id": twitch_id},

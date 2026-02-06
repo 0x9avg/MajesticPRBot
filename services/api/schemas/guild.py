@@ -2,21 +2,37 @@
 Guild schemas for API requests and responses.
 """
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from schemas.common import Snowflake
+
+
+def _parse_json_list(v: Any) -> Optional[list]:
+    """Parse JSON string to list if needed."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return json.loads(v)
+    return v
 
 
 class GuildSettingsUpdate(BaseModel):
     notification_channel_id: Optional[Snowflake] = None
     monitoring_channel_id: Optional[Snowflake] = None
-    monitoring_message_id: Optional[Snowflake] = None
+    monitoring_message_ids: Optional[list] = None
+    monitoring_filter_gta: Optional[bool] = None
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
     assistant_role_id: Optional[Snowflake] = None
+
+    @field_validator("monitoring_message_ids", mode="before")
+    @classmethod
+    def parse_message_ids(cls, v: Any) -> Optional[list]:
+        return _parse_json_list(v)
 
 
 class GuildTemplatesUpdate(BaseModel):
@@ -39,7 +55,8 @@ class GuildSettingsResponse(BaseModel):
 
     notification_channel_id: Optional[Snowflake] = None
     monitoring_channel_id: Optional[Snowflake] = None
-    monitoring_message_id: Optional[Snowflake] = None
+    monitoring_message_ids: Optional[list] = None
+    monitoring_filter_gta: Optional[bool] = None
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
@@ -54,6 +71,11 @@ class GuildSettingsResponse(BaseModel):
     p3_rate: Optional[float] = None
     probation_rate: Optional[float] = None
 
+    @field_validator("monitoring_message_ids", mode="before")
+    @classmethod
+    def parse_message_ids(cls, v: Any) -> Optional[list]:
+        return _parse_json_list(v)
+
     class Config:
         from_attributes = True
 
@@ -63,11 +85,17 @@ class GuildSettingsOnlyResponse(BaseModel):
 
     notification_channel_id: Optional[Snowflake] = None
     monitoring_channel_id: Optional[Snowflake] = None
-    monitoring_message_id: Optional[Snowflake] = None
+    monitoring_message_ids: Optional[list] = None
+    monitoring_filter_gta: Optional[bool] = None
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
     assistant_role_id: Optional[Snowflake] = None
+
+    @field_validator("monitoring_message_ids", mode="before")
+    @classmethod
+    def parse_message_ids(cls, v: Any) -> Optional[list]:
+        return _parse_json_list(v)
 
     class Config:
         from_attributes = True
@@ -96,4 +124,3 @@ class GuildRatesResponse(BaseModel):
 
     class Config:
         from_attributes = True
-

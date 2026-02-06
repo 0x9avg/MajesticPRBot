@@ -279,6 +279,18 @@ class APIClient:
             return result.get("streamer")
         return None
 
+    async def get_claimable_streamers(self, user_id: int) -> Dict:
+        """Get streamers available for claim by a specific user.
+        
+        Returns dict with:
+        - streamers: list of {streamer_id, streamer_name, priority, main_free, probation_free}
+        - can_spec_probation: bool
+        """
+        result = await self._request("GET", "/spec/claimable", params={"user_id": user_id})
+        if result and "streamers" in result:
+            return result
+        return {"streamers": [], "can_spec_probation": False}
+
 
 
     async def get_assistants(self) -> List[Dict]:

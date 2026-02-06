@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
+from utils import safe_defer
 
 
 class AdminMainView(disnake.ui.View):
@@ -182,8 +183,7 @@ class AdminCore(commands.Cog):
             return
 
         # Back to main menu
-        if not interaction.response.is_done():
-            await interaction.response.defer()
+        await safe_defer(interaction, ephemeral=False)
         await interaction.edit_original_response(
             embed=get_main_embed(), view=AdminMainView(self.bot)
         )

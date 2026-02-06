@@ -3,7 +3,7 @@
 import datetime
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import disnake
 from config import Config
@@ -50,6 +50,43 @@ class UserAuthCache:
     def clear(self) -> None:
         """Clear entire cache."""
         self._cache.clear()
+
+
+def parse_to_unix(value: Union[str, datetime.datetime, None]) -> int:
+    """
+    Convert API timestamp (ISO 8601) or datetime object to Unix timestamp.
+
+    Args:
+        value: ISO 8601 string (e.g., '2026-02-05T19:07:14' or '2026-02-05T19:07:14Z'),
+               a datetime object, or None.
+
+    Returns:
+        Unix timestamp as an integer, or 0 if parsing fails or value is None.
+    """
+    if value is None:
+        return 0
+
+    try:
+        if isinstance(value, str):
+            # Handle ISO format with optional 'Z' suffix
+            dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # If naive (no timezone), assume Local System Time and convert to UTC
+            if dt.tzinfo is None:
+                dt = dt.astimezone(datetime.timezone.utc)
+            return int(dt.timestamp())
+        elif isinstance(value, datetime.datetime):
+            # If naive, assume Local System Time and convert to UTC
+            if value.tzinfo is None:
+                value = value.astimezone(datetime.timezone.utc)
+            return int(value.timestamp())
+        elif isinstance(value, datetime.date):
+            # Convert date to datetime at midnight UTC
+            dt = datetime.datetime.combine(value, datetime.time.min).replace(tzinfo=datetime.timezone.utc)
+            return int(dt.timestamp())
+    except Exception as e:
+        logger.warning(f"Failed to parse timestamp '{value}': {e}")
+
+    return 0
 
 
 def format_spec_duration(seconds: int) -> str:
@@ -135,23 +172,7 @@ def create_streamers_embed(
 
     for streamer in online_streamers_sorted:
         streamer_name = streamer["streamer_name"]
-        started_at = streamer.get("started_at")
-
-        # Handle various date formats (str or datetime)
-        started_at_unix = 0
-        if started_at:
-            if isinstance(started_at, str):
-                try:
-                    # ISO format parsing
-                    dt = datetime.datetime.fromisoformat(
-                        started_at.replace("Z", "+00:00")
-                    )
-                    started_at_unix = int(dt.timestamp())
-                except Exception as e:
-                    logger.error(f"Error while ISO format parsing: {e}")
-                    started_at_unix = 0
-            elif isinstance(started_at, (datetime.datetime, datetime.date)):
-                started_at_unix = int(started_at.timestamp())
+        started_at_unix = parse_to_unix(streamer.get("started_at"))
 
         stream_title = streamer.get("stream_title") or "Без названия"
         game_name = streamer.get("game_name") or "Не в игре"
@@ -176,67 +197,56 @@ def create_streamers_component(
     subscribed_count: int,
     gta_count: int,
     events: List[Dict[str, Any]] = None,
-) -> disnake.ui.Container:
-    """Create UI component with streamers and events (for Monitoring)."""
+    online_count: int = None,
+) -> List[disnake.ui.Container]:
+    """Create UI components with streamers and events (for Monitoring).
+    
+    Returns a list of Containers, each representing one Discord message page.
+    Pagination is used to stay within Discord's 40-component limit per message.
+    """
     if events is None:
         events = []
 
     now_unix = int(time.time())
+    
+    # Constants for pagination
+    STREAMERS_PER_PAGE = 5
 
-    # Handle empty states
+    # Handle empty states - return single page
     if subscribed_count == 0 and not events:
-        return disnake.ui.Container(
+        return [disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 📭 Нет подписок"),
             disnake.ui.TextDisplay(
                 content="Этот сервер не подписан ни на одного стримера."
             ),
             disnake.ui.TextDisplay(
-                content="Используйте `/add_streamer` чтобы добавить стримера."
+                content="Добавьте стримеров для мониторинга."
             ),
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
             disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
-        )
+            accent_colour=disnake.Colour(65358),
+        )]
 
     if not online_streamers and not events:
-        return disnake.ui.Container(
+        return [disnake.ui.Container(
             disnake.ui.TextDisplay(content="### 😴 Все офлайн"),
             disnake.ui.TextDisplay(
                 content=f"Из **{subscribed_count}** подписанных стримеров сейчас никто не в эфире."
             ),
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
             disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"),
-        )
+            accent_colour=disnake.Colour(65358),
+        )]
 
     # Sort streamers by priority
     online_streamers_sorted = sorted(
         online_streamers, key=lambda s: s.get("priority", 0), reverse=True
     )
-
-    # Build all components for the container
-    components = [
-        disnake.ui.TextDisplay(content="### 🎥 Стримеры онлайн — Majestic"),
-        disnake.ui.TextDisplay(
-            content=f"**Онлайн**: {len(online_streamers)} · **В GTA:** {gta_count} · **Всего:** {subscribed_count}"
-        ),
-    ]
-
-    for streamer in online_streamers_sorted:
+    
+    def build_streamer_components(streamer: Dict[str, Any]) -> List:
+        """Build 4 components for a single streamer."""
         streamer_name = streamer["streamer_name"]
-        started_at = streamer.get("started_at")
-        started_at_unix = 0
-        if started_at:
-            if isinstance(started_at, str):
-                try:
-                    dt = datetime.datetime.fromisoformat(
-                        started_at.replace("Z", "+00:00")
-                    )
-                    started_at_unix = int(dt.timestamp())
-                except Exception as e:
-                    logger.error(f"Error while ISO format parsing: {e}")
-                    started_at_unix = 0
-            elif isinstance(started_at, (datetime.datetime, datetime.date)):
-                started_at_unix = int(started_at.timestamp())
-
+        started_at_unix = parse_to_unix(streamer.get("started_at"))
         stream_title = streamer.get("stream_title") or "Без названия"
         game_name = streamer.get("game_name") or "Не в игре"
         priority = streamer.get("priority", 0)
@@ -250,7 +260,6 @@ def create_streamers_component(
         
         main_pr = None
         prob_pr = None
-        
         if assignments:
             for a in assignments:
                 if a.get("is_probation"):
@@ -258,93 +267,89 @@ def create_streamers_component(
                 else:
                     main_pr = a.get("pr_id")
 
-
         lines = []
-        # Line 1: Main or Free
         if main_pr:
             lines.append(f"👤 PR: <@{main_pr}>")
         else:
             lines.append("👤 PR: *свободен*")
-            
-        # Line 2: Probation (if exists)
         if prob_pr:
             lines.append(f"👤 PR стажировка: <@{prob_pr}>")
-            
         pr_line = "\n".join(lines)
 
-        components.append(
-            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
-        )
-        components.append(
-            disnake.ui.TextDisplay(content=f"### {game_emoji} {streamer_name}")
-        )
-        components.append(
+        return [
+            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
+            disnake.ui.TextDisplay(content=f"### {game_emoji} {streamer_name}"),
             disnake.ui.TextDisplay(
                 content=f"**{stream_title[:50]}{'...' if len(stream_title) > 50 else ''}**"
-            )
-        )
-        components.append(
+            ),
             disnake.ui.Section(
                 disnake.ui.TextDisplay(
                     content=f"🏷 Приоритет: **{priority}**\n🎮 **{game_name}**\n🕒 Стримит: <t:{started_at_unix}:R>\n{pr_line}\n🔗 https://twitch.tv/{streamer_name}"
                 ),
                 accessory=disnake.ui.Thumbnail(media=thumbnail_url),
-            )
-        )
+            ),
+        ]
 
-    # Add Events Section
-    if events:
-        components.append(
-            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.large)
-        )
-        components.append(disnake.ui.TextDisplay(content="### 🎉 Активные события"))
+    def build_event_components(event: Dict[str, Any]) -> List:
+        """Build components for a single event."""
+        start_unix = parse_to_unix(event.get("start_time"))
+        participant_count = event.get("current_participants", 0)
+        required = event.get("required_pr_count", 0)
+        return [
+            disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
+            disnake.ui.TextDisplay(content=f"### {event['name']}"),
+            disnake.ui.TextDisplay(
+                content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', '')) > 100 else ''}"
+            ),
+            disnake.ui.TextDisplay(
+                content=f"👥 **Участников:** {participant_count} / {required}\n🕒 **Начало:** <t:{start_unix}:R>"
+            ),
+        ]
 
-        for event in events:
-            # Parse start_time
-            start_time = event.get("start_time")
-            start_unix = 0
-            if start_time:
-                if isinstance(start_time, str):
-                    try:
-                        dt = datetime.datetime.fromisoformat(
-                            start_time.replace("Z", "+00:00")
-                        )
-                        start_unix = int(dt.timestamp())
-                    except Exception as e:
-                        logger.error(f"Error while ISO format parsing: {e}")
-                        started_at_unix = 0
-                elif isinstance(start_time, (datetime.datetime, datetime.date)):
-                    start_unix = int(start_time.timestamp())
-
-            participant_count = event.get("current_participants", 0)
-            required = event.get("required_pr_count", 0)
-
-            components.append(
-                disnake.ui.Separator(
-                    divider=True, spacing=disnake.SeparatorSpacing.small
-                )
-            )
-            components.append(disnake.ui.TextDisplay(content=f"### {event['name']}"))
-            components.append(
-                disnake.ui.TextDisplay(
-                    content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', ''))>100 else ''}"
-                )
-            )
-            components.append(
-                disnake.ui.TextDisplay(
-                    content=f"👥 **Участников:** {participant_count} / {required}\n🕒 **Начало:** <t:{start_unix}:R>"
-                )
-            )
-
-    # Add last updated timestamp at the bottom
-    components.append(
-        disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small)
-    )
-    components.append(
-        disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>")
-    )
-
-    return disnake.ui.Container(*components, accent_colour=disnake.Colour(65358))
+    # Build all pages
+    pages = []
+    
+    # Split streamers into chunks
+    streamer_chunks = [
+        online_streamers_sorted[i:i + STREAMERS_PER_PAGE]
+        for i in range(0, len(online_streamers_sorted), STREAMERS_PER_PAGE)
+    ]
+    
+    if not streamer_chunks:
+        streamer_chunks = [[]]  # At least one empty chunk for events
+    
+    for page_idx, chunk in enumerate(streamer_chunks):
+        components = []
+        
+        # First page: add header
+        if page_idx == 0:
+            # Use online_count if provided, else fallback to len of list
+            display_online = online_count if online_count is not None else len(online_streamers)
+            components.append(disnake.ui.TextDisplay(content="### 🎥 Стримеры онлайн — Majestic"))
+            components.append(disnake.ui.TextDisplay(
+                content=f"**Онлайн**: {display_online} · **В GTA:** {gta_count} · **Всего:** {subscribed_count}"
+            ))
+        
+        # Add streamer components
+        for streamer in chunk:
+            components.extend(build_streamer_components(streamer))
+        
+        # Last page: add events and footer
+        is_last_page = page_idx == len(streamer_chunks) - 1
+        if is_last_page:
+            if events:
+                components.append(disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.large))
+                components.append(disnake.ui.TextDisplay(content="### 🎉 Активные события"))
+                for event in events:
+                    components.extend(build_event_components(event))
+            
+            # Footer timestamp
+            components.append(disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small))
+            components.append(disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"))
+        
+        pages.append(disnake.ui.Container(*components, accent_colour=disnake.Colour(65358)))
+    
+    return pages
 
 
 def create_notification_component(
@@ -423,52 +428,19 @@ def create_notification_component(
 def create_monitoring_select(
     available_streamers: list, events: list = None
 ) -> disnake.ui.ActionRow:
-    """Create dropdown for monitoring message."""
-    options = []
-
-    # Add Streamers
-    for s in available_streamers:
-        options.append(
-            disnake.SelectOption(
-                label=s["streamer_name"],
-                value=str(s["streamer_id"]),
-                description="Взять медиа (GTA 5)",
-                emoji="🎯",
-            )
-        )
-
-    # Add Events
-    if events:
-        for e in events:
-            options.append(
-                disnake.SelectOption(
-                    label=e["name"][:100],
-                    value=f"event_{e['id']}",
-                    description=f"Событие (PR: {e.get('current_participants')}/{e.get('required_pr_count')})",
-                    emoji="🎉",
-                )
-            )
-
-    if not options:
-        options.append(
-            disnake.SelectOption(
-                label="Нет доступных медиа/событий",
-                value="none",
-                description="Все занято или пусто",
-                default=True,
-            )
-        )
-
-    select = disnake.ui.StringSelect(
-        placeholder="🎯 Взять медиа / 🎉 Событие",
-        min_values=1,
-        max_values=1,
-        options=options[:25],  # Max 25 options
-        custom_id="spec_claim_select",
-        disabled=not options or (len(options) == 1 and options[0].value == "none"),
+    """Create action row with Claim/Unclaim buttons for monitoring."""
+    claim_btn = disnake.ui.Button(
+        label="📥 Закрепиться",
+        style=disnake.ButtonStyle.success,
+        custom_id="monitoring_claim",
     )
-
-    return disnake.ui.ActionRow(select)
+    unclaim_btn = disnake.ui.Button(
+        label="📤 Открепиться",
+        style=disnake.ButtonStyle.danger,
+        custom_id="monitoring_unclaim",
+    )
+    
+    return disnake.ui.ActionRow(claim_btn, unclaim_btn)
 
 
 def format_notification_template(
@@ -490,3 +462,44 @@ def format_notification_template(
     except Exception:
         # Return fallback
         return f"{template} (Error formatting) - {streamer_name}"
+
+
+async def safe_defer(interaction: disnake.Interaction, ephemeral: bool = True) -> bool:
+    """
+    Safely defer an interaction.
+    Returns True if valid (deferred or already done), False if invalid/unknown.
+    """
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=ephemeral)
+        return True
+    except (disnake.NotFound, disnake.HTTPException, disnake.InteractionResponded):
+        return False
+    except Exception as e:
+        logger.warning(f"Unexpected error during defer: {e}")
+        return False
+
+
+async def handle_interaction_error(
+    interaction: disnake.Interaction, 
+    error: Exception, 
+    logger_instance: logging.Logger = None
+):
+    """
+    Handle errors during interaction processing.
+    Logs the error and sends a user-friendly message.
+    """
+    if logger_instance:
+        logger_instance.error(f"Interaction error: {error}", exc_info=True)
+    else:
+        logger.error(f"Interaction error: {error}", exc_info=True)
+
+    msg = f"❌ Ошибка: {str(error)}"
+    
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass

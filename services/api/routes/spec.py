@@ -377,3 +377,90 @@ async def get_current_streamer_for_pr(
             trace_id=trace_id,
         )
     )
+
+
+@router.get("/claimable")
+async def get_claimable_streamers(
+    request: Request,
+    user_id: int,
+    db: "Database" = Depends(get_db),
+):
+    """
+    Get streamers available for claim by a specific user.
+    
+    Filters based on:
+    - Online status
+    - GTA category
+    - User permissions (can_spec_probation for probation slots)
+    
+    Returns streamers with slot availability info.
+    """
+    trace_id = get_trace_id(request)
+    
+    # Get user capabilities via role-based permissions
+    assistant = await db.get_assistant(user_id)
+    can_spec_probation = False
+    if assistant:
+        role = assistant.get("role", "employee")
+        permissions = await db.get_role_permissions(role)
+        can_spec_probation = permissions.get("can_spec_probation", False)
+    
+    # Get all online GTA streamers with assignments
+    all_streamers = await db.list_online_streamers()
+    
+    claimable = []
+    gta_game_id = Config.gta5_game_id
+    
+    for s in all_streamers:
+        # Must be GTA
+        if str(s.get("game_id")) != gta_game_id:
+            continue
+        
+        # Determine slot availability
+        assignments = s.get("assignments", [])
+        if isinstance(assignments, str):
+            import json
+            assignments = json.loads(assignments)
+        
+        main_free = True
+        probation_free = True
+        for a in assignments:
+            if a is None:
+                continue
+            if a.get("is_probation"):
+                probation_free = False
+            else:
+                main_free = False
+        
+        
+        # Filter logic:
+        # - Regular user: only show if main_free
+        # - Junior (can_spec_probation): show if main_free OR probation_free
+        if can_spec_probation:
+            if not main_free and not probation_free:
+                continue  # Both slots taken
+        else:
+            if not main_free:
+                continue  # Main slot taken
+        
+        claimable.append({
+            "streamer_id": s["streamer_id"],
+            "streamer_name": s["streamer_name"],
+            "priority": s.get("priority", 3),
+            "main_free": main_free,
+            "probation_free": probation_free,
+        })
+    
+    # Sort by priority (P0 first)
+    claimable.sort(key=lambda x: x["priority"])
+    
+    return JSONResponse(
+        content=success_envelope(
+            data={
+                "streamers": claimable,
+                "can_spec_probation": can_spec_probation,
+            },
+            message=f"Found {len(claimable)} claimable streamers",
+            trace_id=trace_id,
+        )
+    )

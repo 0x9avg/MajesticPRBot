@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands, tasks
+from utils import parse_to_unix
 
 # =============================================================================
 # Events Embed
@@ -37,12 +38,8 @@ async def get_events_embed(api) -> disnake.Embed:
         embed.description = "Нет активных событий.\nСоздайте новое!"
     else:
         for event in events:
-            try:
-                st = datetime.fromisoformat(event["start_time"].replace("Z", "+00:00"))
-                ts = int(st.timestamp())
-                time_str = f"<t:{ts}:R>"
-            except Exception:
-                time_str = "?"
+            ts = parse_to_unix(event.get("start_time"))
+            time_str = f"<t:{ts}:R>" if ts else "?"
 
             embed.add_field(
                 name=f"📅 {event['name']}",
@@ -260,10 +257,11 @@ class EventEndSelect(disnake.ui.StringSelect):
     def __init__(self, events: list):
         options = []
         for e in events[:25]:
-            try:
-                st = datetime.fromisoformat(e["start_time"].replace("Z", "+00:00"))
-                time_str = st.strftime("%d.%m %H:%M")
-            except Exception:
+            ts = parse_to_unix(e.get("start_time"))
+            if ts:
+                from datetime import datetime, timezone
+                time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d.%m %H:%M")
+            else:
                 time_str = "?"
             options.append(
                 disnake.SelectOption(

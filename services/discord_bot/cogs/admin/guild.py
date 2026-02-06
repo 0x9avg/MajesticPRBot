@@ -74,6 +74,14 @@ def create_guild_settings_embed(data: dict | None) -> disnake.Embed:
         inline=False,
     )
 
+    # GTA Filter status
+    gta_filter_on = data.get("monitoring_filter_gta", False)
+    embed.add_field(
+        name="🎮 Фильтр мониторинга",
+        value="✅ Только GTA" if gta_filter_on else "❌ Все стримеры",
+        inline=False,
+    )
+
     return embed
 
 
@@ -81,6 +89,7 @@ def create_guild_settings_embed(data: dict | None) -> disnake.Embed:
 # Component IDs
 # =============================================================================
 ID_SETUP_POINTS = "guild_setup_points"
+ID_TOGGLE_GTA_FILTER = "guild_toggle_gta_filter"
 ID_BTN_HOME = "admin_home"
 
 
@@ -92,7 +101,7 @@ ID_BTN_HOME = "admin_home"
 class GuildSettingsView(disnake.ui.View):
     """View for guild settings - points configuration."""
 
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, gta_filter_on: bool = False):
         super().__init__(timeout=None)
         self.user_id = user_id
 
@@ -105,6 +114,16 @@ class GuildSettingsView(disnake.ui.View):
                 row=0,
             )
         )
+        
+        # GTA filter toggle button
+        self.add_item(
+            disnake.ui.Button(
+                label="🎮 Только GTA" if gta_filter_on else "🎮 Все стримеры",
+                custom_id=ID_TOGGLE_GTA_FILTER,
+                style=disnake.ButtonStyle.primary if gta_filter_on else disnake.ButtonStyle.secondary,
+                row=0,
+            )
+        )
 
         # Back to main
         self.add_item(
@@ -112,7 +131,7 @@ class GuildSettingsView(disnake.ui.View):
                 label="🏠 Главная",
                 custom_id=ID_BTN_HOME,
                 style=disnake.ButtonStyle.secondary,
-                row=0,
+                row=1,
             )
         )
 
@@ -223,7 +242,7 @@ class AdminGuild(commands.Cog):
         custom_id = interaction.component.custom_id or ""
 
         # Strict Filter - only handle guild_ and admin_guild
-        if not custom_id.startswith(("guild_setup_", "admin_guild")):
+        if not custom_id.startswith(("guild_setup_", "guild_toggle_", "admin_guild")):
             return
 
         # Safe Defer (except for modal)
@@ -240,9 +259,34 @@ class AdminGuild(commands.Cog):
             # Navigation from main menu
             if custom_id == "admin_guild":
                 data = await self.api.get_guild_settings()
+                gta_filter_on = data.get("monitoring_filter_gta", False) if data else False
                 await interaction.edit_original_response(
                     embed=create_guild_settings_embed(data),
-                    view=GuildSettingsView(user_id),
+                    view=GuildSettingsView(user_id, gta_filter_on),
+                )
+
+            elif custom_id == ID_TOGGLE_GTA_FILTER:
+                # Toggle GTA filter
+                data = await self.api.get_guild_settings()
+                current_value = data.get("monitoring_filter_gta", False) if data else False
+                new_value = not current_value
+                
+                await self.api.update_guild_settings(monitoring_filter_gta=new_value)
+                
+                # Refresh monitoring messages
+                await self.api.refresh_monitoring()
+                
+                # Refresh embed and view
+                data = await self.api.get_guild_settings()
+                gta_filter_on = data.get("monitoring_filter_gta", False) if data else False
+                await interaction.edit_original_response(
+                    embed=create_guild_settings_embed(data),
+                    view=GuildSettingsView(user_id, gta_filter_on),
+                )
+                
+                status_text = "включён" if new_value else "выключен"
+                await interaction.followup.send(
+                    f"✅ Фильтр GTA {status_text}!", ephemeral=True
                 )
 
             elif custom_id == ID_SETUP_POINTS:

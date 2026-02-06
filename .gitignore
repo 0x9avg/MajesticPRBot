@@ -238,3 +238,4 @@ services/*/__pycache__/
 services/*/venv/
 services/*/logs/
 db_schema.txt
+streamers.json

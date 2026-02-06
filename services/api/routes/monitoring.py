@@ -104,6 +104,7 @@ async def get_monitoring_status(
                 "game_name": s.get("game_name"),
                 "stream_title": s.get("stream_title"),
                 "stream_thumbnail_url": s.get("stream_thumbnail_url"),
+                "started_at": s.get("started_at"),
                 "is_gta": is_gta,
                 "priority": s.get("priority", 3),
                 "assignments": s.get("assignments", []),

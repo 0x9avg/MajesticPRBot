@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
+from utils import safe_defer, handle_interaction_error
 
 
 # =============================================================================
@@ -94,8 +95,7 @@ class AddStreamerModal(disnake.ui.Modal):
                 content=f"✅ Стример **{username}** добавлен!"
             )
         except Exception as e:
-            self.bot.logger.error(f"Add streamer error: {e}")
-            await interaction.edit_original_message(content=f"❌ Ошибка: {e}")
+            await handle_interaction_error(interaction, e, self.bot.logger)
 
 
 # =============================================================================
@@ -145,74 +145,119 @@ class EditStreamerModal(disnake.ui.Modal):
 
 
 # =============================================================================
-# Streamer Select Views
+# Direct Input Modals (Edit / Delete by Nickname)
 # =============================================================================
 
 
-class EditStreamerSelect(disnake.ui.StringSelect):
-    """Select for choosing streamer to edit."""
 
-    def __init__(self, streamers: list):
-        options = [
-            disnake.SelectOption(
-                label=f"{s['streamer_name']} (P{s.get('priority', 0)})",
-                value=str(s["streamer_id"]),
-            )
-            for s in streamers[:25]
+class EditStreamerByNameModal(disnake.ui.Modal):
+    """Modal for editing streamer by entering nickname and new priority."""
+
+    bot: "DiscordBot"
+
+    def __init__(self, bot: "DiscordBot"):
+        self.bot = bot
+        components = [
+            disnake.ui.TextInput(
+                label="Никнейм стримера",
+                placeholder="Введите точный никнейм Twitch",
+                custom_id="streamer_name",
+                style=disnake.TextInputStyle.short,
+            ),
+            disnake.ui.TextInput(
+                label="Новый приоритет (0-3)",
+                placeholder="0",
+                custom_id="priority",
+                style=disnake.TextInputStyle.short,
+                max_length=1,
+            ),
         ]
-        super().__init__(
-            custom_id="admin_str_edit_select",
-            placeholder="Выберите стримера для редактирования",
-            options=options,
-        )
+        super().__init__(title="Редактировать стримера", components=components)
 
-    async def callback(self, interaction: MessageInteraction):
-        streamer_id = int(self.values[0])
-        # Fetch single streamer by ID
-        streamer = await interaction.bot.api_client.get_streamer(streamer_id)
-
-        if streamer:
-            await interaction.response.send_modal(
-                EditStreamerModal(
-                    interaction.bot,
-                    streamer_id,
-                    streamer["streamer_name"],
-                    streamer.get("priority", 0),
-                )
-            )
-        else:
-            await interaction.response.send_message(
-                "❌ Стример не найден", ephemeral=True
-            )
-
-
-class DeleteStreamerSelect(disnake.ui.StringSelect):
-    """Select for choosing streamer to delete."""
-
-    def __init__(self, streamers: list):
-        options = [
-            disnake.SelectOption(
-                label=s["streamer_name"],
-                value=str(s["streamer_id"]),
-            )
-            for s in streamers[:25]
-        ]
-        super().__init__(
-            custom_id="admin_str_del_select",
-            placeholder="Выберите стримера для удаления",
-            options=options,
-        )
-
-    async def callback(self, interaction: MessageInteraction):
-        await interaction.response.defer(ephemeral=True)
-        streamer_id = int(self.values[0])
-
+    async def callback(self, interaction: disnake.ModalInteraction):
+        await safe_defer(interaction, ephemeral=True)
         try:
-            await interaction.bot.api_client.delete_streamer(streamer_id)
-            await interaction.edit_original_response(content="✅ Стример удален!")
+            name = interaction.text_values["streamer_name"].strip().lower()
+            priority_str = interaction.text_values["priority"].strip()
+            
+            if not priority_str.isdigit() or not (0 <= int(priority_str) <= 3):
+                await interaction.edit_original_message(content="❌ Приоритет должен быть числом от 0 до 3.")
+                return
+                
+            priority = int(priority_str)
+            
+            # Find streamer by name
+            streamers = await self.bot.api_client.list_all_streamers()
+            streamer = next(
+                (s for s in streamers if s["streamer_name"].lower() == name), 
+                None
+            )
+            
+            if not streamer:
+                await interaction.edit_original_message(
+                    content=f"❌ Стример **{name}** не найден"
+                )
+                return
+            
+            # Update streamer
+            await self.bot.api_client.update_streamer(
+                streamer["streamer_id"], priority=priority
+            )
+            
+            await interaction.edit_original_message(
+                content=f"✅ Стример **{streamer['streamer_name']}** обновлен!\nНовый приоритет: **{priority}**"
+            )
+
+            await interaction.edit_original_message(
+                content=f"✅ Стример **{streamer['streamer_name']}** обновлен!\nНовый приоритет: **{priority}**"
+            )
+
         except Exception as e:
-            interaction.bot.logger.error(f"Delete streamer error: {e}")
-            await interaction.edit_original_response(content="❌ Ошибка")
+            await handle_interaction_error(interaction, e, self.bot.logger)
+
+
+class DeleteStreamerByNameModal(disnake.ui.Modal):
+    """Modal for deleting streamer by entering nickname."""
+
+    bot: "DiscordBot"
+
+    def __init__(self, bot: "DiscordBot"):
+        self.bot = bot
+        components = [
+            disnake.ui.TextInput(
+                label="Никнейм стримера",
+                placeholder="Введите точный никнейм Twitch",
+                custom_id="streamer_name",
+                style=disnake.TextInputStyle.short,
+            ),
+        ]
+        super().__init__(title="Удалить стримера", components=components)
+
+    async def callback(self, interaction: disnake.ModalInteraction):
+        await safe_defer(interaction, ephemeral=True)
+        try:
+            name = interaction.text_values["streamer_name"].strip().lower()
+            
+            # Find streamer by name
+            streamers = await self.bot.api_client.list_all_streamers()
+            streamer = next(
+                (s for s in streamers if s["streamer_name"].lower() == name), 
+                None
+            )
+            
+            if not streamer:
+                await interaction.edit_original_message(
+                    content=f"❌ Стример **{name}** не найден"
+                )
+                return
+            
+            # Delete streamer
+            await self.bot.api_client.delete_streamer(streamer["streamer_id"])
+            await interaction.edit_original_message(
+                content=f"✅ Стример **{streamer['streamer_name']}** удален!"
+            )
+        except Exception as e:
+            await handle_interaction_error(interaction, e, self.bot.logger)
 
 
 # =============================================================================
@@ -286,7 +331,6 @@ class StreamersView(disnake.ui.View):
 # Admin Streamers Cog
 # =============================================================================
 
-
 class AdminStreamers(commands.Cog):
     """Streamer management."""
 
@@ -309,7 +353,7 @@ class AdminStreamers(commands.Cog):
             return
 
         # 2. SAFE DEFER (Exception for Modals)
-        if custom_id != "admin_str_add":
+        if custom_id not in ("admin_str_add", "admin_str_edit", "admin_str_del"):
             try:
                 if not interaction.response.is_done():
                     await interaction.response.defer(ephemeral=True)
@@ -330,53 +374,75 @@ class AdminStreamers(commands.Cog):
                 await interaction.response.send_modal(AddStreamerModal(self.bot))
 
             elif custom_id == "admin_str_edit":
-                streamers = await self.api.list_all_streamers()
-                if not streamers:
-                    await interaction.followup.send("Список пуст", ephemeral=True)
-                    return
-                view = disnake.ui.View(timeout=None)
-                view.add_item(EditStreamerSelect(streamers))
-                await interaction.followup.send(
-                    "Выберите стримера для редактирования:", view=view, ephemeral=True
-                )
+                # OPEN MODAL for nickname input
+                await interaction.response.send_modal(EditStreamerByNameModal(self.bot))
 
             elif custom_id == "admin_str_del":
-                streamers = await self.api.list_all_streamers()
-                if not streamers:
-                    await interaction.followup.send("Список пуст", ephemeral=True)
-                    return
-                view = disnake.ui.View(timeout=None)
-                view.add_item(DeleteStreamerSelect(streamers))
-                await interaction.followup.send(
-                    "Выберите стримера для удаления:", view=view, ephemeral=True
-                )
+                # OPEN MODAL for nickname input
+                await interaction.response.send_modal(DeleteStreamerByNameModal(self.bot))
 
             elif custom_id == "admin_str_list":
-                streamers = await self.api.list_all_streamers()
-                if not streamers:
-                    await interaction.followup.send("Список пуст", ephemeral=True)
-                    return
-                lines = [
-                    f"• **{s['streamer_name']}** (P{s.get('priority', 0)}) {'🟢' if s.get('is_online') else '⚫'}"
-                    for s in streamers
-                ]
-                content = "\n".join(lines[:50])
-                if len(lines) > 50:
-                    content += f"\n... и еще {len(lines) - 50}"
-                await interaction.followup.send(
-                    f"**Стримеры ({len(streamers)}):**\n{content}", ephemeral=True
-                )
+                # Show page 0 in new message
+                await self._show_streamer_list(interaction, page=0, new_message=True)
+
+            elif custom_id.startswith("admin_str_list_page_"):
+                # Pagination buttons
+                page = int(custom_id.split("_")[-1])
+                await self._show_streamer_list(interaction, page=page)
 
         except Exception as e:
-            self.bot.logger.error(
-                f"Error handling streamers button {custom_id}: {e}", exc_info=True
-            )
-            try:
-                await interaction.followup.send(
-                    "❌ Произошла ошибка обработки.", ephemeral=True
+            await handle_interaction_error(interaction, e, self.bot.logger)
+
+    async def _show_streamer_list(
+        self, interaction: MessageInteraction, page: int, new_message: bool = False
+    ):
+        """Show paginated streamer list."""
+        streamers = await self.api.list_all_streamers()
+        if not streamers:
+            await interaction.followup.send("Список пуст", ephemeral=True)
+            return
+
+        # Pagination
+        per_page = 25
+        total_pages = (len(streamers) + per_page - 1) // per_page
+        page = max(0, min(page, total_pages - 1))
+        start = page * per_page
+        end = start + per_page
+        page_streamers = streamers[start:end]
+
+        lines = [
+            f"• **{s['streamer_name']}** (P{s.get('priority', 0)}) {'🟢' if s.get('is_online') else '⚫'}"
+            for s in page_streamers
+        ]
+        content = f"**Стримеры ({len(streamers)}) — Стр. {page + 1}/{total_pages}:**\n" + "\n".join(lines)
+
+        # Build pagination buttons
+        view = disnake.ui.View(timeout=None)
+        if page > 0:
+            view.add_item(
+                disnake.ui.Button(
+                    label="◀ Назад",
+                    custom_id=f"admin_str_list_page_{page - 1}",
+                    style=disnake.ButtonStyle.secondary,
+                    row=0
                 )
-            except:
-                pass
+            )
+        if page < total_pages - 1:
+            view.add_item(
+                disnake.ui.Button(
+                    label="Вперед ▶",
+                    custom_id=f"admin_str_list_page_{page + 1}",
+                    style=disnake.ButtonStyle.secondary,
+                    row=0
+                )
+            )
+
+        if new_message:
+            await interaction.followup.send(content=content, view=view, ephemeral=True)
+        else:
+            await interaction.edit_original_response(content=content, view=view)
+
+
 
 
 def setup(bot: commands.Bot) -> None:

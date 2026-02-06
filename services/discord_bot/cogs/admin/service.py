@@ -266,10 +266,14 @@ class AdminService(commands.Cog):
                 if mon_channel_id:
                     channel = self.bot.get_channel(int(mon_channel_id))
                     if channel:
-                        old_msg_id = settings.get("monitoring_message_id")
-                        if old_msg_id:
+                        # Delete all old monitoring messages
+                        old_ids = settings.get("monitoring_message_ids") or []
+                        if isinstance(old_ids, str):
+                            import json
+                            old_ids = json.loads(old_ids)
+                        for old_id in old_ids:
                             try:
-                                old_msg = await channel.fetch_message(int(old_msg_id))
+                                old_msg = await channel.fetch_message(int(old_id))
                                 await old_msg.delete()
                             except Exception:
                                 pass

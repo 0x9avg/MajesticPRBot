@@ -110,7 +110,8 @@ async def update_guild_settings(
     await db.create_or_update_guild(
         notification_channel_id=data.notification_channel_id,
         monitoring_channel_id=data.monitoring_channel_id,
-        monitoring_message_id=data.monitoring_message_id,
+        monitoring_message_ids=data.monitoring_message_ids,
+        monitoring_filter_gta=data.monitoring_filter_gta,
         pr_actions_channel_id=data.pr_actions_channel_id,
         control_panel_channel_id=data.control_panel_channel_id,
         control_panel_message_id=data.control_panel_message_id,

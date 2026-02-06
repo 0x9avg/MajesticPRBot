@@ -239,17 +239,44 @@ class TwitchBot(AutoClient):
         self.logger.info(f"🔴 Stream ONLINE: {payload.broadcaster.name}")
 
         try:
-            stream = await self.get_stream_info(payload.broadcaster.id)
+            # Retry logic: Twitch API often lags behind EventSub by a few seconds
+            stream = None
+            max_retries = 5
+            retry_delay = 1.0  # seconds
+            
+            for attempt in range(max_retries):
+                stream = await self.get_stream_info(payload.broadcaster.id)
+                
+                if stream.get("is_online"):
+                    if attempt > 0:
+                        self.logger.debug(
+                            f"Stream info retrieved on attempt {attempt + 1} for {payload.broadcaster.name}"
+                        )
+                    break
+                
+                if attempt < max_retries - 1:
+                    self.logger.debug(
+                        f"API returned offline for {payload.broadcaster.name}, "
+                        f"retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(retry_delay)
+            
+            # If still no data after retries, log warning but proceed with what we have
+            if not stream.get("is_online"):
+                self.logger.warning(
+                    f"API still returns offline for {payload.broadcaster.name} after {max_retries} retries. "
+                    f"Proceeding with is_online=True but empty metadata."
+                )
 
             # Update via API (API will publish the event)
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
                 True,
-                started_at=str(stream["started_at"]) if stream["started_at"] else None,
-                game_id=stream["game_id"],
-                game_name=stream["game_name"],
-                stream_title=stream["title"],
-                stream_thumbnail_url=stream["thumbnail_url"],
+                started_at=str(stream["started_at"]) if stream.get("started_at") else None,
+                game_id=stream.get("game_id"),
+                game_name=stream.get("game_name"),
+                stream_title=stream.get("title"),
+                stream_thumbnail_url=stream.get("thumbnail_url"),
             )
 
             self.logger.debug(f"✓ Stream online processed: {payload.broadcaster.name}")

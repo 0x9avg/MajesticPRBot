@@ -15,7 +15,7 @@ import disnake
 from config import Config
 from disnake import MessageInteraction
 from disnake.ext import commands
-from utils import create_streamers_component
+from utils import create_streamers_component, create_monitoring_select
 
 from .core import AdminMainView, get_main_embed
 
@@ -397,20 +397,36 @@ class AdminSetup(commands.Cog):
                 channel_id = int(val)
                 channel = self.bot.get_channel(channel_id)
                 if channel:
-                    streamers = await self.api.list_all_streamers()
-                    online = [s for s in streamers if s.get("is_online")]
-                    gta_count = sum(
-                        1
-                        for s in online
-                        if str(s.get("game_id")) == Config.gta5_game_id
+                    # Get monitoring status from API (includes available_for_claim)
+                    status = await self.api.get_monitoring_status()
+                    if not status:
+                        await interaction.followup.send("❌ Не удалось получить данные.", ephemeral=True)
+                        return
+                    
+                    online = status.get("online_streamers", [])
+                    total_count = status.get("total_streamers", 0)
+                    gta_count = status.get("gta_count", 0)
+                    online_count = status.get("online_count", len(online))
+                    available = status.get("available_for_claim", [])
+                    
+                    pages = create_streamers_component(
+                        online, total_count, gta_count, online_count=online_count
                     )
-                    container = create_streamers_component(
-                        online, len(streamers), gta_count
-                    )
-
-                    msg = await channel.send(components=container)
+                    select_row = create_monitoring_select(available, [])
+                    
+                    # Send all pages and collect message IDs
+                    message_ids = []
+                    for i, page in enumerate(pages):
+                        if i == len(pages) - 1:
+                            # Last page: include select row
+                            msg = await channel.send(components=[page, select_row])
+                        else:
+                            msg = await channel.send(components=[page])
+                        message_ids.append(msg.id)
+                    
                     await self.api.update_guild_settings(
-                        monitoring_channel_id=channel_id, monitoring_message_id=msg.id
+                        monitoring_channel_id=channel_id, 
+                        monitoring_message_ids=message_ids
                     )
                     await back_to_main()
                     await interaction.followup.send(

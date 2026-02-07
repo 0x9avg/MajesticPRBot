@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { Users, Wifi, Activity, Radio, FileText, CalendarPlus, ShieldAlert, Bot, ChevronDown, ArrowRight } from 'lucide-react';
+import { Users, Wifi, Activity, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight } from 'lucide-react';
 
 export function MainHub() {
     const navigate = useNavigate();
@@ -79,14 +79,7 @@ export function MainHub() {
             path: '/logs',
             icon: FileText,
             color: 'from-emerald-500/20 to-emerald-600/5 hover:border-emerald-500/50'
-        },
-        {
-            title: 'События',
-            desc: 'Регистрация новых событий',
-            path: '/events/new',
-            icon: CalendarPlus,
-            color: 'from-orange-500/20 to-orange-600/5 hover:border-orange-500/50'
-        },
+        }
     ];
 
     const adminCategories = [

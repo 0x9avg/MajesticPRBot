@@ -95,24 +95,20 @@ async def claim_streamer(
             detail=f"Вы уже закреплены за стримером {current['streamer_name']}",
         )
 
-    # Check slot availability using new assignments list
     assignments = streamer.get("assignments", [])
     requested_slot = "Probation" if data.is_probation else "Main"
-
-    # Check if the requested slot is already taken
     for assignment in assignments:
         if assignment.get("is_probation") == data.is_probation:
             raise HTTPException(
                 status_code=409,
-                detail=f"Слот {requested_slot} уже занят PR <@{assignment['pr_id']}>",
+                detail=f"Слот {requested_slot} уже занят @{assignment.get('nickname', assignment['pr_id'])}",
             )
-
-    # Claim with probation flag
-    success = await db.assign_pr_to_streamer(
-        data.streamer_id, data.pr_id, is_probation=data.is_probation
-    )
-    if not success:
-        raise HTTPException(status_code=500, detail="Не удалось закрепить стримера")
+    try:
+        await db.assign_pr_to_streamer(
+            data.streamer_id, data.pr_id, is_probation=data.is_probation
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     if broker:
         await broker.emit_spec_claimed(
@@ -247,7 +243,11 @@ async def transfer_streamer(
     # Warning: Transferring DOES NOT preserve is_probation status implicitly in this logic
     # It assumes standard claim. If we want to preserve, we should check `result['is_probation']`
     # Defaulting to regular claim for now as per original logic.
-    await db.assign_pr_to_streamer(data.streamer_id, data.to_pr_id)
+    try:
+        await db.assign_pr_to_streamer(data.streamer_id, data.to_pr_id)
+    except ValueError as e:
+        # If assignment fails, we should technically revert unassignment, but transfer is complex.
+        raise HTTPException(status_code=409, detail=f"Ошибка перевода: {e}")
 
     if broker:
         await broker.publish(

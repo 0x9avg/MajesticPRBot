@@ -1,8 +1,19 @@
 import { createPortal } from 'react-dom';
-import { Check } from 'lucide-react';
+import { Check, AlertTriangle } from 'lucide-react';
 
-const NotificationToast = ({ message }: { message: string }) => {
-    console.log('NotificationToast rendering:', message);
+interface NotificationToastProps {
+    message: string;
+    type?: 'success' | 'error';
+    onClose?: () => void;
+}
+
+const NotificationToast = ({ message, type = 'success', onClose }: NotificationToastProps) => {
+    const isError = type === 'error';
+    const borderColor = isError ? 'border-red-500' : 'border-[#3b82f6]';
+    const shadowColor = isError ? 'shadow-red-500/10' : 'shadow-blue-500/10';
+    const iconBg = isError ? 'bg-red-500/20' : 'bg-[#3b82f6]/20';
+    const iconColor = isError ? 'text-red-500' : 'text-[#3b82f6]';
+
     return createPortal(
         <div
             style={{
@@ -14,9 +25,12 @@ const NotificationToast = ({ message }: { message: string }) => {
                 animation: 'fadeIn 0.3s ease-in-out'
             }}
         >
-            <div className="bg-[#121212]/80 border border-[#3b82f6] text-white px-6 py-3 rounded-xl shadow-lg shadow-blue-500/10 flex items-center gap-3 backdrop-blur-md">
-                <div className="bg-[#3b82f6]/20 p-1 rounded-full text-[#3b82f6]">
-                    <Check className="w-4 h-4" />
+            <div
+                onClick={onClose}
+                className={`bg-[#121212]/80 border ${borderColor} text-white px-6 py-3 rounded-xl shadow-lg ${shadowColor} flex items-center gap-3 backdrop-blur-md select-none cursor-pointer hover:bg-[#1e1e1e]/80 transition-colors`}
+            >
+                <div className={`${iconBg} p-1 rounded-full ${iconColor}`}>
+                    {isError ? <AlertTriangle className="w-4 h-4" /> : <Check className="w-4 h-4" />}
                 </div>
                 <span className="font-medium text-sm">{message}</span>
             </div>

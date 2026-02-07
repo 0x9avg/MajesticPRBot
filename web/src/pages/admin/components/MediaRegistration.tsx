@@ -15,6 +15,15 @@ const MediaRegistration = () => {
             return;
         }
 
+        // Basic Twitch validation
+        const twitchRegex = /^(?:https?:\/\/)?(?:www\.)?(?:twitch\.tv\/)?([a-zA-Z0-9_]{4,25})\/?$/;
+        const match = urlInput.match(twitchRegex);
+
+        if (!match) {
+            setMessage({ type: 'error', text: 'Некорректная ссылка Twitch' });
+            return;
+        }
+
         setLoading(true);
         setMessage(null);
 
@@ -37,11 +46,14 @@ const MediaRegistration = () => {
             const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data.detail || 'Ошибка при добавлении медиа');
+                // Try to extract detail from FastAPI error
+                const errorText = data.detail || (data.errors && data.errors[0]?.message) || 'Ошибка при добавлении медиа';
+                throw new Error(errorText);
             }
 
             if (response.status === 202) {
-                setMessage({ type: 'success', text: `Запрос на добавление отправлен на проверку` });
+                const username = data.data?.username || 'пользователя';
+                setMessage({ type: 'success', text: `Запрос на добавление ${username} отправлен` });
                 setUrlInput('');
             } else {
                 setMessage({ type: 'success', text: `Медиа успешно добавлено` });

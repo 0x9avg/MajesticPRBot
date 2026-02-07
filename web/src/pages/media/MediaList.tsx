@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { Activity, CalendarDays, Settings, MapPin } from 'lucide-react';
+import { MapPin, CalendarDays, Settings, Activity } from 'lucide-react';
 import StreamerCard from './components/StreamerCard';
 import StreamerSettingsModal from './components/StreamerSettingsModal';
 import EventSettingsModal from './components/EventSettingsModal';
@@ -133,6 +133,29 @@ export function MediaList() {
         }
     };
 
+    const handleUnjoinEvent = async (event: any) => {
+        if (!user) return;
+        try {
+            const token = localStorage.getItem('access_token');
+            const response = await fetch(`/api/events/${event.id}/leave`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ user_id: user.discord_id })
+            });
+
+            if (response.ok) {
+                await fetchAllData();
+            } else {
+                console.error('Failed to leave event');
+            }
+        } catch (error) {
+            console.error('Error leaving event:', error);
+        }
+    };
+
     const tabs = [
         { id: 'activities' as const, label: 'Активности' },
         { id: 'all' as const, label: 'Все медиа' },
@@ -199,6 +222,7 @@ export function MediaList() {
                                     return sortedItems.map((item: any) => {
                                         if (item.type === 'event') {
                                             const event = item;
+                                            const isAssigned = event.participants?.some((p: any) => String(p.pr_id) === String(user?.discord_id));
                                             return (
                                                 <div key={`event-${event.id}`} className="group flex items-center p-3 rounded-xl hover:bg-white/5 transition-all">
                                                     {/* Left Section: Priority + Icon + Name */}
@@ -224,7 +248,14 @@ export function MediaList() {
 
                                                         {/* Info */}
                                                         <div className="min-w-0">
-                                                            <h4 className="font-bold text-lg text-white truncate">{event.name}</h4>
+                                                            <h4 className="font-bold text-lg text-white truncate">
+                                                                {event.name}
+                                                                {event.start_time && (
+                                                                    <span className="ml-2 text-purple-400 text-sm font-medium">
+                                                                        [{new Date(event.start_time).toLocaleDateString()} {new Date(event.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}]
+                                                                    </span>
+                                                                )}
+                                                            </h4>
                                                             <p className="text-sm text-white/40 truncate">{event.description}</p>
                                                         </div>
                                                     </div>
@@ -252,13 +283,34 @@ export function MediaList() {
                                                                         )}
                                                                     </div>
                                                                 </div>
-                                                                {(event.current_participants < (event.pr_slots || event.required_pr_count)) && (
-                                                                    <button
-                                                                        onClick={() => handleJoinEvent(event)}
-                                                                        className="absolute right-0 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap"
-                                                                    >
-                                                                        Закрепиться
-                                                                    </button>
+                                                                {(isAssigned || (event.current_participants < (event.pr_slots || event.required_pr_count))) && (
+                                                                    <div className="absolute right-0 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 items-end">
+                                                                        {isAssigned ? (
+                                                                            <button
+                                                                                onClick={() => handleUnjoinEvent(event)}
+                                                                                className="px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-semibold hover:bg-red-500/20 transition-colors text-red-400 whitespace-nowrap w-full"
+                                                                            >
+                                                                                Открепиться
+                                                                            </button>
+                                                                        ) : (
+                                                                            <>
+                                                                                <button
+                                                                                    onClick={() => handleJoinEvent(event)}
+                                                                                    className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap w-full"
+                                                                                >
+                                                                                    Закрепиться
+                                                                                </button>
+                                                                                {userRole === 'junior_employee' && (
+                                                                                    <button
+                                                                                        onClick={() => handleJoinEvent(event)}
+                                                                                        className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/60 whitespace-nowrap w-full"
+                                                                                    >
+                                                                                        Вторым
+                                                                                    </button>
+                                                                                )}
+                                                                            </>
+                                                                        )}
+                                                                    </div>
                                                                 )}
                                                             </div>
                                                         ) : (
@@ -266,12 +318,22 @@ export function MediaList() {
                                                                 <div className="text-sm font-bold text-white/40 select-none">
                                                                     Ассистента нет
                                                                 </div>
-                                                                <button
-                                                                    onClick={() => handleJoinEvent(event)}
-                                                                    className="absolute right-0 top-1/2 -translate-y-1/2 px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap"
-                                                                >
-                                                                    Закрепиться
-                                                                </button>
+                                                                <div className="absolute right-0 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 items-end">
+                                                                    <button
+                                                                        onClick={() => handleJoinEvent(event)}
+                                                                        className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap w-full"
+                                                                    >
+                                                                        Закрепиться
+                                                                    </button>
+                                                                    {userRole === 'junior_employee' && (
+                                                                        <button
+                                                                            onClick={() => handleJoinEvent(event)}
+                                                                            className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/60 whitespace-nowrap w-full"
+                                                                        >
+                                                                            Вторым
+                                                                        </button>
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                         )}
                                                     </div>

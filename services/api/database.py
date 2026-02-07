@@ -841,6 +841,7 @@ class Database:
                         """
                         SELECT 
                             a.pr_id, 
+                            a.nickname,
                             ss.is_probation,
                             ss.started_at as assigned_at
                         FROM assistants a
@@ -859,6 +860,7 @@ class Database:
                         [
                             {
                                 "pr_id": str(a["pr_id"]),
+                                "nickname": a["nickname"],
                                 "is_probation": a.get("is_probation", False),
                                 "assigned_at": a.get("assigned_at"),
                             }
@@ -1185,7 +1187,8 @@ class Database:
                                 JSON_ARRAYAGG(
                                     CASE WHEN a.pr_id IS NOT NULL THEN
                                         JSON_OBJECT(
-                                            'pr_id', a.pr_id,
+                                            'pr_id', CAST(a.pr_id AS CHAR),
+                                            'nickname', a.nickname,
                                             'is_probation', COALESCE(ss.is_probation, FALSE),
                                             'assigned_at', ss.started_at
                                         )
@@ -1204,7 +1207,6 @@ class Database:
                         """
                     )
                     results = await cursor.fetchall()
-                    # Clean up assignments (remove nulls)
                     for r in results:
                         if isinstance(r.get("assignments"), str):
                              r["assignments"] = json.loads(r["assignments"])
@@ -1235,7 +1237,8 @@ class Database:
                                 JSON_ARRAYAGG(
                                     CASE WHEN a.pr_id IS NOT NULL THEN
                                         JSON_OBJECT(
-                                            'pr_id', a.pr_id,
+                                            'pr_id', CAST(a.pr_id AS CHAR),
+                                            'nickname', a.nickname,
                                             'is_probation', COALESCE(ss.is_probation, FALSE),
                                             'assigned_at', ss.started_at
                                         )
@@ -1255,7 +1258,6 @@ class Database:
                         """
                     )
                     results = await cursor.fetchall()
-                    # Clean up assignments (remove nulls)
                     for r in results:
                         if isinstance(r.get("assignments"), str):
                             r["assignments"] = json.loads(r["assignments"])
@@ -1478,16 +1480,14 @@ class Database:
             is_probation: True если это спек стажера (второй слот)
 
         Returns:
-            True если успешно, False если слот занят
+            True если успешно
 
-        Slot Logic:
-            - Каждый стример может иметь до 2 назначенных: 1 Main + 1 Probation
-            - Slot type is determined by spec_sessions.is_probation flag
+        Raises:
+            ValueError: Если занят слот или PR уже закреплен
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Check if the PR is already assigned to something
                     await cursor.execute(
                         "SELECT assigned_to_type FROM assistants WHERE pr_id = %s",
                         (pr_id,),
@@ -1495,10 +1495,8 @@ class Database:
                     pr_status = await cursor.fetchone()
                     if pr_status and pr_status.get("assigned_to_type"):
                         self.logger.warning(f"PR {pr_id} is already assigned")
-                        return False
+                        raise ValueError("Вы уже закреплены за другим стримером или событием")
 
-                    # Check if requested slot is available for this streamer
-                    # Slot availability is based on active spec_sessions, not assistants.is_probation_mode
                     await cursor.execute(
                         """
                         SELECT ss.pr_id, ss.is_probation 
@@ -1511,17 +1509,14 @@ class Database:
                     )
                     existing_sessions = await cursor.fetchall()
 
-                    # Check slot availability
                     for session in existing_sessions:
                         if session.get("is_probation") == is_probation:
-                            # Slot is occupied
                             slot_name = "Probation" if is_probation else "Main"
                             self.logger.warning(
                                 f"{slot_name} slot for streamer {streamer_id} is occupied by PR {session['pr_id']}"
                             )
-                            return False
+                            raise ValueError(f"Слот {slot_name} уже занят")
 
-                    # Assign PR to streamer in assistants table (no is_probation_mode)
                     await cursor.execute(
                         """
                         INSERT INTO assistants (pr_id, assigned_to_type, assigned_to_id) 
@@ -1533,7 +1528,6 @@ class Database:
                         (pr_id, streamer_id, streamer_id),
                     )
 
-                    # Create new spec session with is_probation flag
                     await cursor.execute(
                         """
                         INSERT INTO spec_sessions (pr_id, target_type, target_id, is_probation, started_at)

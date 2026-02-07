@@ -15,7 +15,7 @@ const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
     return (
         <div className="p-3 rounded-xl flex items-center group hover:bg-white/5 transition-all">
             {/* Left Section: Priority + Profile Button + Name & Link */}
-            <div className="flex items-center gap-4 flex-[2] min-w-0 mr-2">
+            <div className="flex items-center gap-4 flex-1 min-w-0 mr-2">
                 {/* Priority Box */}
                 <div className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center font-bold select-none shrink-0 relative ${streamer.priority === 1 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
                     streamer.priority === 2 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :

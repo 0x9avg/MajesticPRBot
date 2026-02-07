@@ -37,11 +37,11 @@ async def create_event(
         name=data.name,
         description=data.description,
         channel_id=data.channel_id,
-        message_id=0,  # Placeholder, updated later by bot
+        message_id=0,  
         created_by=data.created_by,
         required_pr_count=data.required_pr_count,
         start_time=data.start_time,
-        notification_sent=(data.start_time is None),  # True if immediate
+        notification_sent=(data.start_time is None),  
     )
 
     if not event_id:
@@ -234,6 +234,53 @@ async def end_event(
     )
 
 
+from pydantic import BaseModel
+from typing import Optional
+
+class EventUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    required_pr_count: Optional[int] = None
+    priority: Optional[int] = None
+    is_pinned: Optional[bool] = None
+    points: Optional[float] = None
+
+@router.patch("/{event_id}")
+async def update_event(
+    request: Request,
+    event_id: int,
+    data: EventUpdate,
+    db: "Database" = Depends(get_db),
+):
+    """Update event details."""
+    trace_id = get_trace_id(request)
+
+    success = await db.update_event(
+        event_id=event_id,
+        name=data.name,
+        description=data.description,
+        required_pr_count=data.required_pr_count,
+        priority=data.priority,
+        is_pinned=data.is_pinned,
+        points=data.points
+    )
+
+    if not success:
+        event = await db.get_event(event_id)
+        if not event:
+             raise HTTPException(status_code=404, detail="Event not found")
+    
+    event = await db.get_event(event_id)
+    
+    return JSONResponse(
+        content=success_envelope(
+            data=event,
+            message="Event updated",
+            code="EVENT_UPDATED",
+            trace_id=trace_id,
+        )
+    )
+
 @router.patch("/{event_id}/notification-sent")
 async def mark_notification_sent(
     request: Request,
@@ -252,7 +299,6 @@ async def mark_notification_sent(
             trace_id=trace_id,
         )
     )
-
 
 @router.patch("/{event_id}/message")
 async def update_event_message(

@@ -115,6 +115,7 @@ async def create_streamer(
             is_online=data.is_online,
             started_at=data.started_at,
             priority=data.priority,
+            pr_slots=data.pr_slots,
             added_by_id=data.added_by_id,
             game_id=data.game_id,
             game_name=data.game_name,
@@ -135,7 +136,7 @@ async def create_streamer(
             await broker.emit_streamer_added(
                 data.streamer_id,
                 data.streamer_name,
-                {"priority": data.priority},
+                {"priority": data.priority, "pr_slots": data.pr_slots},
                 trace_id=trace_id,
             )
 
@@ -157,7 +158,7 @@ async def create_streamer(
         # Emit verification event so Twitch Bot can resolve ID
         await broker.emit_streamer_verify(
             username,
-            {"priority": data.priority, "added_by_id": data.added_by_id},
+            {"priority": data.priority, "pr_slots": data.pr_slots, "added_by_id": data.added_by_id},
             trace_id=trace_id,
         )
 
@@ -200,6 +201,11 @@ async def update_streamer(
         if data.priority != streamer["priority"]:
             changes["priority"] = {"old": streamer["priority"], "new": data.priority}
             update_data["priority"] = data.priority
+    
+    if data.pr_slots is not None:
+        if data.pr_slots != streamer.get("pr_slots", 1):
+            changes["pr_slots"] = {"old": streamer.get("pr_slots", 1), "new": data.pr_slots}
+            update_data["pr_slots"] = data.pr_slots
             
     if data.is_pinned is not None:
         if data.is_pinned != streamer.get("is_pinned", False):
@@ -218,6 +224,7 @@ async def update_streamer(
         await db.update_streamer(
             twitch_id,
             priority=update_data.get("priority"),
+            pr_slots=update_data.get("pr_slots"),
             is_pinned=update_data.get("is_pinned"),
             stream_points_override=update_data.get("stream_points_override"),
         )

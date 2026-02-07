@@ -4,6 +4,7 @@ import { Radio, Check, AlertCircle } from 'lucide-react';
 
 const MediaRegistration = () => {
     const [priority, setPriority] = useState(0);
+    const [prSlots, setPrSlots] = useState(1);
     const [urlInput, setUrlInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
@@ -19,10 +20,7 @@ const MediaRegistration = () => {
 
         try {
             const token = localStorage.getItem('access_token');
-            // Use full URL as provided by user
             const fullUrl = urlInput;
-
-            // Backend in URL mode expects 'twitch_url' and 'priority'
             const response = await fetch('/api/streamers', {
                 method: 'POST',
                 headers: {
@@ -31,7 +29,8 @@ const MediaRegistration = () => {
                 },
                 body: JSON.stringify({
                     twitch_url: fullUrl,
-                    priority: priority
+                    priority: priority,
+                    pr_slots: prSlots
                 })
             });
 
@@ -41,7 +40,6 @@ const MediaRegistration = () => {
                 throw new Error(data.detail || 'Ошибка при добавлении медиа');
             }
 
-            // 202 Accepted = Verification Pending
             if (response.status === 202) {
                 setMessage({ type: 'success', text: `Запрос на добавление отправлен на проверку` });
                 setUrlInput('');
@@ -108,6 +106,19 @@ const MediaRegistration = () => {
                                 </button>
                             ))}
                         </div>
+                    </div>
+
+                    <div>
+                        <label className="text-sm font-medium text-white/60 mb-2 block">Количество слотов для PR</label>
+                        <input
+                            type="number"
+                            min="1"
+                            max="10"
+                            className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors"
+                            placeholder="1-10"
+                            value={prSlots}
+                            onChange={(e) => setPrSlots(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                        />
                     </div>
 
                     <div className="pt-4 flex justify-end">

@@ -10,6 +10,7 @@ interface StreamerSettingsModalProps {
 
 const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSettingsModalProps) => {
     const [priority, setPriority] = React.useState(streamer?.priority || 0);
+    const [prSlots, setPrSlots] = React.useState(streamer?.pr_slots || 1);
     const [isPinned, setIsPinned] = React.useState(streamer?.is_pinned || false);
     const [pointsOverride, setPointsOverride] = React.useState(streamer?.stream_points_override || '');
     const [saving, setSaving] = React.useState(false);
@@ -17,6 +18,7 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSe
     React.useEffect(() => {
         if (streamer) {
             setPriority(streamer.priority || 0);
+            setPrSlots(streamer.pr_slots || 1);
             setIsPinned(streamer.is_pinned || false);
             setPointsOverride(streamer.stream_points_override || '');
         }
@@ -29,6 +31,7 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSe
         try {
             await onSave({
                 priority,
+                pr_slots: prSlots,
                 is_pinned: isPinned,
                 stream_points_override: pointsOverride === '' ? null : Number(pointsOverride)
             });
@@ -70,6 +73,26 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSe
                         </div>
                     </div>
 
+                    {/* Pin Toggle */}
+                    <div
+                        onClick={() => setIsPinned(!isPinned)}
+                        className={`flex items-center gap-4 p-4 rounded-xl border cursor-pointer transition-all ${isPinned
+                            ? 'bg-blue-500/10 border-blue-500/50'
+                            : 'bg-white/5 border-white/5 hover:border-white/20'
+                            }`}
+                    >
+                        <div className={`p-2 rounded-lg ${isPinned ? 'bg-blue-500 text-white' : 'bg-white/10 text-white/40'}`}>
+                            <MapPin className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1">
+                            <div className={`font-medium ${isPinned ? 'text-blue-400' : 'text-white/80'}`}>Закрепить в начале</div>
+                            <div className="text-xs text-white/40">Стример будет отображаться первым в списке</div>
+                        </div>
+                        <div className={`w-12 h-6 rounded-full p-1 transition-colors ${isPinned ? 'bg-blue-500' : 'bg-white/10'}`}>
+                            <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${isPinned ? 'translate-x-6' : 'translate-x-0'}`} />
+                        </div>
+                    </div>
+
                     {/* Priority Selection */}
                     <div>
                         <label className="text-sm font-medium text-white/60 mb-3 block">Приоритет</label>
@@ -92,24 +115,18 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSe
                         </div>
                     </div>
 
-                    {/* Pin Toggle */}
-                    <div
-                        onClick={() => setIsPinned(!isPinned)}
-                        className={`flex items-center gap-4 p-4 rounded-xl border cursor-pointer transition-all ${isPinned
-                            ? 'bg-blue-500/10 border-blue-500/50'
-                            : 'bg-white/5 border-white/5 hover:border-white/20'
-                            }`}
-                    >
-                        <div className={`p-2 rounded-lg ${isPinned ? 'bg-blue-500 text-white' : 'bg-white/10 text-white/40'}`}>
-                            <MapPin className="w-5 h-5" />
-                        </div>
-                        <div className="flex-1">
-                            <div className={`font-medium ${isPinned ? 'text-blue-400' : 'text-white/80'}`}>Закрепить в начале</div>
-                            <div className="text-xs text-white/40">Стример будет отображаться первым в списке</div>
-                        </div>
-                        <div className={`w-12 h-6 rounded-full p-1 transition-colors ${isPinned ? 'bg-blue-500' : 'bg-white/10'}`}>
-                            <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${isPinned ? 'translate-x-6' : 'translate-x-0'}`} />
-                        </div>
+                    {/* PR Slots */}
+                    <div>
+                        <label className="text-sm font-medium text-white/60 mb-3 block">Количество слотов для PR</label>
+                        <input
+                            type="number"
+                            min="1"
+                            max="10"
+                            value={prSlots}
+                            onChange={(e) => setPrSlots(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                            className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-purple-500 transition-colors"
+                        />
+                        <div className="text-xs text-white/40 mt-2">Диапазон: 1-10 слотов</div>
                     </div>
 
                     {/* Points Override */}

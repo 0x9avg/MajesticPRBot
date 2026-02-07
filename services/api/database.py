@@ -154,6 +154,7 @@ class Database:
                             stream_game_name VARCHAR(255),
                             stream_started_at TIMESTAMP NULL,
                             priority INT DEFAULT 0,
+                            pr_slots INT DEFAULT 1,
                             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             added_by_id BIGINT UNSIGNED,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -161,18 +162,23 @@ class Database:
                         )
                         """
                     )
-
-                    # Migration: Add columns if they don't exist
                     try:
                         await cursor.execute(
                             "ALTER TABLE streamers ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN stream_points_override FLOAT DEFAULT NULL"
                         )
                     except Exception:
                         pass  # Column likely exists
 
                     try:
                         await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN stream_points_override FLOAT DEFAULT NULL"
+                            "ALTER TABLE streamers ADD COLUMN pr_slots INT DEFAULT 1"
                         )
                     except Exception:
                         pass  # Column likely exists
@@ -283,6 +289,8 @@ class Database:
                             is_active BOOLEAN DEFAULT TRUE,
                             notification_sent BOOLEAN DEFAULT FALSE,
                             required_pr_count INT DEFAULT 1,
+                            priority INT DEFAULT 0,
+                            pr_slots INT DEFAULT 1,
                             
                             channel_id BIGINT UNSIGNED,
                             message_id BIGINT UNSIGNED,
@@ -290,6 +298,29 @@ class Database:
                         )
                         """
                     )
+
+                    # Migration: Add columns if they don't exist
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE events ADD COLUMN priority INT DEFAULT 0"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE events ADD COLUMN pr_slots INT DEFAULT 1"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE events ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
+                        )
+                    except Exception:
+                        pass  
+
 
                     # =========================================================
                     # 7. Web Auth Table (ex Users)
@@ -581,8 +612,6 @@ class Database:
             filters = filters or {}
             where_clauses = []
             params = []
-
-            # Whitelist sorting
             allowed_sorts = {
                 "created_at": "al.id",
                 "admin_name": "al.admin_name",
@@ -620,7 +649,6 @@ class Database:
 
             where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-            # Add pagination params
             params.append(limit)
             params.append(offset)
 
@@ -681,6 +709,7 @@ class Database:
         is_online: bool = False,
         started_at: Optional[str] = None,
         priority: int = 0,
+        pr_slots: int = 1,
         added_by_id: int = 0,
         game_id: Optional[int] = None,
         game_name: Optional[str] = None,
@@ -698,6 +727,7 @@ class Database:
             is_online: Статус онлайн
             started_at: Время начала стрима
             priority: Приоритет (0-3)
+            pr_slots: Количество слотов для PR ассистентов (1-10)
             added_by_id: ID пользователя Discord, добавившего стримера
             game_id: ID игры на Twitch
             game_name: Название игры
@@ -723,7 +753,6 @@ class Database:
                         and existing_by_name["streamer_id"] != streamer_id
                     ):
                         old_id = existing_by_name["streamer_id"]
-                        # Rename old record to free the name
                         new_name_old = f"old_{old_id}"
                         self.logger.warning(
                             f"Streamer Name Collision: '{streamer_name}' is taken by ID {old_id}. "
@@ -737,16 +766,17 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO streamers (
-                            streamer_id, streamer_name, is_online, stream_started_at, priority, 
+                            streamer_id, streamer_name, is_online, stream_started_at, priority, pr_slots,
                             added_at, added_by_id, stream_game_id, stream_game_name, stream_title, 
                             stream_thumbnail_url, profile_image_url
                         )
-                        VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
                         ON DUPLICATE KEY UPDATE 
                             streamer_name = new_data.streamer_name,
                             is_online = new_data.is_online,
                             stream_started_at = new_data.stream_started_at,
                             priority = new_data.priority,
+                            pr_slots = new_data.pr_slots,
                             added_by_id = new_data.added_by_id,
                             stream_game_id = new_data.stream_game_id,
                             stream_game_name = new_data.stream_game_name,
@@ -760,6 +790,7 @@ class Database:
                             is_online,
                             started_at,
                             priority,
+                            pr_slots,
                             added_by_id,
                             game_id,
                             game_name,
@@ -786,7 +817,6 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # 1. Get streamer base info
                     await cursor.execute(
                         """
                         SELECT 
@@ -794,7 +824,7 @@ class Database:
                             stream_title, stream_thumbnail_url,
                             profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
-                            priority, added_at, added_by_id, updated_at
+                            priority, pr_slots, added_at, added_by_id, updated_at
                         FROM streamers
                         WHERE streamer_id = %s
                         """,
@@ -807,8 +837,6 @@ class Database:
                     if not streamer:
                         return None
 
-                    # 2. Get all assignments for this streamer (Main + Probation)
-                    # Probation status comes from spec_sessions.is_probation, not assistants table
                     await cursor.execute(
                         """
                         SELECT 
@@ -826,7 +854,6 @@ class Database:
                     )
                     assignments = await cursor.fetchall()
 
-                    # 3. Build result with assignments list
                     result = dict(streamer)
                     result["assignments"] = (
                         [
@@ -871,11 +898,9 @@ class Database:
                 f"Updating streamer {streamer_id} status: online={is_online} game: {game_name} stream: {stream_title}"
             )
             
-            # Build dynamic SET clause - only update provided fields
             set_parts = ["is_online = %s"]
             params = [is_online]
             
-            # These fields are always updated when online state changes
             set_parts.append("stream_started_at = %s")
             params.append(started_at)
             set_parts.append("stream_game_id = %s")
@@ -887,12 +912,10 @@ class Database:
             set_parts.append("stream_thumbnail_url = %s")
             params.append(stream_thumbnail_url)
             
-            # Only update profile_image_url if explicitly provided
             if profile_image_url is not None:
                 set_parts.append("profile_image_url = %s")
                 params.append(profile_image_url)
 
-            # Reset pin and overrides if stream goes offline
             if is_online is False:
                 set_parts.append("is_pinned = FALSE")
                 set_parts.append("stream_points_override = NULL")
@@ -950,7 +973,6 @@ class Database:
                         if not streamer_id:
                             continue
 
-                        # Build dynamic SET clause
                         set_parts = ["is_online = %s"]
                         params = [update.get("is_online", False)]
                         
@@ -965,7 +987,6 @@ class Database:
                         set_parts.append("stream_thumbnail_url = %s")
                         params.append(update.get("stream_thumbnail_url"))
                         
-                        # Only update profile_image_url if provided
                         if "profile_image_url" in update and update["profile_image_url"] is not None:
                             set_parts.append("profile_image_url = %s")
                             params.append(update["profile_image_url"])
@@ -991,6 +1012,7 @@ class Database:
         self,
         streamer_id: int,
         priority: Optional[int] = None,
+        pr_slots: Optional[int] = None,
         is_pinned: Optional[bool] = None,
         stream_points_override: Optional[float] = None,
     ) -> bool:
@@ -1003,19 +1025,15 @@ class Database:
                 set_parts.append("priority = %s")
                 params.append(priority)
             
+            if pr_slots is not None:
+                set_parts.append("pr_slots = %s")
+                params.append(pr_slots)
+            
             if is_pinned is not None:
                 set_parts.append("is_pinned = %s")
                 params.append(is_pinned)
             
             if stream_points_override is not None:
-                # Handle clearing the override (if passed as specific value to clear, or handle None carefully)
-                # But here passing None usually means 'no change'.
-                # To clear it, we might need a specific sentinel or just assume the frontend passes -1 or something, 
-                # but better to assume standard update logic: if passed, update it.
-                # If we want to clear it, we pass None? No, None means no change here.
-                # Let's assume frontend passes a value. If value is -1, set to NULL?
-                # Or simply: optional float.
-                # Wait, Pydantic will pass None if not provided.
                 set_parts.append("stream_points_override = %s")
                 params.append(stream_points_override)
 
@@ -1035,6 +1053,63 @@ class Database:
         except Exception as e:
             self.logger.error(
                 f"Failed to update streamer {streamer_id}: {e}", exc_info=True
+            )
+            return False
+
+    @db_retry()
+    async def update_event(
+        self,
+        event_id: int,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        required_pr_count: Optional[int] = None,
+        priority: Optional[int] = None,
+        is_pinned: Optional[bool] = None,
+        points: Optional[float] = None,
+    ) -> bool:
+        """Update event settings."""
+        try:
+            set_parts = []
+            params = []
+
+            if name is not None:
+                set_parts.append("name = %s")
+                params.append(name)
+            
+            if description is not None:
+                set_parts.append("description = %s")
+                params.append(description)
+
+            if required_pr_count is not None:
+                set_parts.append("required_pr_count = %s")
+                params.append(required_pr_count)
+                set_parts.append("pr_slots = %s")
+                params.append(required_pr_count)
+            
+            if priority is not None:
+                set_parts.append("priority = %s")
+                params.append(priority)
+
+            if is_pinned is not None:
+                set_parts.append("is_pinned = %s")
+                params.append(is_pinned)
+
+            if not set_parts:
+                return False
+
+            params.append(event_id)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        f"UPDATE events SET {', '.join(set_parts)} WHERE id = %s",
+                        tuple(params),
+                    )
+                    await conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update event {event_id}: {e}", exc_info=True
             )
             return False
 
@@ -1102,9 +1177,9 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
-                            s.is_pinned, s.stream_points_override,
+                            s.is_pinned, s.stream_points_override, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.added_at, s.added_by_id, s.updated_at,
+                            s.priority, s.pr_slots, s.added_at, s.added_by_id, s.updated_at,
                             MIN(a.pr_id) as assigned_pr_id,
                             COALESCE(
                                 JSON_ARRAYAGG(
@@ -1152,11 +1227,22 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
-                            s.is_pinned, s.stream_points_override,
+                            s.is_pinned, s.stream_points_override, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.added_at, s.added_by_id, s.updated_at,
-                            a.pr_id as assigned_pr_id, 
-                            ss.started_at as assigned_at
+                            s.priority, s.pr_slots, s.added_at, s.added_by_id, s.updated_at,
+                            MIN(a.pr_id) as assigned_pr_id,
+                            COALESCE(
+                                JSON_ARRAYAGG(
+                                    CASE WHEN a.pr_id IS NOT NULL THEN
+                                        JSON_OBJECT(
+                                            'pr_id', a.pr_id,
+                                            'is_probation', COALESCE(ss.is_probation, FALSE),
+                                            'assigned_at', ss.started_at
+                                        )
+                                    ELSE NULL END
+                                ),
+                                JSON_ARRAY()
+                            ) as assignments
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
                         LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
@@ -1164,10 +1250,18 @@ class Database:
                              AND ss.target_id = s.streamer_id 
                              AND ss.ended_at IS NULL
                         WHERE s.is_online = TRUE
+                        GROUP BY s.streamer_id
                         ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
-                    return await cursor.fetchall()
+                    results = await cursor.fetchall()
+                    # Clean up assignments (remove nulls)
+                    for r in results:
+                        if isinstance(r.get("assignments"), str):
+                            r["assignments"] = json.loads(r["assignments"])
+                        if r.get("assignments"):
+                            r["assignments"] = [x for x in r["assignments"] if x is not None]
+                    return results
         except Exception as e:
             self.logger.error(f"Failed to list online streamers: {e}", exc_info=True)
             raise
@@ -2002,25 +2096,27 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count FROM events 
+                        SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events 
                         WHERE is_active = TRUE
-                        ORDER BY start_time ASC
+                        ORDER BY is_pinned DESC, priority DESC, start_time ASC
                         """
                     )
                     events = await cursor.fetchall()
-
-                    # For each event, get participant count from assistants table
                     for event in events:
                         await cursor.execute(
                             """
-                            SELECT COUNT(*) as count 
+                            SELECT pr_id, nickname
                             FROM assistants 
                             WHERE assigned_to_type = 'event' AND assigned_to_id = %s
                             """,
                             (event["id"],),
                         )
-                        result = await cursor.fetchone()
-                        event["current_participants"] = result["count"]
+                        participants = await cursor.fetchall()
+                        event["current_participants"] = len(participants)
+                        event["participants"] = [
+                            {"pr_id": str(p["pr_id"]), "nickname": p["nickname"]} 
+                            for p in participants
+                        ]
 
                     return events
         except Exception as e:
@@ -2034,7 +2130,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count FROM events WHERE id = %s",
+                        "SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events WHERE id = %s",
                         (event_id,),
                     )
                     return await cursor.fetchone()
@@ -2049,7 +2145,6 @@ class Database:
             now = datetime.now(timezone.utc)
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    # 1. Get all active participants (from spec_sessions that are open)
                     await cursor.execute(
                         """
                         SELECT pr_id, started_at
@@ -2073,7 +2168,6 @@ class Database:
                         else now
                     )
 
-                    # 2. Mark event as inactive
                     await cursor.execute(
                         """
                         UPDATE events 
@@ -2083,7 +2177,6 @@ class Database:
                         (event_id,),
                     )
 
-                    # 3. Close open sessions
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
@@ -2093,7 +2186,6 @@ class Database:
                         (now, event_id),
                     )
 
-                    # 4. Free assistants
                     await cursor.execute(
                         """
                         UPDATE assistants 
@@ -2103,7 +2195,6 @@ class Database:
                         (event_id,),
                     )
 
-                    # 5. Update assistant stats for each participant
                     results = []
                     for p in participants:
                         user_id = p["pr_id"]
@@ -2111,7 +2202,6 @@ class Database:
                         if started_at.tzinfo is None:
                             started_at = started_at.replace(tzinfo=timezone.utc)
 
-                        # Effective start time is the later of actual event start or user join
                         effective_start = max(started_at, event_start_time)
 
                         duration = int((now - effective_start).total_seconds())
@@ -2144,11 +2234,9 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Route to correct column based on probation flag
                     if is_probation:
                         col_name = "probation_seconds"
                     else:
-                        # Construct column name based on priority (0-3)
                         col_name = f"p{priority}_seconds"
 
                     await cursor.execute(
@@ -2277,16 +2365,12 @@ class Database:
         from datetime import datetime, timedelta
 
         try:
-            # Parse date string
             date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-
-            # Create fake start/end times for the session
             start_time = datetime.combine(date_obj, datetime.min.time())
             end_time = start_time + timedelta(seconds=duration_seconds)
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Insert completed spec_session
                     await cursor.execute(
                         """
                         INSERT INTO spec_sessions 
@@ -2304,7 +2388,6 @@ class Database:
                         ),
                     )
 
-                    # Update assistants table counters
                     await cursor.execute(
                         """
                         UPDATE assistants 
@@ -2316,7 +2399,6 @@ class Database:
                     )
                     await conn.commit()
 
-            # Record daily stats (uses existing logic for points calculation)
             await self.record_spec_session(
                 pr_id=pr_id,
                 start_time=start_time,

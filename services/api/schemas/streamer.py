@@ -26,12 +26,9 @@ class StreamerCreate(BaseModel):
     2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` + optional stream data
     """
 
-    # Mode A: URL-based (needs resolution)
     twitch_url: Optional[str] = Field(
         None, description="Twitch channel URL or username"
     )
-
-    # Mode B: Full data (Twitch bot already has resolved data)
     streamer_id: Optional[int] = Field(
         None, description="Twitch user ID (for direct creation)"
     )
@@ -45,9 +42,8 @@ class StreamerCreate(BaseModel):
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
     profile_image_url: Optional[str] = None
-
-    # Common fields
     priority: int = Field(default=0, ge=0, le=3)
+    pr_slots: int = Field(default=1, ge=1, le=10, description="Number of PR assistant slots")
     added_by_id: int = Field(default=0)
 
     @field_validator("twitch_url", mode="before")
@@ -104,6 +100,7 @@ class StreamerCreate(BaseModel):
 
 class StreamerUpdate(BaseModel):
     priority: Optional[int] = Field(None, ge=0, le=3)
+    pr_slots: Optional[int] = Field(None, ge=1, le=10)
     is_pinned: Optional[bool] = None
     stream_points_override: Optional[float] = None
 
@@ -116,6 +113,7 @@ class StreamerResponse(BaseModel):
     stream_points_override: Optional[float] = None
     started_at: Optional[datetime] = None
     priority: int
+    pr_slots: int = 1
     game_id: Optional[Snowflake] = None
     game_name: Optional[str] = None
     stream_title: Optional[str] = None

@@ -16,7 +16,7 @@ const MediaRegistration = () => {
         }
 
         // Basic Twitch validation
-        const twitchRegex = /^(?:https?:\/\/)?(?:www\.)?(?:twitch\.tv\/)?([a-zA-Z0-9_]{4,25})\/?$/;
+        const twitchRegex = /^(?:https?:\/\/)?(?:www\.)?(?:twitch\.tv\/)?([a-zA-Z0-9_]{1,25})\/?$/;
         const match = urlInput.match(twitchRegex);
 
         if (!match) {

@@ -1313,20 +1313,6 @@ class Database:
                                 ),
                                 JSON_ARRAY()
                             ) as assignments
-                            s.priority, s.added_at, s.added_by_id, s.updated_at,
-                            MIN(a.pr_id) as assigned_pr_id,
-                            COALESCE(
-                                JSON_ARRAYAGG(
-                                    CASE WHEN a.pr_id IS NOT NULL THEN
-                                        JSON_OBJECT(
-                                            'pr_id', a.pr_id,
-                                            'is_probation', COALESCE(ss.is_probation, FALSE),
-                                            'assigned_at', ss.started_at
-                                        )
-                                    ELSE NULL END
-                                ),
-                                JSON_ARRAY()
-                            ) as assignments
                         FROM streamers s
                         LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
                         LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
@@ -1339,16 +1325,6 @@ class Database:
                         """
                     )
                     results = await cursor.fetchall()
-                    for r in results:
-                        if isinstance(r.get("assignments"), str):
-                            r["assignments"] = json.loads(r["assignments"])
-                        if r.get("assignments"):
-                            r["assignments"] = [
-                                x for x in r["assignments"] if x is not None
-                            ]
-                    return results
-                    results = await cursor.fetchall()
-                    # Clean up assignments (remove nulls)
                     for r in results:
                         if isinstance(r.get("assignments"), str):
                             r["assignments"] = json.loads(r["assignments"])

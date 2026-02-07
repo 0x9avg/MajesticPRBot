@@ -14,8 +14,15 @@ from middleware import get_trace_id
 from schemas.assistant import (
     AssistantAssignment,
     AssistantCreate,
+    AssistantFull,
     DailyStatsUpdate,
     ManualSpecSession,
+    AssistantSavedResponse,
+    AssignmentUpdateResponse,
+    AssistantDeletedResponse,
+    StatsResetResponse,
+    DailyStatsResponse,
+    SessionCreatedResponse,
 )
 from schemas.envelope import success_envelope
 
@@ -34,17 +41,20 @@ async def get_all_assistants(
 ):
     """Get all PR staff members with their statistics."""
     trace_id = get_trace_id(request)
-    assistants = await db.get_all_assistants()
+    assistants_data = await db.get_all_assistants()
 
-    # Convert total_spec_seconds to hours for frontend
-    for assistant in assistants:
+    # Pre-process data for frontend (e.g. calculate hours)
+    for assistant in assistants_data:
         assistant["total_spec_hours"] = round(
             assistant["total_spec_seconds"] / 3600, 2
         )
 
+    # Convert to Pydantic models for serialization
+    assistants = [AssistantFull.model_validate(a) for a in assistants_data]
+
     return JSONResponse(
         content=success_envelope(
-            data=assistants,
+            data=[a.model_dump(mode="json") for a in assistants],
             message=f"Found {len(assistants)} assistants",
             trace_id=trace_id,
         )
@@ -59,19 +69,23 @@ async def get_assistant(
 ):
     """Get a specific assistant by PR ID."""
     trace_id = get_trace_id(request)
-    assistant = await db.get_assistant(pr_id)
+    assistant_data = await db.get_assistant(pr_id)
 
-    if not assistant:
+    if not assistant_data:
         raise HTTPException(
             status_code=404, detail=f"Assistant with ID {pr_id} not found"
         )
 
-    # Convert total_spec_seconds to hours
-    assistant["total_spec_hours"] = round(assistant["total_spec_seconds"] / 3600, 2)
+    # Calculate hours
+    assistant_data["total_spec_hours"] = round(
+        assistant_data["total_spec_seconds"] / 3600, 2
+    )
+
+    assistant = AssistantFull.model_validate(assistant_data)
 
     return JSONResponse(
         content=success_envelope(
-            data=assistant,
+            data=assistant.model_dump(mode="json"),
             message="Assistant found",
             trace_id=trace_id,
         )
@@ -108,9 +122,13 @@ async def create_or_update_assistant(
         experience_days=assistant.experience_days,
     )
 
+    response_data = AssistantSavedResponse(
+        pr_id=assistant.pr_id, nickname=assistant.nickname
+    )
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": assistant.pr_id, "nickname": assistant.nickname},
+            data=response_data.model_dump(mode="json"),
             message=f"Assistant {assistant.nickname} saved successfully",
             code="ASSISTANT_SAVED",
             trace_id=trace_id,
@@ -162,9 +180,11 @@ async def update_assignment(
         else f"assigned to {assignment.assigned_to_name}"
     )
 
+    response_data = AssignmentUpdateResponse(pr_id=pr_id, status=status_msg)
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": pr_id, "status": status_msg},
+            data=response_data.model_dump(mode="json"),
             message=f"Assistant {assistant['nickname']} {status_msg}",
             code="ASSIGNMENT_UPDATED",
             trace_id=trace_id,
@@ -187,14 +207,17 @@ async def delete_assistant(
             status_code=404, detail=f"Assistant with ID {pr_id} not found"
         )
 
+    response_data = AssistantDeletedResponse(pr_id=pr_id)
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": pr_id},
+            data=response_data.model_dump(mode="json"),
             message=f"Assistant {pr_id} deleted successfully",
             code="ASSISTANT_DELETED",
             trace_id=trace_id,
         )
     )
+
 
 # TODO: Add get logs logic
 @router.get("/{pr_id}/logs")
@@ -272,9 +295,13 @@ async def reset_assistant_stats(
     # Reset stats in assistants table
     await db.reset_assistant_stats(pr_id)
 
+    response_data = StatsResetResponse(
+        pr_id=pr_id, nickname=assistant.get("nickname")
+    )
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": pr_id, "nickname": assistant["nickname"]},
+            data=response_data.model_dump(mode="json"),
             message=f"Stats for {assistant['nickname']} reset successfully",
             code="STATS_RESET",
             trace_id=trace_id,
@@ -313,9 +340,11 @@ async def update_daily_stats(
         total_points=data.total_points or 0.0,
     )
 
+    response_data = DailyStatsResponse(pr_id=pr_id, date=data.date)
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": pr_id, "date": data.date},
+            data=response_data.model_dump(mode="json"),
             message=f"Daily stats for {assistant['nickname']} on {data.date} updated",
             code="DAILY_STATS_UPDATED",
             trace_id=trace_id,
@@ -362,9 +391,13 @@ async def create_manual_session(
         },
     )
 
+    response_data = SessionCreatedResponse(
+        pr_id=pr_id, duration_seconds=data.duration_seconds
+    )
+
     return JSONResponse(
         content=success_envelope(
-            data={"pr_id": pr_id, "duration_seconds": data.duration_seconds},
+            data=response_data.model_dump(mode="json"),
             message=f"Manual session created for {assistant['nickname']}",
             code="SESSION_CREATED",
             trace_id=trace_id,

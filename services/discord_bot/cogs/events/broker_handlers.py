@@ -38,6 +38,11 @@ class BrokerHandlers(commands.Cog):
             self.logger.info(f"Event: streamer.removed - {data.get('streamer_name')}")
             await self._refresh_monitoring()
 
+        @broker.on("streamer.updated")
+        async def on_streamer_updated(data):
+            self.logger.info(f"Event: streamer.updated - {data.get('streamer_name')}")
+            await self._refresh_monitoring()
+
         @broker.on("stream.state.online")
         async def on_stream_online(data):
             self.logger.info(f"Event: stream online - {data.get('streamer_name')}")

@@ -13,8 +13,7 @@ if TYPE_CHECKING:
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
-from utils import safe_defer, handle_interaction_error
-
+from utils import handle_interaction_error, safe_defer
 
 # =============================================================================
 # Streamers Embed
@@ -141,13 +140,12 @@ class EditStreamerModal(disnake.ui.Modal):
             await interaction.edit_original_message(content=f"❌ {e}")
         except Exception as e:
             self.bot.logger.error(f"Edit streamer error: {e}")
-            await interaction.edit_original_message(content="❌ Ошибка")
+            await interaction.edit_original_message(content=f"❌ Ошибка: {e}")
 
 
 # =============================================================================
 # Direct Input Modals (Edit / Delete by Nickname)
 # =============================================================================
-
 
 
 class EditStreamerByNameModal(disnake.ui.Modal):
@@ -179,31 +177,32 @@ class EditStreamerByNameModal(disnake.ui.Modal):
         try:
             name = interaction.text_values["streamer_name"].strip().lower()
             priority_str = interaction.text_values["priority"].strip()
-            
+
             if not priority_str.isdigit() or not (0 <= int(priority_str) <= 3):
-                await interaction.edit_original_message(content="❌ Приоритет должен быть числом от 0 до 3.")
+                await interaction.edit_original_message(
+                    content="❌ Приоритет должен быть числом от 0 до 3."
+                )
                 return
-                
+
             priority = int(priority_str)
-            
+
             # Find streamer by name
             streamers = await self.bot.api_client.list_all_streamers()
             streamer = next(
-                (s for s in streamers if s["streamer_name"].lower() == name), 
-                None
+                (s for s in streamers if s["streamer_name"].lower() == name), None
             )
-            
+
             if not streamer:
                 await interaction.edit_original_message(
                     content=f"❌ Стример **{name}** не найден"
                 )
                 return
-            
+
             # Update streamer
             await self.bot.api_client.update_streamer(
                 streamer["streamer_id"], priority=priority
             )
-            
+
             await interaction.edit_original_message(
                 content=f"✅ Стример **{streamer['streamer_name']}** обновлен!\nНовый приоритет: **{priority}**"
             )
@@ -237,20 +236,19 @@ class DeleteStreamerByNameModal(disnake.ui.Modal):
         await safe_defer(interaction, ephemeral=True)
         try:
             name = interaction.text_values["streamer_name"].strip().lower()
-            
+
             # Find streamer by name
             streamers = await self.bot.api_client.list_all_streamers()
             streamer = next(
-                (s for s in streamers if s["streamer_name"].lower() == name), 
-                None
+                (s for s in streamers if s["streamer_name"].lower() == name), None
             )
-            
+
             if not streamer:
                 await interaction.edit_original_message(
                     content=f"❌ Стример **{name}** не найден"
                 )
                 return
-            
+
             # Delete streamer
             await self.bot.api_client.delete_streamer(streamer["streamer_id"])
             await interaction.edit_original_message(
@@ -305,7 +303,6 @@ class StreamersView(disnake.ui.View):
             )
         )
 
-
         self.add_item(
             disnake.ui.Button(
                 label="Список",
@@ -330,6 +327,7 @@ class StreamersView(disnake.ui.View):
 # =============================================================================
 # Admin Streamers Cog
 # =============================================================================
+
 
 class AdminStreamers(commands.Cog):
     """Streamer management."""
@@ -379,7 +377,9 @@ class AdminStreamers(commands.Cog):
 
             elif custom_id == "admin_str_del":
                 # OPEN MODAL for nickname input
-                await interaction.response.send_modal(DeleteStreamerByNameModal(self.bot))
+                await interaction.response.send_modal(
+                    DeleteStreamerByNameModal(self.bot)
+                )
 
             elif custom_id == "admin_str_list":
                 # Show page 0 in new message
@@ -414,7 +414,10 @@ class AdminStreamers(commands.Cog):
             f"• **{s['streamer_name']}** (P{s.get('priority', 0)}) {'🟢' if s.get('is_online') else '⚫'}"
             for s in page_streamers
         ]
-        content = f"**Стримеры ({len(streamers)}) — Стр. {page + 1}/{total_pages}:**\n" + "\n".join(lines)
+        content = (
+            f"**Стримеры ({len(streamers)}) — Стр. {page + 1}/{total_pages}:**\n"
+            + "\n".join(lines)
+        )
 
         # Build pagination buttons
         view = disnake.ui.View(timeout=None)
@@ -424,7 +427,7 @@ class AdminStreamers(commands.Cog):
                     label="◀ Назад",
                     custom_id=f"admin_str_list_page_{page - 1}",
                     style=disnake.ButtonStyle.secondary,
-                    row=0
+                    row=0,
                 )
             )
         if page < total_pages - 1:
@@ -433,7 +436,7 @@ class AdminStreamers(commands.Cog):
                     label="Вперед ▶",
                     custom_id=f"admin_str_list_page_{page + 1}",
                     style=disnake.ButtonStyle.secondary,
-                    row=0
+                    row=0,
                 )
             )
 
@@ -441,8 +444,6 @@ class AdminStreamers(commands.Cog):
             await interaction.followup.send(content=content, view=view, ephemeral=True)
         else:
             await interaction.edit_original_response(content=content, view=view)
-
-
 
 
 def setup(bot: commands.Bot) -> None:

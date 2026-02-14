@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react';
+import type { SVGProps } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Twitch, User, Clock, Shield } from 'lucide-react';
+import type { Streamer } from '../types/domain';
+import { unwrapApiData } from '../types/api';
 
 export default function MediaProfile() {
     const { id } = useParams();
     const navigate = useNavigate();
-    const [streamer, setStreamer] = useState<any>(null);
+    const [streamer, setStreamer] = useState<Streamer | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -16,10 +19,10 @@ export default function MediaProfile() {
                 if (!response.ok) {
                     throw new Error('Стример не найден');
                 }
-                const json = await response.json();
-                setStreamer(json.data || json);
-            } catch (err: any) {
-                setError(err.message);
+                const json = await response.json() as unknown;
+                setStreamer(unwrapApiData<Streamer>(json));
+            } catch (err: unknown) {
+                setError(err instanceof Error ? err.message : 'Стример не найден');
             } finally {
                 setLoading(false);
             }
@@ -156,7 +159,7 @@ export default function MediaProfile() {
     );
 }
 
-function ActivityIcon(props: any) {
+function ActivityIcon(props: SVGProps<SVGSVGElement>) {
     return (
         <svg
             {...props}

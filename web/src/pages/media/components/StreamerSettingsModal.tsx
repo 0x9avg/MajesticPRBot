@@ -1,11 +1,17 @@
 import React from 'react';
 import { Settings, X, MapPin, AlertCircle, Save } from 'lucide-react';
+import type { Streamer } from '../../../types/domain';
 
 interface StreamerSettingsModalProps {
-    streamer: any;
+    streamer: Streamer | null;
     isOpen: boolean;
     onClose: () => void;
-    onSave: (data: any) => Promise<void>;
+    onSave: (data: {
+        priority: number;
+        pr_slots: number;
+        is_pinned: boolean;
+        stream_points_override: number | null;
+    }) => Promise<void>;
 }
 
 const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSettingsModalProps) => {
@@ -63,7 +69,7 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave }: StreamerSe
                     {/* Streamer Info */}
                     <div className="flex items-center gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
                         <img
-                            src={streamer.profile_image_url || streamer.stream_thumbnail_url}
+                            src={streamer.profile_image_url || streamer.stream_thumbnail_url || undefined}
                             alt={streamer.streamer_name}
                             className="w-12 h-12 rounded-full object-cover bg-[#121212]"
                         />

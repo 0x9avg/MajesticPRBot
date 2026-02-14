@@ -1,8 +1,45 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { UserPlus, ShieldAlert, AlertCircle, Copy, Check } from 'lucide-react';
 import { CustomSelect } from '../../../components/CustomInputs';
+import { useOutletContext } from 'react-router-dom';
+import type { KnownRole, OutletUserContext } from '../../../types/auth';
+import { getApiErrorMessage } from '../../../types/api';
+
+type Role = KnownRole;
+
+const ROLE_RANK: Record<Role, number> = {
+    junior_employee: 0,
+    employee: 1,
+    senior_employee: 2,
+    manager: 3,
+    developer: 4,
+};
+
+const ROLE_LABELS: Record<Role, string> = {
+    junior_employee: 'Мл. Сотрудник',
+    employee: 'Сотрудник',
+    senior_employee: 'Ст. Сотрудник',
+    manager: 'Менеджер',
+    developer: 'Разработчик',
+};
+
+const ALL_ROLES = Object.keys(ROLE_RANK) as Role[];
+
+const getAllowedRoles = (userRole?: Role, canRegisterUsers?: boolean): Role[] => {
+    if (!canRegisterUsers || !userRole || ROLE_RANK[userRole] === undefined) {
+        return [];
+    }
+
+    if (userRole === 'developer') {
+        return ALL_ROLES;
+    }
+
+    const creatorRank = ROLE_RANK[userRole];
+    return ALL_ROLES.filter((role) => ROLE_RANK[role] < creatorRank);
+};
 
 const UserRegistration = () => {
+    const { user } = useOutletContext<OutletUserContext>();
     const [formData, setFormData] = useState({
         username: '',
         nickname: '',
@@ -13,6 +50,20 @@ const UserRegistration = () => {
     const [error, setError] = useState<string | null>(null);
     const [createdUser, setCreatedUser] = useState<{ username: string, password: string } | null>(null);
     const [copied, setCopied] = useState(false);
+
+    const currentUserRole = user?.role as KnownRole | undefined;
+    const canRegisterUsers = !!user?.permissions?.can_register_users;
+    const allowedRoles = getAllowedRoles(currentUserRole, canRegisterUsers);
+    const roleOptions = allowedRoles.map((role) => ({
+        value: role,
+        label: ROLE_LABELS[role]
+    }));
+
+    useEffect(() => {
+        if (formData.role && !allowedRoles.includes(formData.role as Role)) {
+            setFormData((prev) => ({ ...prev, role: '' }));
+        }
+    }, [allowedRoles, formData.role]);
 
     const handleCopy = () => {
         if (createdUser) {
@@ -26,6 +77,11 @@ const UserRegistration = () => {
         try {
             setLoading(true);
             setError(null);
+
+            if (!canRegisterUsers) {
+                setError('Недостаточно прав для регистрации пользователей');
+                return;
+            }
 
             // Validate
             if (!formData.username || !formData.nickname || !formData.role || !formData.discord_id) {
@@ -49,17 +105,26 @@ const UserRegistration = () => {
                 })
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({} as unknown));
 
             if (!response.ok) {
-                throw new Error(data.detail || data.message || "Ошибка при создании пользователя");
+                throw new Error(getApiErrorMessage(data, "Ошибка при создании пользователя"));
             }
 
-            setCreatedUser(data.data);
+            const responseData = data as { data?: { username: string; password: string } };
+            if (responseData.data?.username && responseData.data?.password) {
+                setCreatedUser(responseData.data);
+            } else {
+                throw new Error("Некорректный ответ сервера при создании пользователя");
+            }
             setFormData({ username: '', nickname: '', role: '', discord_id: '' });
 
-        } catch (err: any) {
-            setError(err.message || "Ошибка при создании пользователя");
+        } catch (err: unknown) {
+            if (err instanceof Error) {
+                setError(err.message);
+            } else {
+                setError("Ошибка при создании пользователя");
+            }
         } finally {
             setLoading(false);
         }
@@ -78,6 +143,13 @@ const UserRegistration = () => {
             </div>
 
             <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-6">
+                {!canRegisterUsers && (
+                    <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 px-4 py-3 rounded-xl flex items-center gap-3 mb-6">
+                        <AlertCircle className="w-5 h-5" />
+                        Недостаточно прав для регистрации пользователей
+                    </div>
+                )}
+
                 {createdUser && (
                     <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-6 mb-6 animate-fade-in relative overflow-hidden group">
                         <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -132,6 +204,7 @@ const UserRegistration = () => {
                                 placeholder="user_login"
                                 value={formData.username}
                                 onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                                disabled={!canRegisterUsers}
                             />
                         </div>
                         <div>
@@ -139,9 +212,10 @@ const UserRegistration = () => {
                             <input
                                 type="text"
                                 className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
-                                placeholder="Ivan Ivanov"
+                                placeholder="EpikeS"
                                 value={formData.nickname}
                                 onChange={(e) => setFormData({ ...formData, nickname: e.target.value })}
+                                disabled={!canRegisterUsers}
                             />
                         </div>
                     </div>
@@ -149,19 +223,19 @@ const UserRegistration = () => {
                     <div className="grid grid-cols-1 gap-6">
                         <div>
                             <label className="text-sm font-medium text-white/60 mb-2 block">Роль</label>
-                            <CustomSelect
-                                options={[
-                                    { value: 'junior_employee', label: 'Мл. Сотрудник' },
-                                    { value: 'employee', label: 'Сотрудник' },
-                                    { value: 'senior_employee', label: 'Ст. Сотрудник' },
-                                    { value: 'manager', label: 'Менеджер' },
-                                    { value: 'developer', label: 'Разработчик' }
-                                ]}
-                                value={formData.role}
-                                onChange={(value) => setFormData({ ...formData, role: value as string })}
-                                placeholder="Выберите роль"
-                                icon={<ShieldAlert className="w-4 h-4" />}
-                            />
+                            {canRegisterUsers ? (
+                                <CustomSelect
+                                    options={roleOptions}
+                                    value={formData.role}
+                                    onChange={(value) => setFormData({ ...formData, role: value as string })}
+                                    placeholder={roleOptions.length ? "Выберите роль" : "Нет доступных ролей"}
+                                    icon={<ShieldAlert className="w-4 h-4" />}
+                                />
+                            ) : (
+                                <div className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white/40">
+                                    Нет доступа
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -173,6 +247,7 @@ const UserRegistration = () => {
                             placeholder="000000000000000000"
                             value={formData.discord_id}
                             onChange={(e) => setFormData({ ...formData, discord_id: e.target.value.replace(/\D/g, '') })}
+                            disabled={!canRegisterUsers}
                         />
                     </div>
 
@@ -183,7 +258,7 @@ const UserRegistration = () => {
                         </div>
                         <button
                             onClick={handleSubmit}
-                            disabled={loading}
+                            disabled={loading || !canRegisterUsers}
                             className={`px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             {loading ? 'Создание...' : 'Создать пользователя'}

@@ -5,17 +5,20 @@ Refactored to use envelope responses.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, List
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
+from pydantic import BaseModel
 from schemas.envelope import success_envelope
-from schemas.event import EventCreate, EventEndResponse, EventJoinRequest, EventResponse
+from schemas.event import EventCreate, EventJoinRequest, EventResponse
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -37,11 +40,13 @@ async def create_event(
         name=data.name,
         description=data.description,
         channel_id=data.channel_id,
-        message_id=0,  
+        message_id=0,
         created_by=data.created_by,
         required_pr_count=data.required_pr_count,
         start_time=data.start_time,
-        notification_sent=(data.start_time is None),  
+        notification_sent=(data.start_time is None),
+        pr_slots=data.pr_slots,
+        priority=data.priority,
     )
 
     if not event_id:
@@ -52,11 +57,14 @@ async def create_event(
         name=data.name,
         description=data.description,
         required_pr_count=data.required_pr_count,
+        pr_slots=data.pr_slots,
+        priority=data.priority,
+        is_pinned=data.is_pinned,
         start_time=data.start_time,
         channel_id=data.channel_id,
         created_by=data.created_by,
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         notification_sent=(data.start_time is None),
     )
 
@@ -102,25 +110,6 @@ async def get_events_to_start(
         content=success_envelope(
             data=events,
             message=f"Found {len(events)} scheduled events",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.get("/user/{user_id}/active")
-async def get_user_active_event(
-    request: Request,
-    user_id: int,
-    db: "Database" = Depends(get_db),
-):
-    """Check if user is in an active event."""
-    trace_id = get_trace_id(request)
-    result = await db.get_user_active_event_participation(user_id)
-
-    return JSONResponse(
-        content=success_envelope(
-            data=result,
-            message="User event participation status",
             trace_id=trace_id,
         )
     )
@@ -234,9 +223,6 @@ async def end_event(
     )
 
 
-from pydantic import BaseModel
-from typing import Optional
-
 class EventUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -244,6 +230,7 @@ class EventUpdate(BaseModel):
     priority: Optional[int] = None
     is_pinned: Optional[bool] = None
     points: Optional[float] = None
+
 
 @router.patch("/{event_id}")
 async def update_event(
@@ -262,16 +249,16 @@ async def update_event(
         required_pr_count=data.required_pr_count,
         priority=data.priority,
         is_pinned=data.is_pinned,
-        points=data.points
+        points=data.points,
     )
 
     if not success:
         event = await db.get_event(event_id)
         if not event:
-             raise HTTPException(status_code=404, detail="Event not found")
-    
+            raise HTTPException(status_code=404, detail="Event not found")
+
     event = await db.get_event(event_id)
-    
+
     return JSONResponse(
         content=success_envelope(
             data=event,
@@ -280,6 +267,7 @@ async def update_event(
             trace_id=trace_id,
         )
     )
+
 
 @router.patch("/{event_id}/notification-sent")
 async def mark_notification_sent(
@@ -299,6 +287,7 @@ async def mark_notification_sent(
             trace_id=trace_id,
         )
     )
+
 
 @router.patch("/{event_id}/message")
 async def update_event_message(

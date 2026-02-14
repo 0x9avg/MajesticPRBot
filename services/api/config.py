@@ -7,7 +7,7 @@ import logging
 import os
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
-from typing import List, Optional
+from typing import List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -105,10 +105,10 @@ class Settings(BaseSettings):
     ]
 
     template_defaults: dict = {
-        "stream_online": "🔴 {streamer_name} начал стрим!",
-        "stream_offline": "⚫ {streamer_name} закончил стрим",
-        "category_to_gta": "🎮 {streamer_name} сменил категорию на GTA 5!",
-        "category_from_gta": "🎮 {streamer_name} сменил категорию с GTA 5 на другую",
+        "stream_online": "**{streamer_name}** начал стрим!",
+        "stream_offline": "**{streamer_name}** закончил стрим",
+        "category_to_gta": "**{streamer_name}** сменил категорию на GTA 5!",
+        "category_from_gta": "**{streamer_name}** ушел с GTA 5",
     }
 
     # ==========================================================================

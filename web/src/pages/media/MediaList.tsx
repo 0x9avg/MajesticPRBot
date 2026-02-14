@@ -4,73 +4,89 @@ import { MapPin, CalendarDays, Settings, Activity } from 'lucide-react';
 import StreamerCard from './components/StreamerCard';
 import StreamerSettingsModal from './components/StreamerSettingsModal';
 import EventSettingsModal from './components/EventSettingsModal';
+import type { OutletUserContext } from '../../types/auth';
+import type { Event, EventParticipant, Streamer } from '../../types/domain';
+import { unwrapApiData } from '../../types/api';
+
+type ActivityItem =
+    | ({ type: 'event' } & Event)
+    | ({ type: 'streamer' } & Streamer);
 
 export function MediaList() {
-    const { user } = useOutletContext<any>() || {};
+    const { user } = useOutletContext<OutletUserContext>();
     const [activeTab, setActiveTab] = React.useState<'activities' | 'all' | 'stats'>('activities');
-    const [onlineStreamers, setOnlineStreamers] = React.useState<any[]>([]);
-    const [allStreamers, setAllStreamers] = React.useState<any[]>([]);
-    const [events, setEvents] = React.useState<any[]>([]);
+    const [onlineStreamers, setOnlineStreamers] = React.useState<Streamer[]>([]);
+    const [allStreamers, setAllStreamers] = React.useState<Streamer[]>([]);
+    const [events, setEvents] = React.useState<Event[]>([]);
     const [loading, setLoading] = React.useState(true);
-    const [selectedStreamer, setSelectedStreamer] = React.useState<any>(null);
-    const [selectedEvent, setSelectedEvent] = React.useState<any>(null);
+    const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
+    const [selectedEvent, setSelectedEvent] = React.useState<Event | null>(null);
     const navigate = useNavigate();
 
-    React.useEffect(() => {
-        fetchAllData();
-        const interval = setInterval(fetchAllData, 10000);
-        return () => clearInterval(interval);
+    const fetchOnlineStreamers = React.useCallback(async () => {
+        try {
+            const response = await fetch('/api/streamers?online_only=true');
+            if (response.ok) {
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
+                const normalized = Array.isArray(data) ? data : data.streamers;
+                setOnlineStreamers(Array.isArray(normalized) ? normalized : []);
+            }
+        } catch (error) {
+            console.error('Failed to fetch online streamers:', error);
+        }
     }, []);
 
-    const fetchAllData = async () => {
+    const fetchAllStreamers = React.useCallback(async () => {
+        try {
+            const response = await fetch('/api/streamers');
+            if (response.ok) {
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
+                const normalized = Array.isArray(data) ? data : data.streamers;
+                setAllStreamers(Array.isArray(normalized) ? normalized : []);
+            }
+        } catch (error) {
+            console.error('Failed to fetch all streamers:', error);
+        }
+    }, []);
+
+    const fetchActiveEvents = React.useCallback(async () => {
+        try {
+            const response = await fetch('/api/events/active');
+            if (response.ok) {
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<Event[]>(json);
+                setEvents(Array.isArray(data) ? data : []);
+            }
+        } catch (error) {
+            console.error('Failed to fetch active events:', error);
+        }
+    }, []);
+
+    const fetchAllData = React.useCallback(async () => {
         await Promise.all([
             fetchOnlineStreamers(),
             fetchAllStreamers(),
             fetchActiveEvents()
         ]);
         setLoading(false);
-    };
+    }, [fetchActiveEvents, fetchAllStreamers, fetchOnlineStreamers]);
 
-    const fetchOnlineStreamers = async () => {
-        try {
-            const response = await fetch('/api/streamers?online_only=true');
-            if (response.ok) {
-                const json = await response.json();
-                const data = (json.data && json.data.streamers) || json.streamers || [];
-                setOnlineStreamers(data);
-            }
-        } catch (error) {
-            console.error('Failed to fetch online streamers:', error);
-        }
-    };
+    React.useEffect(() => {
+        void fetchAllData();
+        const interval = setInterval(() => {
+            void fetchAllData();
+        }, 10000);
+        return () => clearInterval(interval);
+    }, [fetchAllData]);
 
-    const fetchAllStreamers = async () => {
-        try {
-            const response = await fetch('/api/streamers');
-            if (response.ok) {
-                const json = await response.json();
-                const data = (json.data && json.data.streamers) || json.streamers || [];
-                setAllStreamers(data);
-            }
-        } catch (error) {
-            console.error('Failed to fetch all streamers:', error);
-        }
-    };
-
-    const fetchActiveEvents = async () => {
-        try {
-            const response = await fetch('/api/events/active');
-            if (response.ok) {
-                const json = await response.json();
-                const data = json.data || [];
-                setEvents(data);
-            }
-        } catch (error) {
-            console.error('Failed to fetch active events:', error);
-        }
-    };
-
-    const handleUpdateStreamer = async (updates: any) => {
+    const handleUpdateStreamer = async (updates: {
+        priority?: number;
+        pr_slots?: number;
+        is_pinned?: boolean;
+        stream_points_override?: number | null;
+    }) => {
         if (!selectedStreamer) return;
         try {
             const token = localStorage.getItem('access_token');
@@ -90,7 +106,13 @@ export function MediaList() {
         }
     };
 
-    const handleUpdateEvent = async (updates: any) => {
+    const handleUpdateEvent = async (updates: {
+        name?: string;
+        description?: string;
+        priority?: number;
+        is_pinned?: boolean;
+        required_pr_count?: number;
+    }) => {
         if (!selectedEvent) return;
         try {
             const token = localStorage.getItem('access_token');
@@ -110,7 +132,7 @@ export function MediaList() {
         }
     };
 
-    const handleJoinEvent = async (event: any) => {
+    const handleJoinEvent = async (event: Event) => {
         if (!user) return;
         try {
             const token = localStorage.getItem('access_token');
@@ -133,7 +155,7 @@ export function MediaList() {
         }
     };
 
-    const handleUnjoinEvent = async (event: any) => {
+    const handleUnjoinEvent = async (event: Event) => {
         if (!user) return;
         try {
             const token = localStorage.getItem('access_token');
@@ -197,9 +219,9 @@ export function MediaList() {
                             <div className="flex flex-col gap-1">
                                 {(() => {
                                     // Combine events and streamers into one array
-                                    const allItems = [
-                                        ...events.map((event: any) => ({ ...event, type: 'event' })),
-                                        ...onlineStreamers.map((streamer: any) => ({ ...streamer, type: 'streamer' }))
+                                    const allItems: ActivityItem[] = [
+                                        ...events.map((event) => ({ ...event, type: 'event' } as ActivityItem)),
+                                        ...onlineStreamers.map((streamer) => ({ ...streamer, type: 'streamer' } as ActivityItem))
                                     ];
 
                                     // Sort by is_pinned DESC, then priority DESC
@@ -219,10 +241,13 @@ export function MediaList() {
                                         return <div className="text-white/40 text-center py-8">Нет активностей</div>;
                                     }
 
-                                    return sortedItems.map((item: any) => {
+                                    return sortedItems.map((item) => {
                                         if (item.type === 'event') {
                                             const event = item;
-                                            const isAssigned = event.participants?.some((p: any) => String(p.pr_id) === String(user?.discord_id));
+                                            const participants = event.participants || [];
+                                            const isAssigned = participants.some((participant: EventParticipant) => String(participant.pr_id) === String(user?.discord_id));
+                                            const currentParticipants = event.current_participants || participants.length;
+                                            const maxSlots = event.pr_slots || event.required_pr_count || 0;
                                             return (
                                                 <div key={`event-${event.id}`} className="group flex items-center p-3 rounded-xl hover:bg-white/5 transition-all">
                                                     {/* Left Section: Priority + Icon + Name */}
@@ -262,28 +287,28 @@ export function MediaList() {
 
                                                     {/* Middle Section: Status & Action Merged */}
                                                     <div className="flex-[2] flex items-center px-4 border-l border-white/10 relative">
-                                                        {event.current_participants > 0 ? (
+                                                        {currentParticipants > 0 ? (
                                                             <div className="w-full relative flex items-center justify-center">
                                                                 <div className="flex items-center gap-2 text-white/60">
                                                                     <div className="flex flex-wrap gap-2 justify-center">
-                                                                        {event.participants && event.participants.map((p: any) => (
+                                                                        {participants.map((participant: EventParticipant) => (
                                                                             <span
-                                                                                key={p.pr_id}
+                                                                                key={participant.pr_id}
                                                                                 onClick={(e) => {
                                                                                     e.stopPropagation();
-                                                                                    navigate(`/profile/${p.pr_id}`);
+                                                                                    navigate(`/profile/${participant.pr_id}`);
                                                                                 }}
                                                                                 className="font-bold text-white hover:text-blue-400 cursor-pointer transition-colors"
                                                                             >
-                                                                                @{p.nickname}
+                                                                                @{participant.nickname}
                                                                             </span>
                                                                         ))}
-                                                                        {(!event.participants || event.participants.length === 0) && (
-                                                                            <span className="font-bold text-white">{event.current_participants}</span>
+                                                                        {participants.length === 0 && (
+                                                                            <span className="font-bold text-white">{currentParticipants}</span>
                                                                         )}
                                                                     </div>
                                                                 </div>
-                                                                {(isAssigned || (event.current_participants < (event.pr_slots || event.required_pr_count))) && (
+                                                                {(isAssigned || (currentParticipants < maxSlots)) && (
                                                                     <div className="absolute right-0 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 items-end">
                                                                         {isAssigned ? (
                                                                             <button

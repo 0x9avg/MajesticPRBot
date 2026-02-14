@@ -3,12 +3,11 @@
 HTTP client for communicating with the central API service.
 """
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-
-import json
 
 
 class APIClient:
@@ -61,7 +60,7 @@ class APIClient:
                     return {"status": "success"}
 
                 result = await resp.json()
-                
+
                 # Unwrap API Envelope
                 if isinstance(result, dict) and "status" in result and "data" in result:
                     if result["status"] == "success" or resp.status < 400:
@@ -70,7 +69,7 @@ class APIClient:
                         # Envelope with error status
                         error_msg = result.get("message", "Unknown API error")
                         self.logger.warning(f"API Error ({resp.status}): {error_msg}")
-                        return result # Return full envelope for custom error handling if needed
+                        return result  # Return full envelope for custom error handling if needed
 
                 if not isinstance(result, (dict, list)) and result is not None:
                     self.logger.warning(
@@ -98,8 +97,6 @@ class APIClient:
             self.logger.error(f"Unexpected error in API request: {e}", exc_info=True)
             return None
 
-
-
     async def get_health(self) -> Dict[str, Any]:
         """Get API health status."""
         # Assuming there is a /health endpoint not under /api
@@ -109,7 +106,7 @@ class APIClient:
             if result:
                 return result
             return {"status": "unknown", "api": "online"}
-        except:
+        except:  # noqa: E722
             return {"status": "unreachable"}
 
     async def sync_streamers(self) -> Dict[str, Any]:
@@ -118,13 +115,11 @@ class APIClient:
         # Fallback to refreshing monitoring.
         return await self.refresh_monitoring(force=True)
 
-
-
     async def list_all_streamers(self) -> List[Dict]:
         """Get all streamers."""
         result = await self._request("GET", "/streamers")
         if result and "streamers" in result:
-             return result["streamers"]
+            return result["streamers"]
         return []
 
     async def get_streamer(self, twitch_id: int) -> Optional[Dict]:
@@ -167,11 +162,11 @@ class APIClient:
         result = await self.get_streamer(twitch_id)
         return result is not None and "detail" not in result
 
-
-
     async def get_guild_settings(self) -> Optional[Dict]:
         """Get guild settings."""
         data = await self._request("GET", "/guild")
+        if not isinstance(data, dict):
+            return None
         data["notification_templates"] = json.loads(
             data.get("notification_templates", "{}")
         )
@@ -205,8 +200,6 @@ class APIClient:
 
         return await self._request("PATCH", "/guild/rates", data=data)
 
-
-
     async def claim_streamer(
         self, streamer_id: int, pr_id: int, is_probation: bool = False
     ) -> Optional[Dict]:
@@ -231,7 +224,7 @@ class APIClient:
         }
         if pr_id is not None:
             data["pr_id"] = pr_id
-            
+
         return await self._request(
             "POST",
             "/spec/unclaim",
@@ -263,10 +256,7 @@ class APIClient:
             },
         )
 
-    async def get_active_specs(self) -> List[Dict]:
-        """Get all active spec sessions."""
-        result = await self._request("GET", "/spec/active")
-        return result if isinstance(result, list) else []
+
 
     async def get_current_streamer_for_pr(self, pr_id: int) -> Optional[Dict]:
         """Get raw response for PR current streamer (includes 'assigned' flag)."""
@@ -281,17 +271,17 @@ class APIClient:
 
     async def get_claimable_streamers(self, user_id: int) -> Dict:
         """Get streamers available for claim by a specific user.
-        
+
         Returns dict with:
         - streamers: list of {streamer_id, streamer_name, priority, main_free, probation_free}
         - can_spec_probation: bool
         """
-        result = await self._request("GET", "/spec/claimable", params={"user_id": user_id})
+        result = await self._request(
+            "GET", "/spec/claimable", params={"user_id": user_id}
+        )
         if result and "streamers" in result:
             return result
         return {"streamers": [], "can_spec_probation": False}
-
-
 
     async def get_assistants(self) -> List[Dict]:
         """Get all assistants."""
@@ -315,10 +305,9 @@ class APIClient:
             "can_manage_streamers": False,
         }
 
-    # TODO: Fix /assistants/{user_id}/stats is not existing
     async def get_assistant_stats(self, user_id: int) -> Optional[Dict]:
-        """Get assistant stats."""
-        return await self._request("GET", f"/assistants/{user_id}/stats")
+        """Get assistant stats (uses assistant details endpoint)."""
+        return await self._request("GET", f"/assistants/{user_id}")
 
     async def add_assistant_time(self, user_id: int, seconds: int) -> Optional[Dict]:
         """Add time to assistant's total."""
@@ -334,15 +323,18 @@ class APIClient:
             "POST", f"/assistants/{user_id}/subtract-time", params={"seconds": seconds}
         )
 
-
-
     async def refresh_monitoring(self, force: bool = False) -> Optional[Dict]:
         """Request monitoring refresh."""
         return await self._request("POST", "/monitoring/refresh", data={"force": force})
 
+    async def get_dashboard_stats(self) -> Optional[Dict]:
+        """Get dashboard stats."""
+        result = await self._request("GET", "/stats/dashboard")
+        return result if isinstance(result, dict) else None
+
     async def get_dashboard_status(self) -> Optional[Dict]:
-        """Get dashboard status."""
-        return await self._request("GET", "/dashboard/status")
+        """Backward-compatible alias for dashboard stats."""
+        return await self.get_dashboard_stats()
 
     async def get_monitoring_status(self) -> Optional[Dict]:
         """Get monitoring view model for Discord display."""
@@ -361,12 +353,18 @@ class APIClient:
             params={"streamer_id": streamer_id},
         )
 
-    # TODO: Fix /stats/leaderboard is not existing
     async def get_leaderboard(self, limit: int = 10) -> Optional[Dict]:
-        """Get PR leaderboard."""
-        return await self._request("GET", "/stats/leaderboard", params={"limit": limit})
+        """Get PR leaderboard derived from assistants list."""
+        assistants = await self.get_assistants()
+        if not assistants:
+            return {"items": []}
 
-
+        sorted_items = sorted(
+            assistants,
+            key=lambda item: item.get("total_spec_seconds", 0),
+            reverse=True,
+        )
+        return {"items": sorted_items[:limit]}
 
     async def create_event(
         self,
@@ -376,12 +374,16 @@ class APIClient:
         channel_id: int,
         created_by: int,
         start_time: Optional[str] = None,
+        pr_slots: Optional[int] = None,
+        priority: int = 0,
     ) -> Optional[Dict]:
         """Create a new event."""
         data = {
             "name": name,
             "description": description,
             "required_pr_count": required_pr_count,
+            "pr_slots": pr_slots if pr_slots is not None else required_pr_count,
+            "priority": priority,
             "channel_id": channel_id,
             "created_by": created_by,
         }
@@ -428,9 +430,7 @@ class APIClient:
         )
         return result is not None
 
-    async def get_user_active_event(self, user_id: int) -> Optional[Dict]:
-        """Get user's active event."""
-        return await self._request("GET", f"/events/user/{user_id}/active")
+
 
     async def get_event(self, event_id: int) -> Optional[Dict]:
         """Get a specific event by ID."""
@@ -441,8 +441,6 @@ class APIClient:
         result = await self._request("GET", f"/events/{event_id}/participants")
         return result if isinstance(result, list) else []
 
-
-
     async def update_streamer_priority(self, streamer_id: int, priority: int) -> bool:
         """Update streamer priority."""
         result = await self._request(
@@ -450,10 +448,7 @@ class APIClient:
         )
         return result is not None and "detail" not in result
 
-    async def get_available_gta_streamers(self) -> List[Dict]:
-        """Get online GTA streamers without assigned PR."""
-        result = await self._request("GET", "/streamers/available-gta")
-        return result if isinstance(result, list) else []
+
 
     async def get_streamer_assigned_pr(self, streamer_id: int) -> Optional[int]:
         """Get the PR ID assigned to a streamer."""
@@ -461,8 +456,6 @@ class APIClient:
         if streamer:
             return streamer.get("assigned_pr_id")
         return None
-
-
 
     async def get_pr_total_time(self, pr_id: int) -> int:
         """Get total spec time for a PR in seconds."""
@@ -549,8 +542,6 @@ class APIClient:
         )
         return result is not None and "detail" not in result
 
-
-
     async def get_pr_actions_channel(self) -> Optional[int]:
         """Get PR actions channel ID."""
         settings = await self.get_guild_settings()
@@ -592,8 +583,6 @@ class APIClient:
         data = {f"template_{event_type}": template}
         result = await self._request("PATCH", "/guild/templates", data=data)
         return result is not None
-
-
 
     async def set_notification_channel(self, channel_id: int) -> bool:
         """Set notification channel."""

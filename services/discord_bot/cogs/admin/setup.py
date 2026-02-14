@@ -1,5 +1,5 @@
 """Admin Setup - Initial Server Configuration.
-Handles /setup command for channel and role configuration.
+Handles /setup command for channel configuration.
 Separate from guild settings which handles ongoing configuration (points, etc.)
 """
 
@@ -12,13 +12,11 @@ if TYPE_CHECKING:
     from discord_bot import DiscordBot
 
 import disnake
-from config import Config
 from disnake import MessageInteraction
 from disnake.ext import commands
-from utils import create_streamers_component, create_monitoring_select
+from utils import create_monitoring_select, create_streamers_component
 
 from .core import AdminMainView, get_main_embed
-
 
 # =============================================================================
 # Setup Embed
@@ -26,7 +24,7 @@ from .core import AdminMainView, get_main_embed
 
 
 def create_setup_embed(data: dict | None) -> disnake.Embed:
-    """Create embed showing current channel/role configuration."""
+    """Create embed showing current channel configuration."""
     embed = disnake.Embed(
         title="🛠️ Первоначальная Настройка",
         colour=0x5865F2,
@@ -80,16 +78,6 @@ def create_setup_embed(data: dict | None) -> disnake.Embed:
         inline=True,
     )
 
-    embed.add_field(
-        name="🏷️ Роль Ассистента",
-        value=(
-            f"<@&{data.get('assistant_role_id')}>"
-            if data.get("assistant_role_id")
-            else "❌ Не настроена"
-        ),
-        inline=True,
-    )
-
     return embed
 
 
@@ -100,13 +88,11 @@ ID_SETUP_NOTIFICATION = "setup_channel_notification"
 ID_SETUP_MON = "setup_channel_mon"
 ID_SETUP_LOGS = "setup_channel_logs"
 ID_SETUP_PANEL = "setup_channel_panel"
-ID_SETUP_ROLE = "setup_role"
 
 ID_SELECT_NOTIFICATION = "setup_sel_notification"
 ID_SELECT_MON = "setup_sel_mon"
 ID_SELECT_LOGS = "setup_sel_logs"
 ID_SELECT_PANEL = "setup_sel_panel"
-ID_SELECT_ROLE = "setup_sel_role"
 
 ID_BTN_BACK = "setup_btn_back"
 
@@ -117,7 +103,7 @@ ID_BTN_BACK = "setup_btn_back"
 
 
 class SetupMainView(disnake.ui.View):
-    """Main view for /setup command - channel and role configuration."""
+    """Main view for /setup command - channel configuration."""
 
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
@@ -149,19 +135,11 @@ class SetupMainView(disnake.ui.View):
             )
         )
 
-        # Row 1 - Panel and Role
+        # Row 1 - Panel
         self.add_item(
             disnake.ui.Button(
                 label="🎛️ Панель",
                 custom_id=ID_SETUP_PANEL,
-                style=disnake.ButtonStyle.primary,
-                row=1,
-            )
-        )
-        self.add_item(
-            disnake.ui.Button(
-                label="🏷️ Роль",
-                custom_id=ID_SETUP_ROLE,
                 style=disnake.ButtonStyle.primary,
                 row=1,
             )
@@ -192,36 +170,13 @@ class SetupChannelSelectView(disnake.ui.View):
         )
 
 
-class SetupRoleSelectView(disnake.ui.View):
-    """Role select view for setup."""
-
-    def __init__(self, user_id: int):
-        super().__init__(timeout=None)
-        self.add_item(
-            disnake.ui.RoleSelect(
-                custom_id=ID_SELECT_ROLE,
-                placeholder="Выберите роль...",
-                min_values=1,
-                max_values=1,
-            )
-        )
-        self.add_item(
-            disnake.ui.Button(
-                label="🔙 Назад",
-                custom_id=ID_BTN_BACK,
-                style=disnake.ButtonStyle.secondary,
-                row=1,
-            )
-        )
-
-
 # =============================================================================
 # Admin Setup Cog
 # =============================================================================
 
 
 class AdminSetup(commands.Cog):
-    """Initial server setup - channels and roles configuration."""
+    """Initial server setup - channels configuration."""
 
     bot: "DiscordBot"
     api: "APIClient"
@@ -237,7 +192,7 @@ class AdminSetup(commands.Cog):
     async def setup_command(
         self, interaction: disnake.ApplicationCommandInteraction
     ) -> None:
-        """Initial setup - channels and roles (only slash command allowed)."""
+        """Initial setup - channels (only slash command allowed)."""
         if not interaction.author.guild_permissions.administrator:
             await interaction.response.send_message(
                 "🚫 У вас нет прав администратора.",
@@ -258,7 +213,7 @@ class AdminSetup(commands.Cog):
         custom_id = interaction.component.custom_id or ""
 
         # Strict Filter - only handle setup_ prefixed buttons
-        if not custom_id.startswith(("setup_channel_", "setup_role", "setup_btn_")):
+        if not custom_id.startswith(("setup_channel_", "setup_btn_")):
             return
 
         # Safe Defer
@@ -309,17 +264,10 @@ class AdminSetup(commands.Cog):
                     view=SetupChannelSelectView(user_id, ID_SELECT_PANEL),
                 )
 
-            elif custom_id == ID_SETUP_ROLE:
-                await interaction.edit_original_response(
-                    content="Выберите роль Ассистента:",
-                    embed=None,
-                    view=SetupRoleSelectView(user_id),
-                )
-
         except Exception as e:
             self.bot.logger.error(f"Setup button error {custom_id}: {e}", exc_info=True)
             try:
-                await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
             except:  # noqa: E722
                 pass
 
@@ -363,13 +311,6 @@ class AdminSetup(commands.Cog):
                     f"✅ Канал логов: <#{val}>", ephemeral=True
                 )
 
-            elif custom_id == ID_SELECT_ROLE:
-                await self.api.update_guild_settings(assistant_role_id=int(val))
-                await back_to_main()
-                await interaction.followup.send(
-                    f"✅ Роль ассистента: <@&{val}>", ephemeral=True
-                )
-
             elif custom_id == ID_SELECT_PANEL:
                 channel_id = int(val)
                 channel = self.bot.get_channel(channel_id)
@@ -391,7 +332,9 @@ class AdminSetup(commands.Cog):
                             f"❌ Ошибка создания панели: {e}", ephemeral=True
                         )
                 else:
-                    await interaction.followup.send("❌ Канал не найден.", ephemeral=True)
+                    await interaction.followup.send(
+                        "❌ Канал не найден.", ephemeral=True
+                    )
 
             elif custom_id == ID_SELECT_MON:
                 channel_id = int(val)
@@ -400,20 +343,22 @@ class AdminSetup(commands.Cog):
                     # Get monitoring status from API (includes available_for_claim)
                     status = await self.api.get_monitoring_status()
                     if not status:
-                        await interaction.followup.send("❌ Не удалось получить данные.", ephemeral=True)
+                        await interaction.followup.send(
+                            "❌ Не удалось получить данные.", ephemeral=True
+                        )
                         return
-                    
+
                     online = status.get("online_streamers", [])
                     total_count = status.get("total_streamers", 0)
                     gta_count = status.get("gta_count", 0)
                     online_count = status.get("online_count", len(online))
                     available = status.get("available_for_claim", [])
-                    
+
                     pages = create_streamers_component(
                         online, total_count, gta_count, online_count=online_count
                     )
                     select_row = create_monitoring_select(available, [])
-                    
+
                     # Send all pages and collect message IDs
                     message_ids = []
                     for i, page in enumerate(pages):
@@ -423,24 +368,26 @@ class AdminSetup(commands.Cog):
                         else:
                             msg = await channel.send(components=[page])
                         message_ids.append(msg.id)
-                    
+
                     await self.api.update_guild_settings(
-                        monitoring_channel_id=channel_id, 
-                        monitoring_message_ids=message_ids
+                        monitoring_channel_id=channel_id,
+                        monitoring_message_ids=message_ids,
                     )
                     await back_to_main()
                     await interaction.followup.send(
                         f"✅ Мониторинг настроен: <#{val}>", ephemeral=True
                     )
                 else:
-                    await interaction.followup.send("❌ Канал не найден.", ephemeral=True)
+                    await interaction.followup.send(
+                        "❌ Канал не найден.", ephemeral=True
+                    )
 
         except Exception as e:
             self.bot.logger.error(
                 f"Setup dropdown error {custom_id}: {e}", exc_info=True
             )
             try:
-                await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
             except:  # noqa: E722
                 pass
 

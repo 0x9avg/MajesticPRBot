@@ -1,11 +1,18 @@
 import { useState, useEffect } from 'react';
 import { Settings, X, Save, AlertCircle, Pin } from 'lucide-react';
+import type { Event } from '../../../types/domain';
 
 interface EventSettingsModalProps {
-    event: any;
+    event: Event | null;
     isOpen: boolean;
     onClose: () => void;
-    onSave: (data: any) => Promise<void>;
+    onSave: (data: {
+        name: string;
+        description: string;
+        priority: number;
+        is_pinned: boolean;
+        required_pr_count: number;
+    }) => Promise<void>;
 }
 
 const EventSettingsModal = ({ event, isOpen, onClose, onSave }: EventSettingsModalProps) => {

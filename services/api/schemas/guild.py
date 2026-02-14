@@ -5,7 +5,7 @@ Guild schemas for API requests and responses.
 import json
 from typing import Any, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from schemas.common import Snowflake
 
@@ -27,7 +27,6 @@ class GuildSettingsUpdate(BaseModel):
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
-    assistant_role_id: Optional[Snowflake] = None
 
     @field_validator("monitoring_message_ids", mode="before")
     @classmethod
@@ -60,7 +59,6 @@ class GuildSettingsResponse(BaseModel):
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
-    assistant_role_id: Optional[Snowflake] = None
     template_stream_online: Optional[str] = None
     template_stream_offline: Optional[str] = None
     template_category_to_gta: Optional[str] = None
@@ -76,8 +74,7 @@ class GuildSettingsResponse(BaseModel):
     def parse_message_ids(cls, v: Any) -> Optional[list]:
         return _parse_json_list(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GuildSettingsOnlyResponse(BaseModel):
@@ -90,15 +87,13 @@ class GuildSettingsOnlyResponse(BaseModel):
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
-    assistant_role_id: Optional[Snowflake] = None
 
     @field_validator("monitoring_message_ids", mode="before")
     @classmethod
     def parse_message_ids(cls, v: Any) -> Optional[list]:
         return _parse_json_list(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GuildTemplatesResponse(BaseModel):
@@ -109,8 +104,7 @@ class GuildTemplatesResponse(BaseModel):
     category_to_gta: Optional[str] = None
     category_from_gta: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GuildRatesResponse(BaseModel):
@@ -122,5 +116,4 @@ class GuildRatesResponse(BaseModel):
     p3_rate: Optional[float] = None
     probation_rate: Optional[float] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

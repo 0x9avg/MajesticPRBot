@@ -1,116 +1,102 @@
 # PRMajesticBot
 
-Интеграционный бот Discord и Twitch для мониторинга стримеров и отправки уведомлений в каналы Discord.
+Интеграционный бот Discord и Twitch для мониторинга стримеров и управления PR-активностью (Majestic RP).
 
 ## 🎯 Возможности
 
-- **Мониторинг стримов**: Автоматическое отслеживание запуска и окончания трансляций, а также смену категории.
-- **Умные уведомления**: Отправка сообщений в Discord, когда:
-  - Стример выходит в эфир
-  - Стример заканчивает трансляцию
-  - Стример меняет категорию (специальная обработка для GTA 5)
-- **Система приоритетов**: Организация стримеров по уровням приоритета
-- **База данных**: Все данные хранятся в базе данных MySQL
+- **Мониторинг стримов**: Отслеживание статуса (Online/Offline), смены категории (GTA 5 <-> Other) и заголовков.
+- **Управление персоналом (PR)**:
+  - Система ролей (Junior, Senior, Manager).
+  - Учет рабочего времени (Spec Sessions).
+  - Автоматический расчет баллов и статистика.
+- **Ивенты**: Создание и управление событиями с отслеживанием участия.
+- **Умные уведомления**: Гибкая настройка каналов для анонсов и отчетов.
+- **Веб-панель**: Полноценный Dashboard для управления системой без команд Discord.
 
 ## 📋 Требования
 
-Перед запуском проекта убедитесь, что у вас установлено следующее:
+- **Python 3.12+**: Бэкенд-сервисы (API, Bots).
+- **Node.js 20+**: Фронтенд (React 19).
+- **MySQL 8.0+ / MariaDB 10.5+**: Основная база данных.
+- **RabbitMQ**: Брокер сообщений для событий.
 
-- **Python 3.10+**: Основной язык для бэкенд-сервисов
-- **RabbitMQ**: Брокер сообщений для межсервисного взаимодействия
-- **MySQL 5.7+ / MariaDB 10.3+**: База данных для постоянного хранения
-- **Node.js 18+ & npm**: Для сборки веб-панели (Dashboard)
+## 🚀 Установка и Запуск
 
-### Обзор архитектуры
+> [!WARNING]
+> Проект использует микросервисную архитектуру. Все компоненты должны быть запущены одновременно.
+> Автоматический лаунчер `start_project.bat` временно не поддерживается/требует доработки. Рекомендуется ручной запуск.
 
-Для детального понимания архитектуры системы и взаимодействия микросервисов, пожалуйста, прочитайте [ARCHITECTURE.md](ARCHITECTURE.md).
+### 1. Подготовка
+Клонируйте репозиторий и настройте переменные окружения для каждого сервиса, скопировав `example.env` в `.env`:
+- `services/api/.env`
+- `services/discord_bot/.env`
+- `services/twitch_bot/.env`
 
-## 🚀 Установка и настройка
+### 2. Запуск Сервисов (Ручной режим)
 
-### 1. Клонирование репозитория
+Вам потребуется открыть 4 терминала.
 
-```bash
-git clone <repository-url>
-cd PRMajesticBot
-```
-
-### 2. Настройка переменных окружения
-
-Каждый сервис требует собственной конфигурации. Скопируйте файлы примеров и заполните свои данные:
-
-**API Service:**
-```bash
-cp services/api/example.env services/api/.env
-nano services/api/.env
-```
-
-**Discord Bot Service:**
-```bash
-cp services/discord_bot/example.env services/discord_bot/.env
-nano services/discord_bot/.env
-```
-
-**Twitch Bot Service:**
-```bash
-cp services/twitch_bot/example.env services/twitch_bot/.env
-nano services/twitch_bot/.env
-```
-
-### 3. Запуск сервисов
-
-Вам нужно запустить каждый сервис в отдельном окне терминала/screen.
-
-**Терминал 1: API Service**
+**Терминал 1: API Service** (Ядро системы)
 ```bash
 cd services/api
-pip3 install -r requirements.txt
-uvicorn api.main:app --reload
+# Создание venv (рекомендуется)
+python -m venv venv
+source venv/bin/activate  # на Windows: venv\Scripts\activate
+# Установка зависимостей
+pip install -r requirements.txt
+# Запуск
+python main.py
 ```
 
 **Терминал 2: Discord Bot**
 ```bash
 cd services/discord_bot
-pip3 install -r requirements.txt
-python3 main.py
+# Используйте тот же venv или создайте новый
+source ../api/venv/bin/activate 
+pip install -r requirements.txt
+python main.py
 ```
 
 **Терминал 3: Twitch Bot**
 ```bash
 cd services/twitch_bot
-pip3 install -r requirements.txt
-python3 main.py
+source ../api/venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-**Терминал 4: Web Panel (Разработка)**
+**Терминал 4: Frontend (Web Panel)**
 ```bash
 cd web
 npm install
 npm run dev
-# В настоящее время в разработке. Будущие версии будут использовать контейнеры.
 ```
 
-## 🏗️ Структура проекта
+## 🏗️ Структура
 
-Проект разделен на микросервисы:
+Подробное описание архитектуры см. в [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
 PRMajesticBot/
 ├── services/
-│   ├── api/            # Центральный REST API и База данных
-│   ├── discord_bot/    # Взаимодействие с Discord и UI
-│   └── twitch_bot/     # Мониторинг Twitch и брокер событий
-├── web/                # Веб-панель (React/Vite)
-└── README.md
+│   ├── api/            # FastAPI, Database, Auth
+│   ├── discord_bot/    # Disnake, UI, Interaction
+│   └── twitch_bot/     # TwitchIO, EventSub
+├── web/                # React 19, Vite, Tailwind v4
+└── ...
 ```
+
+## 📌 API Контракт (кратко)
+
+- `POST /api/auth/login` выдает access token с `sid` (ID сессии).
+- `POST /api/auth/logout` отзывает сессии пользователя; старые access token после этого невалидны.
+- Количество активных спек-сессий для клиентов берется из `GET /api/stats/dashboard` (`assigned_pr_count`).
 
 ## 🔧 Устранение неполадок
 
-### Сервисы не подключаются
-Убедитесь, что RabbitMQ запущен и правильно настроен во всех файлах `.env`. Сервисы полагаются на RabbitMQ для общения.
-
-### Ошибки базы данных
-Убедитесь, что в `services/api/.env` указаны правильные учетные данные базы данных. Сервис API автоматически обрабатывает миграции базы данных при запуске.
+- **Ошибка подключения к БД**: Проверьте `DB_HOST`, `DB_USER` и `DB_PASSWORD` в `services/api/.env`. API автоматически создаст таблицы при первом успешном подключении.
+- **RabbitMQ**: Если брокер недоступен, сервисы будут работать в ограниченном режиме (без уведомлений в реальном времени), но API и БД продолжат функционировать.
+- **Frontend**: Если не работает логин, убедитесь, что API запущен на порту, указанном в конфигурации фронтенда (обычно 8000).
 
 ## 📝 Лицензия
-
-Этот проект является частным/проприетарным.
+Private / Proprietary.

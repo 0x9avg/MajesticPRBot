@@ -1,6 +1,6 @@
 """Admin Guild - Points Configuration.
 Handles points rate configuration (including probation rate).
-Channel/role setup is handled by setup.py cog via /setup command.
+Channel setup is handled by setup.py cog via /setup command.
 """
 
 from __future__ import annotations
@@ -14,9 +14,6 @@ if TYPE_CHECKING:
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
-
-from .core import AdminMainView, get_main_embed
-
 
 # =============================================================================
 # Settings Embed
@@ -114,13 +111,17 @@ class GuildSettingsView(disnake.ui.View):
                 row=0,
             )
         )
-        
+
         # GTA filter toggle button
         self.add_item(
             disnake.ui.Button(
                 label="🎮 Только GTA" if gta_filter_on else "🎮 Все стримеры",
                 custom_id=ID_TOGGLE_GTA_FILTER,
-                style=disnake.ButtonStyle.primary if gta_filter_on else disnake.ButtonStyle.secondary,
+                style=(
+                    disnake.ButtonStyle.primary
+                    if gta_filter_on
+                    else disnake.ButtonStyle.secondary
+                ),
                 row=0,
             )
         )
@@ -218,7 +219,9 @@ class PointsConfigModal(disnake.ui.Modal):
             )
         except Exception as e:
             self.bot.logger.error(f"Points config error: {e}", exc_info=True)
-            await interaction.edit_original_message(content="❌ Ошибка сохранения.")
+            await interaction.edit_original_message(
+                content=f"❌ Ошибка сохранения: {e}"
+            )
 
 
 # =============================================================================
@@ -259,7 +262,9 @@ class AdminGuild(commands.Cog):
             # Navigation from main menu
             if custom_id == "admin_guild":
                 data = await self.api.get_guild_settings()
-                gta_filter_on = data.get("monitoring_filter_gta", False) if data else False
+                gta_filter_on = (
+                    data.get("monitoring_filter_gta", False) if data else False
+                )
                 await interaction.edit_original_response(
                     embed=create_guild_settings_embed(data),
                     view=GuildSettingsView(user_id, gta_filter_on),
@@ -268,22 +273,26 @@ class AdminGuild(commands.Cog):
             elif custom_id == ID_TOGGLE_GTA_FILTER:
                 # Toggle GTA filter
                 data = await self.api.get_guild_settings()
-                current_value = data.get("monitoring_filter_gta", False) if data else False
+                current_value = (
+                    data.get("monitoring_filter_gta", False) if data else False
+                )
                 new_value = not current_value
-                
+
                 await self.api.update_guild_settings(monitoring_filter_gta=new_value)
-                
+
                 # Refresh monitoring messages
                 await self.api.refresh_monitoring()
-                
+
                 # Refresh embed and view
                 data = await self.api.get_guild_settings()
-                gta_filter_on = data.get("monitoring_filter_gta", False) if data else False
+                gta_filter_on = (
+                    data.get("monitoring_filter_gta", False) if data else False
+                )
                 await interaction.edit_original_response(
                     embed=create_guild_settings_embed(data),
                     view=GuildSettingsView(user_id, gta_filter_on),
                 )
-                
+
                 status_text = "включён" if new_value else "выключен"
                 await interaction.followup.send(
                     f"✅ Фильтр GTA {status_text}!", ephemeral=True
@@ -301,7 +310,7 @@ class AdminGuild(commands.Cog):
         except Exception as e:
             self.bot.logger.error(f"Guild button error {custom_id}: {e}", exc_info=True)
             try:
-                await interaction.followup.send("❌ Ошибка.", ephemeral=True)
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
             except:  # noqa: E722
                 pass
 

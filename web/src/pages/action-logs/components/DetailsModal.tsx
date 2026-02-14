@@ -4,7 +4,7 @@ import { FileText, X } from 'lucide-react';
 interface DetailsModalProps {
     isOpen: boolean;
     onClose: () => void;
-    data: any;
+    data: unknown;
     title: string;
 }
 

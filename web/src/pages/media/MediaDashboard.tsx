@@ -2,11 +2,13 @@ import React from 'react';
 import { ChevronDown } from 'lucide-react';
 import StreamerCard from './components/StreamerCard';
 import StreamerSettingsModal from './components/StreamerSettingsModal';
+import type { Streamer } from '../../types/domain';
+import { unwrapApiData } from '../../types/api';
 
 export function MediaDashboard() {
-    const [streamers, setStreamers] = React.useState<any[]>([]);
+    const [streamers, setStreamers] = React.useState<Streamer[]>([]);
     const [loading, setLoading] = React.useState(true);
-    const [selectedStreamer, setSelectedStreamer] = React.useState<any>(null);
+    const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
     const [isMediaOpen, setIsMediaOpen] = React.useState(true);
 
     React.useEffect(() => {
@@ -19,9 +21,10 @@ export function MediaDashboard() {
         try {
             const response = await fetch('/api/streamers');
             if (response.ok) {
-                const json = await response.json();
-                const data = (json.data && json.data.streamers) || json.streamers || [];
-                setStreamers(data);
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
+                const normalized = Array.isArray(data) ? data : data.streamers;
+                setStreamers(Array.isArray(normalized) ? normalized : []);
             }
         } catch (error) {
             console.error('Failed to fetch streamers:', error);
@@ -30,7 +33,12 @@ export function MediaDashboard() {
         }
     };
 
-    const handleUpdateStreamer = async (updates: any) => {
+    const handleUpdateStreamer = async (updates: {
+        priority?: number;
+        pr_slots?: number;
+        is_pinned?: boolean;
+        stream_points_override?: number | null;
+    }) => {
         if (!selectedStreamer) return;
         try {
             const token = localStorage.getItem('access_token');
@@ -43,7 +51,7 @@ export function MediaDashboard() {
                 body: JSON.stringify(updates)
             });
             if (response.ok) {
-                fetchStreamers();
+                await fetchStreamers();
             }
         } catch (error) {
             console.error('Failed to update streamer:', error);

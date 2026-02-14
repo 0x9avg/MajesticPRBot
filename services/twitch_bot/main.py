@@ -7,7 +7,6 @@ import asyncio
 import sys
 
 import uvloop
-
 from api_client import APIClient
 from config import Config
 from twitch_bot import TwitchBot

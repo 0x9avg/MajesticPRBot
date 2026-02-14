@@ -4,12 +4,10 @@ Global exception handlers that return standardized envelope responses.
 """
 
 import logging
-from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-
 from schemas.envelope import (
     FieldError,
     error_envelope,

@@ -4,11 +4,14 @@ import { FileText, Search, Filter, Eye, ArrowUp, ArrowDown } from 'lucide-react'
 import { CustomSelect, CustomDatePicker } from '../../components/CustomInputs';
 import DetailsModal from './components/DetailsModal';
 import NotificationToast from './components/NotificationToast';
+import type { OutletUserContext } from '../../types/auth';
+import type { AdminLogRecord } from '../../types/domain';
+import { unwrapApiData } from '../../types/api';
 
 export function SpectateLogs() {
-    const { user } = useOutletContext<any>() || {};
+    const { user } = useOutletContext<OutletUserContext>();
     const [activeTab, setActiveTab] = React.useState<'assistants' | 'admins'>('assistants');    // Admin Logs State
-    const [adminLogs, setAdminLogs] = React.useState<any[]>([]);
+    const [adminLogs, setAdminLogs] = React.useState<AdminLogRecord[]>([]);
     const [loading, setLoading] = React.useState(false);
     const [pageConfig, setPageConfig] = React.useState({
         limit: 20,
@@ -32,9 +35,13 @@ export function SpectateLogs() {
     });
 
     // Details Modal State
-    const [selectedLog, setSelectedLog] = React.useState<any>(null);
+    const [selectedLog, setSelectedLog] = React.useState<AdminLogRecord | null>(null);
 
     const [notification, setNotification] = React.useState<string | null>(null);
+    const loadingRef = React.useRef(false);
+    const pageConfigRef = React.useRef(pageConfig);
+    const sortConfigRef = React.useRef(sortConfig);
+    const filtersRef = React.useRef(filters);
 
     // Initial check
     const canViewAdminLogs = user?.permissions?.can_view_admin_logs === true ||
@@ -42,62 +49,83 @@ export function SpectateLogs() {
         user?.role === 'developer';
 
     React.useEffect(() => {
-        if (activeTab === 'admins' && canViewAdminLogs) {
-            fetchAdminLogs(false);
-        }
-    }, [activeTab, canViewAdminLogs]);
+        pageConfigRef.current = pageConfig;
+    }, [pageConfig]);
 
-    const fetchAdminLogs = async (isLoadMore = false) => {
-        if (loading) return;
+    React.useEffect(() => {
+        sortConfigRef.current = sortConfig;
+    }, [sortConfig]);
+
+    React.useEffect(() => {
+        filtersRef.current = filters;
+    }, [filters]);
+
+    const fetchAdminLogs = React.useCallback(async (isLoadMore = false) => {
+        if (loadingRef.current) return;
+        loadingRef.current = true;
         setLoading(true);
         try {
             const token = localStorage.getItem('access_token');
-            const currentOffset = isLoadMore ? pageConfig.offset + pageConfig.limit : 0;
+            const currentConfig = pageConfigRef.current;
+            const currentSort = sortConfigRef.current;
+            const currentFilters = filtersRef.current;
+            const currentOffset = isLoadMore ? currentConfig.offset + currentConfig.limit : 0;
 
             // Build query params
             const params = new URLSearchParams();
-            params.append('limit', pageConfig.limit.toString());
+            params.append('limit', currentConfig.limit.toString());
             params.append('offset', currentOffset.toString());
-            params.append('sort_by', sortConfig.key);
-            params.append('sort_order', sortConfig.direction);
+            params.append('sort_by', currentSort.key);
+            params.append('sort_order', currentSort.direction);
 
-            if (filters.action && filters.action.length > 0) {
-                filters.action.forEach(act => params.append('action', act));
+            if (currentFilters.action && currentFilters.action.length > 0) {
+                currentFilters.action.forEach(act => params.append('action', act));
             }
-            if (filters.adminName) params.append('admin_name', filters.adminName);
-            if (filters.targetType) params.append('target_type', filters.targetType);
-            if (filters.startDate) params.append('start_date', filters.startDate);
-            if (filters.endDate) params.append('end_date', filters.endDate);
+            if (currentFilters.adminName) params.append('admin_name', currentFilters.adminName);
+            if (currentFilters.targetType) params.append('target_type', currentFilters.targetType);
+            if (currentFilters.startDate) params.append('start_date', currentFilters.startDate);
+            if (currentFilters.endDate) params.append('end_date', currentFilters.endDate);
 
             const response = await fetch(`/api/logs/admin?${params.toString()}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
 
             if (response.ok) {
-                const data = await response.json();
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<AdminLogRecord[]>(json);
+                const normalized = Array.isArray(data) ? data : [];
 
                 if (isLoadMore) {
-                    setAdminLogs(prev => [...prev, ...data]);
+                    setAdminLogs(prev => [...prev, ...normalized]);
                 } else {
-                    setAdminLogs(data);
+                    setAdminLogs(normalized);
                 }
 
-                setPageConfig(prev => ({
-                    ...prev,
+                const nextPageConfig = {
+                    ...currentConfig,
                     offset: currentOffset,
-                    hasMore: data.length === pageConfig.limit
-                }));
+                    hasMore: normalized.length === currentConfig.limit
+                };
+                pageConfigRef.current = nextPageConfig;
+                setPageConfig(nextPageConfig);
             }
         } catch (error) {
             console.error('Failed to fetch admin logs:', error);
         } finally {
+            loadingRef.current = false;
             setLoading(false);
         }
-    };
+    }, []);
+
+    React.useEffect(() => {
+        if (activeTab === 'admins' && canViewAdminLogs) {
+            void fetchAdminLogs(false);
+        }
+    }, [activeTab, canViewAdminLogs, fetchAdminLogs]);
 
     const handleApplyFilters = () => {
         setPageConfig(prev => ({ ...prev, offset: 0, hasMore: true }));
-        fetchAdminLogs(false);
+        void fetchAdminLogs(false);
     };
 
     const handleSort = (key: string) => {
@@ -110,9 +138,9 @@ export function SpectateLogs() {
     React.useEffect(() => {
         if (activeTab === 'admins' && canViewAdminLogs) {
             setPageConfig(prev => ({ ...prev, offset: 0, hasMore: true }));
-            fetchAdminLogs(false);
+            void fetchAdminLogs(false);
         }
-    }, [sortConfig]);
+    }, [activeTab, canViewAdminLogs, sortConfig, fetchAdminLogs]);
 
     const handleResetFilters = () => {
         setFilters({
@@ -127,10 +155,10 @@ export function SpectateLogs() {
             direction: 'desc'
         });
         setPageConfig(prev => ({ ...prev, offset: 0, hasMore: true }));
-        fetchAdminLogs(false);
+        void fetchAdminLogs(false);
     };
 
-    const handleCopyLog = (log: any) => {
+    const handleCopyLog = (log: AdminLogRecord) => {
         const date = new Date(log.created_at).toLocaleString();
         const details = log.details ? JSON.stringify(log.details, null, 2) : 'Нет деталей';
 
@@ -210,7 +238,11 @@ export function SpectateLogs() {
                             <label className="text-xs font-medium text-white/40 mb-1 block">Действие</label>
                             <CustomSelect
                                 value={filters.action}
-                                onChange={(val: any) => setFilters(prev => ({ ...prev, action: val as string[] }))}
+                                onChange={(val) => {
+                                    if (Array.isArray(val)) {
+                                        setFilters(prev => ({ ...prev, action: val }));
+                                    }
+                                }}
                                 options={actionOptions}
                                 icon={<Filter className="w-4 h-4" />}
                                 placeholder="Выберите действие"
@@ -223,7 +255,7 @@ export function SpectateLogs() {
                                 <label className="text-xs font-medium text-white/40 mb-1 block">С даты</label>
                                 <CustomDatePicker
                                     value={filters.startDate}
-                                    onChange={(val: any) => setFilters(prev => ({ ...prev, startDate: val }))}
+                                    onChange={(val) => setFilters(prev => ({ ...prev, startDate: val }))}
                                     placeholder="ДД.ММ.ГГГГ"
                                 />
                             </div>
@@ -231,7 +263,7 @@ export function SpectateLogs() {
                                 <label className="text-xs font-medium text-white/40 mb-1 block">По дату</label>
                                 <CustomDatePicker
                                     value={filters.endDate}
-                                    onChange={(val: any) => setFilters(prev => ({ ...prev, endDate: val }))}
+                                    onChange={(val) => setFilters(prev => ({ ...prev, endDate: val }))}
                                     placeholder="ДД.ММ.ГГГГ"
                                 />
                             </div>
@@ -343,7 +375,7 @@ export function SpectateLogs() {
                             {pageConfig.hasMore && (
                                 <div className="text-center py-4 bg-[#242424]/80 backdrop-blur-sm border-t border-white/5">
                                     <button
-                                        onClick={() => fetchAdminLogs(true)}
+                                        onClick={() => void fetchAdminLogs(true)}
                                         disabled={loading}
                                         className="px-6 py-2 bg-white/5 hover:bg-white/10 border border-white/5 rounded-full text-white/60 hover:text-white transition-all text-sm font-medium disabled:opacity-50"
                                     >

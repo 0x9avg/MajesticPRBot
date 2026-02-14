@@ -18,7 +18,6 @@ from disnake.ext import commands
 
 from .core import AdminMainView, get_main_embed
 
-
 # =============================================================================
 # Service Embed
 # =============================================================================
@@ -41,8 +40,12 @@ async def get_service_embed(bot) -> disnake.Embed:
     try:
         streamers = await bot.api_client.list_all_streamers()
         streamer_count = len(streamers)
-        sessions = await bot.api_client.get_active_sessions()
-        session_count = len(sessions) if sessions else 0
+        dashboard = await bot.api_client.get_dashboard_stats()
+        session_count = (
+            int(dashboard.get("assigned_pr_count", 0))
+            if isinstance(dashboard, dict)
+            else 0
+        )
     except Exception:
         streamer_count, session_count = "?", "?"
 
@@ -270,6 +273,7 @@ class AdminService(commands.Cog):
                         old_ids = settings.get("monitoring_message_ids") or []
                         if isinstance(old_ids, str):
                             import json
+
                             old_ids = json.loads(old_ids)
                         for old_id in old_ids:
                             try:
@@ -296,8 +300,8 @@ class AdminService(commands.Cog):
                 f"Service button error {custom_id}: {e}", exc_info=True
             )
             try:
-                await interaction.followup.send("❌ Ошибка.", ephemeral=True)
-            except:
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+            except:  # noqa: E722
                 pass
 
 

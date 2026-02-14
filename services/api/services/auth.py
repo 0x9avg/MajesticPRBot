@@ -47,6 +47,7 @@ class AuthService:
         user_id: int,
         username: str,
         role: str,
+        sid: int,
         expires_delta: Optional[timedelta] = None,
     ) -> str:
         """Create a JWT access token."""
@@ -60,6 +61,7 @@ class AuthService:
             "user_id": user_id,
             "username": username,
             "role": role,
+            "sid": sid,
             "exp": expire,
             "type": "access",
         }

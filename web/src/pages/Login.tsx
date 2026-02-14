@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Lock, User, Eye, EyeOff } from 'lucide-react'
+import { getApiErrorMessage } from '../types/api'
 
 export default function Login() {
     const [username, setUsername] = useState('')
@@ -24,8 +25,8 @@ export default function Login() {
             })
 
             if (!response.ok) {
-                const data = await response.json()
-                throw new Error(data.detail || 'Ошибка авторизации')
+                const data = await response.json().catch(() => ({} as unknown))
+                throw new Error(getApiErrorMessage(data, 'Ошибка авторизации'))
             }
 
             const { access_token, refresh_token } = await response.json()
@@ -39,14 +40,21 @@ export default function Login() {
                 }
             })
 
+            if (userResponse.status === 401) {
+                localStorage.removeItem('access_token')
+                localStorage.removeItem('refresh_token')
+                localStorage.removeItem('user')
+                throw new Error('Сессия недействительна. Выполните вход снова.')
+            }
+
             if (userResponse.ok) {
                 const userData = await userResponse.json()
                 localStorage.setItem('user', JSON.stringify(userData))
             }
 
             navigate('/hub')
-        } catch (err: any) {
-            setError(err.message)
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'Ошибка авторизации')
         } finally {
             setLoading(false)
         }

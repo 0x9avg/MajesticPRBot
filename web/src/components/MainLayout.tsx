@@ -1,21 +1,27 @@
 import { useNavigate, Outlet } from 'react-router-dom';
 import { LogOut, User } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import type { Assistant } from '../types/domain';
+import type { UserContext } from '../types/auth';
+import { unwrapApiData } from '../types/api';
 
-interface UserData {
-    id: number;
-    discord_id: string;
-    username: string;
-    nickname: string;
-    role: string;
-    require_password_change: boolean;
+export interface MainLayoutOutletContext {
+    user: UserContext | null;
 }
 
 export default function MainLayout() {
     const navigate = useNavigate();
-    const [user, setUser] = useState<UserData | null>(null);
+    const [user, setUser] = useState<UserContext | null>(null);
 
     useEffect(() => {
+        const clearAuthAndRedirect = () => {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            localStorage.removeItem('user');
+            setUser(null);
+            navigate('/login', { replace: true });
+        };
+
         const fetchUserData = async () => {
             try {
                 const token = localStorage.getItem('access_token');
@@ -26,33 +32,50 @@ export default function MainLayout() {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
-                if (!authRes.ok) return; // Don't logout on background fetch error
-                const authUser = await authRes.json();
+                if (authRes.status === 401) {
+                    clearAuthAndRedirect();
+                    return;
+                }
+
+                if (!authRes.ok) return;
+                const authUser = await authRes.json() as UserContext;
 
                 // Default to auth info
-                let finalUserData = { ...authUser };
+                let finalUserData: UserContext = {
+                    ...authUser,
+                    permissions: authUser.permissions || {},
+                };
 
                 // 2. Try fetching full assistant data (matches UserProfile logic)
                 try {
                     // Try by ID first
                     const assistantRes = await fetch(`/api/assistants/${authUser.discord_id}`);
                     if (assistantRes.ok) {
-                        const json = await assistantRes.json();
-                        const assistantData = json.data || json;
+                        const json = await assistantRes.json() as unknown;
+                        const assistantData = unwrapApiData<Partial<Assistant>>(json);
                         if (assistantData) {
-                            finalUserData = { ...finalUserData, ...assistantData };
+                            finalUserData = {
+                                ...finalUserData,
+                                nickname: assistantData.nickname || finalUserData.nickname,
+                                role: assistantData.role || finalUserData.role,
+                            };
                         }
                     } else {
                         // Fallback: Try finding by nickname
                         const allRes = await fetch('/api/assistants');
                         if (allRes.ok) {
-                            const allJson = await allRes.json();
-                            const allData = allJson.data || allJson;
-                            const found = (Array.isArray(allData) ? allData : []).find((a: any) =>
-                                a.nickname.toLowerCase() === authUser.nickname.toLowerCase()
+                            const allJson = await allRes.json() as unknown;
+                            const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
+                            const normalized = Array.isArray(allData) ? allData : allData.assistants;
+                            const found = normalized.find((assistant) =>
+                                assistant.nickname.toLowerCase() === authUser.nickname.toLowerCase()
                             );
                             if (found) {
-                                finalUserData = { ...finalUserData, ...found };
+                                finalUserData = {
+                                    ...finalUserData,
+                                    nickname: found.nickname || finalUserData.nickname,
+                                    role: found.role || finalUserData.role,
+                                };
                             }
                         }
                     }
@@ -73,19 +96,41 @@ export default function MainLayout() {
         const userJson = localStorage.getItem('user');
         if (userJson) {
             try {
-                setUser(JSON.parse(userJson));
-            } catch (err) { /* ignore */ }
+                const parsedUser = JSON.parse(userJson) as UserContext;
+                setUser({
+                    ...parsedUser,
+                    permissions: parsedUser.permissions || {},
+                });
+            } catch {
+                // ignore malformed local cache
+            }
         }
 
         // Then refresh from network
         fetchUserData();
-    }, []);
+    }, [navigate]);
 
-    const handleLogout = () => {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
-        localStorage.removeItem('user');
-        navigate('/login');
+    const handleLogout = async () => {
+        const token = localStorage.getItem('access_token');
+
+        try {
+            if (token) {
+                await fetch('/api/auth/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+            }
+        } catch (err) {
+            console.warn('Logout request failed:', err);
+        } finally {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            localStorage.removeItem('user');
+            setUser(null);
+            navigate('/login', { replace: true });
+        }
     };
 
     return (
@@ -136,7 +181,7 @@ export default function MainLayout() {
                 </div>
 
                 <div className="relative z-10 max-w-7xl mx-auto">
-                    <Outlet context={{ user }} />
+                    <Outlet context={{ user } satisfies MainLayoutOutletContext} />
                 </div>
             </main>
         </div>

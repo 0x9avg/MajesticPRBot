@@ -1,3 +1,3 @@
 
-// This file is deprecated. Use CustomInputs.tsx for UI components.
-export * from './CustomInputs';
+// This file is deprecated. Keep explicit re-exports for backward compatibility.
+export { CustomSelect, CustomDatePicker, CustomTimePicker } from './CustomInputs';

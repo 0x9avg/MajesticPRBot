@@ -1,17 +1,20 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { Users, Wifi, Activity, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight } from 'lucide-react';
+import type { OutletUserContext } from '../../types/auth';
+import type { DashboardStats } from '../../types/domain';
+import { unwrapApiData } from '../../types/api';
 
 export function MainHub() {
     const navigate = useNavigate();
-    const { user } = useOutletContext<any>() || {};
+    const { user } = useOutletContext<OutletUserContext>();
     const userRole = user?.role;
 
     // Collapsible states
     const [isMenuOpen, setIsMenuOpen] = React.useState(true);
     const [isAdminOpen, setIsAdminOpen] = React.useState(true);
 
-    const [dashboardStats, setDashboardStats] = React.useState({
+    const [dashboardStats, setDashboardStats] = React.useState<DashboardStats>({
         assigned_pr_count: 0,
         unassigned_media_count: 0,
         events_today_count: 0
@@ -22,8 +25,8 @@ export function MainHub() {
             try {
                 const response = await fetch('/api/stats/dashboard');
                 if (response.ok) {
-                    const json = await response.json();
-                    const data = json.data || json;
+                    const json = await response.json() as unknown;
+                    const data = unwrapApiData<DashboardStats>(json);
                     setDashboardStats(data);
                 }
             } catch (error) {

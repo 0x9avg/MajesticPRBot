@@ -101,6 +101,7 @@ class TwitchBot(AutoClient):
     async def sync_streamers(self):
         """Sync streamers from API and subscribe to EventSub."""
         try:
+            self.logger.debug("Deleting old EventSub subscriptions...")
             await self.delete_all_eventsub_subscriptions()
 
             self.logger.info("Syncing streamers from API...")
@@ -188,7 +189,9 @@ class TwitchBot(AutoClient):
                             else None
                         ),
                         "profile_image_url": (
-                            str(user.profile_image) if user and user.profile_image else None
+                            str(user.profile_image)
+                            if user and user.profile_image
+                            else None
                         ),
                     }
                 )
@@ -230,9 +233,11 @@ class TwitchBot(AutoClient):
 
     async def event_ready(self) -> None:
         """Called when bot is ready."""
+        await self.sync_streamers()
+
         self.logger.info(f"✓ Twitch bot ready as {self.user}")
 
-        await self.sync_streamers()
+        await self.api.sync_streamers()
 
     async def event_stream_online(self, payload: twitchio.StreamOnline) -> None:
         """Handle stream online event."""
@@ -243,24 +248,24 @@ class TwitchBot(AutoClient):
             stream = None
             max_retries = 5
             retry_delay = 1.0  # seconds
-            
+
             for attempt in range(max_retries):
                 stream = await self.get_stream_info(payload.broadcaster.id)
-                
+
                 if stream.get("is_online"):
                     if attempt > 0:
                         self.logger.debug(
                             f"Stream info retrieved on attempt {attempt + 1} for {payload.broadcaster.name}"
                         )
                     break
-                
+
                 if attempt < max_retries - 1:
                     self.logger.debug(
                         f"API returned offline for {payload.broadcaster.name}, "
                         f"retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})"
                     )
                     await asyncio.sleep(retry_delay)
-            
+
             # If still no data after retries, log warning but proceed with what we have
             if not stream.get("is_online"):
                 self.logger.warning(
@@ -272,7 +277,9 @@ class TwitchBot(AutoClient):
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
                 True,
-                started_at=str(stream["started_at"]) if stream.get("started_at") else None,
+                started_at=(
+                    str(stream["started_at"]) if stream.get("started_at") else None
+                ),
                 game_id=stream.get("game_id"),
                 game_name=stream.get("game_name"),
                 stream_title=stream.get("title"),

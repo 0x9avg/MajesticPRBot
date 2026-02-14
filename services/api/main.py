@@ -3,12 +3,15 @@ API Service Entry Point.
 FastAPI application with lifespan management for database and RabbitMQ connections.
 """
 
-import sys
+import time
 from contextlib import asynccontextmanager
 
 from config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from middleware import TracingMiddleware
+from middleware.exceptions import register_exception_handlers
+from routes import router as api_router
 
 logger = Config.setup_logging("API")
 
@@ -86,28 +89,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Tracing middleware (must be after CORS to access request)
-from middleware import TracingMiddleware
 
+# Tracing middleware (must be after CORS to access request)
 app.add_middleware(TracingMiddleware)
 
 # Exception handlers (for envelope responses)
-from middleware.exceptions import register_exception_handlers
 
 register_exception_handlers(app)
 
 # Include routers
-from routes import router as api_router
 
 app.include_router(api_router)
-
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint with detailed stats."""
-    import time
-    from datetime import datetime, timezone
 
     # Calculate uptime
     uptime_seconds = 0

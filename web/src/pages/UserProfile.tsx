@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
-import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar } from 'lucide-react';
+import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar, type LucideIcon } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
+import type { Assistant, AssistantLog } from '../types/domain';
+import type { UserContext } from '../types/auth';
+import { unwrapApiData } from '../types/api';
 
 export default function UserProfile() {
     const navigate = useNavigate();
     const { id } = useParams();
-    const [user, setUser] = useState<any>(null);
-    const [logs, setLogs] = useState<any[]>([]);
+    const [user, setUser] = useState<Assistant | null>(null);
+    const [logs, setLogs] = useState<AssistantLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -21,39 +24,42 @@ export default function UserProfile() {
 
                 // 1. Check Auth (we always need to be logged in)
                 const authRes = await fetch('/api/auth/me', {
-                    headers: { 'Authorization': `Bearer ${token} ` }
+                    headers: { 'Authorization': `Bearer ${token}` }
                 });
 
                 if (authRes.status === 401) {
                     localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                    localStorage.removeItem('user');
                     navigate('/login');
                     return;
                 }
 
                 if (!authRes.ok) throw new Error('Failed to load user info');
-                const authUser = await authRes.json();
+                const authUser = await authRes.json() as UserContext;
 
                 // 2. Determine Target User (Me or route param)
                 // If id is present, we are viewing someone else. If not, we view ourselves.
-                let targetId = id || authUser.discord_id;
-                let assistantData = null;
+                const targetId = id || authUser.discord_id;
+                let assistantData: Assistant | null = null;
 
                 try {
                     // Try fetch by Target ID
                     const assistantRes = await fetch(`/api/assistants/${targetId}`);
                     if (assistantRes.ok) {
-                        const json = await assistantRes.json();
-                        assistantData = json.data || json;
+                        const json = await assistantRes.json() as unknown;
+                        assistantData = unwrapApiData<Assistant>(json);
                     } else if (!id) {
                         // Only fall back to nickname search if we are viewing "Me" and ID fetch failed
                         // (Logic preserved from original code for self-profile robustness)
                         const allRes = await fetch('/api/assistants');
                         if (allRes.ok) {
-                            const allJson = await allRes.json();
-                            const allData = allJson.data || allJson;
-                            assistantData = (Array.isArray(allData) ? allData : []).find((a: any) =>
-                                a.nickname.toLowerCase() === authUser.nickname.toLowerCase()
-                            );
+                            const allJson = await allRes.json() as unknown;
+                            const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
+                            const normalized = Array.isArray(allData) ? allData : allData.assistants;
+                            assistantData = normalized.find((assistant) =>
+                                assistant.nickname.toLowerCase() === authUser.nickname.toLowerCase()
+                            ) || null;
                         }
                     }
                 } catch (e) {
@@ -65,15 +71,15 @@ export default function UserProfile() {
                     // 3. Fetch Logs
                     const logsRes = await fetch(`/api/assistants/${assistantData.pr_id}/logs`);
                     if (logsRes.ok) {
-                        const logsJson = await logsRes.json();
-                        const logsData = logsJson.data || logsJson;
+                        const logsJson = await logsRes.json() as unknown;
+                        const logsData = unwrapApiData<AssistantLog[]>(logsJson);
                         setLogs(Array.isArray(logsData) ? logsData : []);
                     }
                 } else {
                     setError('PR-профиль не найден. Возможно, ваш Discord ID не привязан к базе ассистентов.');
                 }
 
-            } catch (e) {
+            } catch (e: unknown) {
                 console.error(e);
                 setError('Ошибка загрузки данных профиля');
             } finally {
@@ -133,7 +139,15 @@ export default function UserProfile() {
         );
     };
 
-    const StatCard = ({ label, value, sub, icon: Icon, color }: any) => (
+    interface StatCardProps {
+        label: string;
+        value: string | number;
+        sub?: string;
+        icon: LucideIcon;
+        color: string;
+    }
+
+    const StatCard = ({ label, value, sub, icon: Icon, color }: StatCardProps) => (
         <div className="flex flex-col gap-1 p-4 rounded-2xl border border-white/5 bg-[#242424]/40 h-full">
             <div className="flex items-center gap-2 mb-2">
                 <div className={`p-1.5 rounded-lg bg-white/5 ${color}`}>
@@ -191,14 +205,14 @@ export default function UserProfile() {
 
                             <StatCard
                                 label="Отработано"
-                                value={`${user.total_spec_hours}ч`}
+                                value={`${user.total_spec_hours ?? 0}ч`}
                                 color="text-blue-400"
                                 icon={Clock}
                             />
 
                             <StatCard
                                 label="Сессий"
-                                value={user.session_count}
+                                value={user.session_count ?? 0}
                                 color="text-purple-400"
                                 icon={History}
                             />
@@ -247,6 +261,11 @@ export default function UserProfile() {
                                         {log.target && (
                                             <p className="text-sm text-white/50 mt-0.5">
                                                 {log.target}
+                                            </p>
+                                        )}
+                                        {log.duration && (
+                                            <p className="text-xs text-white/40 mt-0.5">
+                                                Время закрепления: {log.duration}
                                             </p>
                                         )}
                                     </div>

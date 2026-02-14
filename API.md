@@ -4,9 +4,14 @@ Base URL: `/api`
 ## Authentication (`/auth`)
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/auth/login` | Login and obtain session/token |
+| POST | `/auth/login` | Login and obtain refresh/access tokens (access token includes `sid`) |
 | POST | `/auth/logout` | Logout |
 | GET | `/auth/me` | Get current authenticated user info |
+
+## Admin (`/admin`)
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/admin/users` | Create web user + assistant profile (requires `can_register_users`, role hierarchy enforced) |
 
 ## Assistants (`/assistants`)
 | Method | Endpoint | Description |
@@ -25,7 +30,6 @@ Base URL: `/api`
 ## Spec System (`/spec`)
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/spec/active` | Get all active specification sessions |
 | POST | `/spec/claim` | Claim a streamer (Start spec) |
 | POST | `/spec/unclaim` | Unclaim a streamer (End spec) |
 | POST | `/spec/transfer` | Transfer a streamer to another PR |
@@ -87,3 +91,13 @@ Base URL: `/api`
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/stats/dashboard` | Get high-level dashboard statistics |
+
+## Notes
+- Access token now contains `sid` (session ID). Tokens without `sid` are rejected and require relogin.
+- `/auth/logout` revokes user sessions, so previously issued access tokens become invalid.
+- Active sessions count for clients should be read from `/stats/dashboard` field `assigned_pr_count`.
+- `POST /admin/users` authorization rules:
+  - `403`: current user lacks `can_register_users`.
+  - `403`: target role is disallowed by role hierarchy.
+  - `400`: invalid role value or duplicates (`username`, `discord_id` in `web_auth` or `assistants`).
+  - `500`: internal creation error (generic message without DB internals).

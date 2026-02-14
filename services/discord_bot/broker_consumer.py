@@ -6,7 +6,7 @@ RabbitMQ Broker Consumer for Discord Bot.
 import asyncio
 import json
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict, Optional
 
 import aio_pika
 from aio_pika import ExchangeType, IncomingMessage

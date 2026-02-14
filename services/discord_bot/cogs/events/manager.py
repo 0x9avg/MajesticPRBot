@@ -45,7 +45,7 @@ async def get_events_embed(api) -> disnake.Embed:
                 name=f"📅 {event['name']}",
                 value=(
                     f"👥 Участников: **{event.get('current_participants', 0)}** "
-                    f"(Треб: {event.get('required_pr_count', '?')})\n"
+                    f"(Слотов: {event.get('pr_slots', event.get('required_pr_count', '?'))})\n"
                     f"🕒 Начало: {time_str}"
                 ),
                 inline=False,
@@ -84,11 +84,19 @@ class EventCreateModal(disnake.ui.Modal):
                 max_length=1000,
             ),
             disnake.ui.TextInput(
-                label="Количество PR",
+                label="Слоты PR",
                 placeholder="5",
-                custom_id="required_count",
+                custom_id="pr_slots",
                 style=disnake.TextInputStyle.short,
                 max_length=3,
+            ),
+            disnake.ui.TextInput(
+                label="Приоритет (0-3)",
+                placeholder="0",
+                custom_id="priority",
+                style=disnake.TextInputStyle.short,
+                max_length=1,
+                required=False,
             ),
             disnake.ui.TextInput(
                 label="Время начала (МСК) [ДД.ММ ЧЧ:ММ]",
@@ -109,12 +117,19 @@ class EventCreateModal(disnake.ui.Modal):
             description = interaction.text_values["description"]
 
             try:
-                required_count = int(interaction.text_values["required_count"])
+                pr_slots = int(interaction.text_values["pr_slots"])
             except ValueError:
                 await interaction.edit_original_message(
-                    content="❌ Количество должно быть числом"
+                    content="❌ Количество слотов должно быть числом"
                 )
                 return
+
+            priority_str = interaction.text_values.get("priority", "0").strip()
+            try:
+                priority = int(priority_str) if priority_str else 0
+                priority = max(0, min(3, priority))
+            except ValueError:
+                priority = 0
 
             # Parse start time (MSK -> UTC)
             start_time_str = interaction.text_values.get("start_time", "").strip()
@@ -164,7 +179,7 @@ class EventCreateModal(disnake.ui.Modal):
             # Create embed
             embed = disnake.Embed(
                 title=f"🎉 Событие: {name}",
-                description=f"{description}\n\n**Требуется PR:** {required_count}\n**Участников:** 0",
+                description=f"{description}\n\n**Слоты PR:** {pr_slots}\n**Участников:** 0",
                 color=disnake.Color.gold(),
             )
             embed.set_footer(text=f"Создал: {interaction.user.display_name}")
@@ -179,10 +194,12 @@ class EventCreateModal(disnake.ui.Modal):
             result = await self.bot.api_client.create_event(
                 name=name,
                 description=description,
-                required_pr_count=required_count,
+                required_pr_count=pr_slots,
                 channel_id=self.channel_id,
                 created_by=interaction.user.id,
                 start_time=start_dt.isoformat() if start_dt else None,
+                pr_slots=pr_slots,
+                priority=priority,
             )
 
             if not result:
@@ -221,20 +238,26 @@ class EventCreateModal(disnake.ui.Modal):
                 if guild_settings:
                     cp_channel_id = guild_settings.get("control_panel_channel_id")
                     cp_message_id = guild_settings.get("control_panel_message_id")
-                    
+
                     if cp_channel_id and cp_message_id:
                         channel = self.bot.get_channel(int(cp_channel_id))
                         if channel:
                             try:
                                 msg = await channel.fetch_message(int(cp_message_id))
-                                from .manager import get_events_embed, EventsView
+
                                 embed = await get_events_embed(self.bot.api_client)
                                 await msg.edit(embed=embed, view=EventsView(self.bot))
-                                self.bot.logger.info(f"✓ Updated control panel message in {channel.name}")
+                                self.bot.logger.info(
+                                    f"✓ Updated control panel message in {channel.name}"
+                                )
                             except disnake.NotFound:
-                                self.bot.logger.warning("Control Panel message not found (deleted?)")
+                                self.bot.logger.warning(
+                                    "Control Panel message not found (deleted?)"
+                                )
                             except Exception as e:
-                                self.bot.logger.error(f"Failed to edit control panel: {e}")
+                                self.bot.logger.error(
+                                    f"Failed to edit control panel: {e}"
+                                )
             except Exception as e:
                 self.bot.logger.error(f"Control panel refresh error: {e}")
 
@@ -260,7 +283,10 @@ class EventEndSelect(disnake.ui.StringSelect):
             ts = parse_to_unix(e.get("start_time"))
             if ts:
                 from datetime import datetime, timezone
-                time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d.%m %H:%M")
+
+                time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                    "%d.%m %H:%M"
+                )
             else:
                 time_str = "?"
             options.append(
@@ -306,18 +332,26 @@ class EventEndSelect(disnake.ui.StringSelect):
                 if guild_settings:
                     cp_channel_id = guild_settings.get("control_panel_channel_id")
                     cp_message_id = guild_settings.get("control_panel_message_id")
-                    
+
                     if cp_channel_id and cp_message_id:
                         channel = interaction.bot.get_channel(int(cp_channel_id))
                         if channel:
                             try:
                                 msg = await channel.fetch_message(int(cp_message_id))
-                                from .manager import get_events_embed, EventsView
-                                embed = await get_events_embed(interaction.bot.api_client)
-                                await msg.edit(embed=embed, view=EventsView(interaction.bot))
-                                interaction.bot.logger.info(f"✓ Updated control panel message in {channel.name}")
+
+                                embed = await get_events_embed(
+                                    interaction.bot.api_client
+                                )
+                                await msg.edit(
+                                    embed=embed, view=EventsView(interaction.bot)
+                                )
+                                interaction.bot.logger.info(
+                                    f"✓ Updated control panel message in {channel.name}"
+                                )
                             except disnake.NotFound:
-                                interaction.bot.logger.warning("Control Panel message not found (deleted?)")
+                                interaction.bot.logger.warning(
+                                    "Control Panel message not found (deleted?)"
+                                )
             except Exception as e:
                 interaction.bot.logger.error(f"Failed to refresh persistent panel: {e}")
 

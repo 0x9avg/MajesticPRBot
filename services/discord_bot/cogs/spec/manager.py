@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from discord_bot import DiscordBot
 
 import disnake
-from config import Config
 from disnake.ext import commands
 from utils import (
     create_monitoring_select,
@@ -26,13 +25,13 @@ from utils import (
 
 class Spec(commands.Cog):
     """Spec system for PR assistants to track streamers.
-    
+
     All spec interactions are through BUTTONS:
     - spec_claim_{streamer_id} - Claim a streamer
     - spec_unclaim_{streamer_id} - Unclaim a streamer
     - probation_choice_main_{streamer_id} - Choose main spec
     - probation_choice_prob_{streamer_id} - Choose probation spec
-    
+
     Transfer is initiated from AssistantsView in admin panel.
     """
 
@@ -66,12 +65,16 @@ class Spec(commands.Cog):
         """Handle all spec-related button clicks."""
         custom_id = interaction.component.custom_id or ""
 
-
-        if not custom_id.startswith((
-            "spec_", "probation_choice_", "monitoring_", "claim_page_", "claim_select_"
-        )):
+        if not custom_id.startswith(
+            (
+                "spec_",
+                "probation_choice_",
+                "monitoring_",
+                "claim_page_",
+                "claim_select_",
+            )
+        ):
             return
-
 
         if not custom_id.startswith(("probation_choice_", "claim_select_")):
             try:
@@ -214,7 +217,7 @@ class Spec(commands.Cog):
                 f"✅ Успешно закреплен ({spec_type}): **{streamer_name}**",
                 ephemeral=True,
             )
-            
+
             # Refresh monitoring
             await self.update_monitoring()
         else:
@@ -229,7 +232,9 @@ class Spec(commands.Cog):
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
             pr_id = interaction.user.id
 
-            result = await self.api.unclaim_streamer(streamer_id, pr_id=pr_id, reason="manual")
+            result = await self.api.unclaim_streamer(
+                streamer_id, pr_id=pr_id, reason="manual"
+            )
 
             if result and "duration_seconds" in result:
                 duration_str = format_spec_duration(result.get("duration_seconds", 0))
@@ -239,7 +244,7 @@ class Spec(commands.Cog):
                     f"⏱️ Время спека: **{duration_str}**",
                     ephemeral=True,
                 )
-                
+
                 # Refresh monitoring
                 await self.update_monitoring()
             else:
@@ -257,20 +262,22 @@ class Spec(commands.Cog):
     async def _handle_monitoring_unclaim(self, interaction: disnake.MessageInteraction):
         """Handle 'Unclaim' button from monitoring UI."""
         pr_id = interaction.user.id
-        
+
         # Check if user has active spec
         current = await self.api.get_pr_current_streamer(pr_id)
-        
+
         if not current:
             await interaction.followup.send(
                 "❌ Ты не закреплен ни за кем.", ephemeral=True
             )
             return
-        
+
         # Unclaim
         streamer_id = current["streamer_id"]
-        result = await self.api.unclaim_streamer(streamer_id, pr_id=pr_id, reason="manual")
-        
+        result = await self.api.unclaim_streamer(
+            streamer_id, pr_id=pr_id, reason="manual"
+        )
+
         if result and "duration_seconds" in result:
             duration_str = format_spec_duration(result.get("duration_seconds", 0))
             await interaction.followup.send(
@@ -292,19 +299,19 @@ class Spec(commands.Cog):
     ):
         """Show paginated claim selector."""
         user_id = interaction.user.id
-        
+
         # Get claimable streamers from API
         data = await self.api.get_claimable_streamers(user_id)
         streamers = data.get("streamers", [])
         can_spec_probation = data.get("can_spec_probation", False)
-        
+
         if not streamers:
             await interaction.followup.send(
                 "❌ Нет доступных стримеров для закрепления.",
                 ephemeral=True,
             )
             return
-        
+
         # Pagination
         per_page = 6
         total_pages = (len(streamers) + per_page - 1) // per_page
@@ -312,7 +319,7 @@ class Spec(commands.Cog):
         start = page * per_page
         end = start + per_page
         page_streamers = streamers[start:end]
-        
+
         # Build select options
         options = []
         for s in page_streamers:
@@ -321,7 +328,7 @@ class Spec(commands.Cog):
             priority = s.get("priority", 3)
             main_free = s.get("main_free", True)
             prob_free = s.get("probation_free", True)
-            
+
             # Determine description based on availability
             if can_spec_probation:
                 if main_free and prob_free:
@@ -332,7 +339,7 @@ class Spec(commands.Cog):
                     desc = "Доступен: Стажерский"
             else:
                 desc = "Доступен: Основной"
-            
+
             options.append(
                 disnake.SelectOption(
                     label=f"[P{priority}] {streamer_name}",
@@ -340,17 +347,17 @@ class Spec(commands.Cog):
                     description=desc,
                 )
             )
-        
+
         # Build view with select and pagination buttons
         view = disnake.ui.View(timeout=None)
-        
+
         select = disnake.ui.StringSelect(
             custom_id="claim_select_streamer",
             placeholder=f"Выбери стримера (стр. {page + 1}/{total_pages})",
             options=options,
         )
         view.add_item(select)
-        
+
         # Pagination buttons
         if total_pages > 1:
             if page > 0:
@@ -369,14 +376,14 @@ class Spec(commands.Cog):
                         style=disnake.ButtonStyle.secondary,
                     )
                 )
-        
+
         # Edit or send message
         try:
             await interaction.edit_original_response(
                 content=f"**Выбери стримера для закрепления** ({len(streamers)} доступно)",
                 view=view,
             )
-        except:
+        except:  # noqa: E722
             await interaction.followup.send(
                 content=f"**Выбери стримера для закрепления** ({len(streamers)} доступно)",
                 view=view,
@@ -387,57 +394,67 @@ class Spec(commands.Cog):
     async def on_claim_select(self, interaction: disnake.MessageInteraction):
         """Handle streamer selection from claim selector."""
         custom_id = interaction.component.custom_id or ""
-        
+
         if custom_id != "claim_select_streamer":
             return
-        
+
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
-        except:
+        except:  # noqa: E722
             pass
-        
+
         try:
             streamer_id = int(interaction.values[0])
             user_id = interaction.user.id
-            
+
             # Get user capabilities and streamer info
             data = await self.api.get_claimable_streamers(user_id)
             can_spec_probation = data.get("can_spec_probation", False)
-            
+
             # Find selected streamer info
             selected = None
             for s in data.get("streamers", []):
                 if s["streamer_id"] == streamer_id:
                     selected = s
                     break
-            
+
             if not selected:
-                await interaction.followup.send("❌ Стример больше недоступен.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Стример больше недоступен.", ephemeral=True
+                )
                 return
-            
+
             main_free = selected.get("main_free", True)
             prob_free = selected.get("probation_free", True)
-            
+
             # Decision logic
             if not can_spec_probation:
                 # Regular user -> auto main
-                await self._do_claim(interaction, streamer_id, user_id, is_probation=False)
+                await self._do_claim(
+                    interaction, streamer_id, user_id, is_probation=False
+                )
             else:
                 # Junior with probation capability
                 if not main_free and prob_free:
                     # Main taken -> auto probation
-                    await self._do_claim(interaction, streamer_id, user_id, is_probation=True)
+                    await self._do_claim(
+                        interaction, streamer_id, user_id, is_probation=True
+                    )
                 elif main_free and prob_free:
                     # Both free -> prompt choice
                     await self._show_probation_prompt(interaction, streamer_id)
                 elif main_free:
                     # Only main free -> auto main
-                    await self._do_claim(interaction, streamer_id, user_id, is_probation=False)
+                    await self._do_claim(
+                        interaction, streamer_id, user_id, is_probation=False
+                    )
                 else:
                     # Shouldn't happen, but fallback
-                    await interaction.followup.send("❌ Нет доступных слотов.", ephemeral=True)
-                    
+                    await interaction.followup.send(
+                        "❌ Нет доступных слотов.", ephemeral=True
+                    )
+
         except Exception as e:
             self.logger.error(f"Claim select error: {e}", exc_info=True)
             await interaction.followup.send("❌ Ошибка.", ephemeral=True)
@@ -461,7 +478,9 @@ class Spec(commands.Cog):
 
             # Verify this is the intended recipient
             if interaction.user.id != transfer_data["to_pr_id"]:
-                await interaction.followup.send("❌ Этот запрос не для вас.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Этот запрос не для вас.", ephemeral=True
+                )
                 return
 
             if action == "decline":
@@ -469,7 +488,7 @@ class Spec(commands.Cog):
                     await interaction.message.edit(
                         content="❌ Передача отклонена.", components=[]
                     )
-                except:
+                except:  # noqa: E722
                     pass
 
                 # Notify sender
@@ -572,7 +591,7 @@ class Spec(commands.Cog):
     ):
         """
         Initiate a transfer request. Called from assistants admin panel.
-        
+
         Args:
             from_user: User giving the streamer
             to_user: User receiving the streamer
@@ -632,7 +651,7 @@ class Spec(commands.Cog):
 
     async def update_monitoring(self):
         """Update monitoring messages with current streamer statuses.
-        
+
         Uses multi-message pagination and Chain Repair algorithm:
         - Attempts to edit existing messages by ID
         - If a message is missing (404), marks chain as broken
@@ -646,7 +665,7 @@ class Spec(commands.Cog):
                 if not status:
                     self.logger.warning("Failed to get monitoring status from API")
                     return
-                
+
                 settings = await self.api.get_guild_settings()
                 if not settings:
                     return
@@ -664,6 +683,7 @@ class Spec(commands.Cog):
                 saved_ids = settings.get("monitoring_message_ids") or []
                 if isinstance(saved_ids, str):
                     import json
+
                     saved_ids = json.loads(saved_ids)
                 saved_ids = [int(mid) for mid in saved_ids] if saved_ids else []
 
@@ -678,26 +698,29 @@ class Spec(commands.Cog):
                 gta_filter = settings.get("monitoring_filter_gta", False)
                 if gta_filter:
                     from config import Config
+
                     online_streamers = [
-                        s for s in online_streamers
+                        s
+                        for s in online_streamers
                         if str(s.get("game_id")) == Config.gta5_game_id
                     ]
                     available_streamers = [
-                        s for s in available_streamers
+                        s
+                        for s in available_streamers
                         if str(s.get("game_id")) == Config.gta5_game_id
                     ]
 
                 pages = create_streamers_component(
                     online_streamers, total_count, gta_count, online_count=online_count
                 )
-                
+
                 # Add select row to last page
                 select_row = create_monitoring_select(available_streamers, [])
 
                 # Sync Loop with Chain Repair
                 new_ids = []
                 broken_chain = False
-                
+
                 for i, page in enumerate(pages):
                     # Build components for this page
                     if i == len(pages) - 1:
@@ -705,17 +728,21 @@ class Spec(commands.Cog):
                         page_components = [page, select_row]
                     else:
                         page_components = [page]
-                    
+
                     if i < len(saved_ids) and not broken_chain:
                         # Try to edit existing message
                         try:
                             msg = await channel.fetch_message(saved_ids[i])
                             await msg.edit(components=page_components)
                             new_ids.append(msg.id)
-                            self.logger.debug(f"Edited monitoring message {i+1}/{len(pages)}")
+                            self.logger.debug(
+                                f"Edited monitoring message {i+1}/{len(pages)}"
+                            )
                         except disnake.NotFound:
                             # Message was deleted - chain is broken
-                            self.logger.warning(f"Monitoring message {saved_ids[i]} not found - chain broken")
+                            self.logger.warning(
+                                f"Monitoring message {saved_ids[i]} not found - chain broken"
+                            )
                             broken_chain = True
                             # Send new message
                             msg = await channel.send(components=page_components)
@@ -731,28 +758,30 @@ class Spec(commands.Cog):
                             try:
                                 old_msg = await channel.fetch_message(saved_ids[i])
                                 await old_msg.delete()
-                                self.logger.debug(f"Deleted orphan message {saved_ids[i]}")
-                            except:
+                                self.logger.debug(
+                                    f"Deleted orphan message {saved_ids[i]}"
+                                )
+                            except:  # noqa: E722
                                 pass  # Already deleted
-                        
+
                         msg = await channel.send(components=page_components)
                         new_ids.append(msg.id)
-                        self.logger.debug(f"Sent new monitoring message {i+1}/{len(pages)}")
-                
+                        self.logger.debug(
+                            f"Sent new monitoring message {i+1}/{len(pages)}"
+                        )
+
                 # Cleanup: delete extra old messages
                 for i in range(len(pages), len(saved_ids)):
                     try:
                         old_msg = await channel.fetch_message(saved_ids[i])
                         await old_msg.delete()
                         self.logger.debug(f"Deleted extra message {saved_ids[i]}")
-                    except:
+                    except:  # noqa: E722
                         pass
-                
+
                 # Save new IDs if changed
                 if new_ids != saved_ids:
-                    await self.api.update_guild_settings(
-                        monitoring_message_ids=new_ids
-                    )
+                    await self.api.update_guild_settings(monitoring_message_ids=new_ids)
                     self.logger.info(f"Updated monitoring: {len(new_ids)} messages")
 
             except Exception as e:

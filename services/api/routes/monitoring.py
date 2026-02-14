@@ -4,7 +4,7 @@ Monitoring and Dashboard routes for API.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
@@ -84,62 +84,66 @@ async def get_monitoring_status(
 
     # Get all streamers
     streamers = await db.list_all_streamers()
-    
+
     # Process streamer data
     online_streamers = []
     available_for_claim = []
     gta_count = 0
     total_count = len(streamers)
-    
+
     gta5_game_id = Config.gta5_game_id
-    
+
     for s in streamers:
         if s.get("is_online"):
             is_gta = str(s.get("game_id")) == gta5_game_id
-            
-            online_streamers.append({
-                "streamer_id": s["streamer_id"],
-                "streamer_name": s["streamer_name"],
-                "game_id": s.get("game_id"),
-                "game_name": s.get("game_name"),
-                "stream_title": s.get("stream_title"),
-                "stream_thumbnail_url": s.get("stream_thumbnail_url"),
-                "started_at": s.get("started_at"),
-                "is_gta": is_gta,
-                "priority": s.get("priority", 3),
-                "assignments": s.get("assignments", []),
-            })
-            
+
+            online_streamers.append(
+                {
+                    "streamer_id": s["streamer_id"],
+                    "streamer_name": s["streamer_name"],
+                    "game_id": s.get("game_id"),
+                    "game_name": s.get("game_name"),
+                    "stream_title": s.get("stream_title"),
+                    "stream_thumbnail_url": s.get("stream_thumbnail_url"),
+                    "started_at": s.get("started_at"),
+                    "is_gta": is_gta,
+                    "priority": s.get("priority", 3),
+                    "assignments": s.get("assignments", []),
+                }
+            )
+
             if is_gta:
                 gta_count += 1
-                
+
                 # Check slot availability (Max 2: Main + Probation)
                 assignments = s.get("assignments", [])
                 has_main = False
                 has_probation = False
-                
+
                 for a in assignments:
                     if a.get("is_probation"):
                         has_probation = True
                     else:
                         has_main = True
-                
+
                 # Available if either slot is free
                 # Note: This list feeds the dropdown.
                 # Ideally we show if ANY slot is free.
                 if not (has_main and has_probation):
-                    available_for_claim.append({
-                        "streamer_id": s["streamer_id"],
-                        "streamer_name": s["streamer_name"],
-                        "priority": s.get("priority", 3),
-                        "has_main": has_main,
-                        "has_probation": has_probation
-                    })
-    
+                    available_for_claim.append(
+                        {
+                            "streamer_id": s["streamer_id"],
+                            "streamer_name": s["streamer_name"],
+                            "priority": s.get("priority", 3),
+                            "has_main": has_main,
+                            "has_probation": has_probation,
+                        }
+                    )
+
     # Sort by priority (P0 first)
     online_streamers.sort(key=lambda x: x["priority"])
     available_for_claim.sort(key=lambda x: x["priority"])
-    
+
     return JSONResponse(
         content=success_envelope(
             data={
@@ -154,4 +158,3 @@ async def get_monitoring_status(
             trace_id=trace_id,
         )
     )
-

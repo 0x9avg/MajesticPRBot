@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import aiomysql
 from config import Config
-from utils import split_time_by_day
+from utils import split_time_by_day  # NOTE: kept for potential future use by views migration
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
@@ -197,7 +197,6 @@ class Database:
                             pr_actions_channel_id BIGINT UNSIGNED,
                             control_panel_channel_id BIGINT UNSIGNED,
                             control_panel_message_id BIGINT UNSIGNED,
-                            assistant_role_id BIGINT UNSIGNED,
                             notification_templates JSON,
                             p0_rate FLOAT DEFAULT 1.0,
                             p1_rate FLOAT DEFAULT 1.2,
@@ -217,14 +216,7 @@ class Database:
                         CREATE TABLE IF NOT EXISTS assistants (
                             pr_id BIGINT UNSIGNED PRIMARY KEY,
                             nickname VARCHAR(100),
-                            role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL,
-                            
-                            -- Current Assignment State
-                            assigned_to_type ENUM('streamer', 'event') NULL,
-                            assigned_to_id BIGINT UNSIGNED NULL,
-                            
-                            total_spec_seconds BIGINT DEFAULT 0,
-                            session_count INT DEFAULT 0,
+                            role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL DEFAULT 'employee',
                             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """
@@ -240,15 +232,61 @@ class Database:
                             pr_id BIGINT UNSIGNED NOT NULL,
                             
                             target_type ENUM('streamer', 'event', 'manual') NOT NULL DEFAULT 'streamer',
-                            target_id BIGINT UNSIGNED NOT NULL,
+                            target_id BIGINT UNSIGNED NULL,
                             is_probation BOOLEAN DEFAULT FALSE,
                             
-                            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             ended_at TIMESTAMP NULL,
                             end_reason VARCHAR(50),
                             
-                            INDEX idx_pr_history (pr_id, started_at),
-                            INDEX idx_active_sessions (ended_at)
+                            # Priority snapshot & override
+                            priority_auto TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                            priority_override TINYINT UNSIGNED NULL,
+                            applied_priority_level TINYINT UNSIGNED GENERATED ALWAYS AS (
+                                COALESCE(priority_override, priority_auto)
+                            ) STORED,
+                            
+                            # Rate snapshot & override
+                            rate_auto FLOAT NOT NULL DEFAULT 1.00,
+                            rate_override FLOAT NULL,
+                            applied_hourly_rate FLOAT GENERATED ALWAYS AS (
+                                COALESCE(rate_override, rate_auto)
+                            ) STORED,
+                            
+                            # Computed duration
+                            duration_seconds INT UNSIGNED GENERATED ALWAYS AS (
+                                CASE WHEN ended_at IS NULL THEN NULL
+                                     ELSE TIMESTAMPDIFF(SECOND, started_at, ended_at)
+                                END
+                            ) STORED,
+                            
+                            # Admin comment if manual spec 
+                            manual_comment VARCHAR(255) NULL,
+                            
+                            # Soft-delete
+                            deleted_at TIMESTAMP NULL,
+                            deleted_by_id BIGINT UNSIGNED NULL,
+                            delete_reason VARCHAR(255) NULL,
+                            
+                            # One active session per PR constraint helper
+                            active_pr_id BIGINT UNSIGNED GENERATED ALWAYS AS (
+                                CASE WHEN ended_at IS NULL AND deleted_at IS NULL THEN pr_id
+                                     ELSE NULL
+                                END
+                            ) STORED,
+                            
+                            # Constraints
+                            CONSTRAINT chk_ended_after_started CHECK (ended_at IS NULL OR ended_at > started_at),
+                            CONSTRAINT chk_manual_no_target CHECK (target_type != 'manual' OR target_id IS NULL),
+                            CONSTRAINT chk_non_manual_has_target CHECK (target_type = 'manual' OR target_id IS NOT NULL),
+                            CONSTRAINT chk_priority_range CHECK (priority_auto BETWEEN 0 AND 3 AND (priority_override IS NULL OR priority_override BETWEEN 0 AND 3)),
+                            CONSTRAINT chk_rate_positive CHECK (rate_auto >= 0 AND (rate_override IS NULL OR rate_override >= 0)),
+                            
+                            # Indexes
+                            UNIQUE INDEX uq_one_active_session_per_pr (active_pr_id),
+                            INDEX idx_pr_started (pr_id, started_at),
+                            INDEX idx_pr_ended (pr_id, ended_at),
+                            INDEX idx_target_started (target_type, target_id, started_at)
                         )
                         """
                     )
@@ -256,23 +294,90 @@ class Database:
                     # =========================================================
                     # 5. Daily Stats Table
                     # =========================================================
+                    # 5. Day-Slicing View (Recursive CTE)
+                    # =========================================================
                     await cursor.execute(
                         """
-                        CREATE TABLE IF NOT EXISTS daily_stats (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            pr_id BIGINT UNSIGNED NOT NULL,
-                            date DATE NOT NULL,
+                        CREATE OR REPLACE VIEW spec_session_day_slices AS
+                        WITH RECURSIVE day_slices AS (
+                            # Anchor: start of each completed, non-deleted session
+                            SELECT
+                                ss.id AS session_id,
+                                ss.pr_id,
+                                ss.target_type,
+                                ss.target_id,
+                                ss.is_probation,
+                                ss.applied_priority_level,
+                                ss.applied_hourly_rate,
+                                ss.started_at,
+                                ss.ended_at,
+                                # slice_start = started_at for the first day
+                                ss.started_at AS slice_start,
+                                # slice_end = midnight of the next day, or ended_at (whichever is earlier)
+                                LEAST(
+                                    DATE_ADD(DATE(ss.started_at), INTERVAL 1 DAY),
+                                    ss.ended_at
+                                ) AS slice_end
+                            FROM spec_sessions ss
+                            WHERE ss.ended_at IS NOT NULL
+                              AND ss.deleted_at IS NULL
                             
-                            p0_seconds INT DEFAULT 0,
-                            p1_seconds INT DEFAULT 0,
-                            p2_seconds INT DEFAULT 0,
-                            p3_seconds INT DEFAULT 0,
-                            probation_seconds INT DEFAULT 0,
+                            UNION ALL
                             
-                            total_points FLOAT DEFAULT 0,
-                            
-                            UNIQUE KEY unique_pr_date (pr_id, date)
+                            # Recursive: next day slices
+                            SELECT
+                                ds.session_id,
+                                ds.pr_id,
+                                ds.target_type,
+                                ds.target_id,
+                                ds.is_probation,
+                                ds.applied_priority_level,
+                                ds.applied_hourly_rate,
+                                ds.started_at,
+                                ds.ended_at,
+                                ds.slice_end AS slice_start,
+                                LEAST(
+                                    DATE_ADD(DATE(ds.slice_end), INTERVAL 1 DAY),
+                                    ds.ended_at
+                                ) AS slice_end
+                            FROM day_slices ds
+                            WHERE ds.slice_end < ds.ended_at
                         )
+                        SELECT
+                            session_id,
+                            pr_id,
+                            target_type,
+                            target_id,
+                            is_probation,
+                            applied_priority_level,
+                            applied_hourly_rate,
+                            DATE(slice_start) AS work_date,
+                            TIMESTAMPDIFF(SECOND, slice_start, slice_end) AS seconds_in_day,
+                            ROUND(
+                                (TIMESTAMPDIFF(SECOND, slice_start, slice_end) / 3600.0) * applied_hourly_rate,
+                                4
+                            ) AS points_in_day
+                        FROM day_slices
+                        """
+                    )
+
+                    # =========================================================
+                    # 6. Aggregated Daily Stats View
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW daily_stats AS
+                        SELECT
+                            pr_id,
+                            work_date AS date,
+                            SUM(CASE WHEN applied_priority_level = 0 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p0_seconds,
+                            SUM(CASE WHEN applied_priority_level = 1 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p1_seconds,
+                            SUM(CASE WHEN applied_priority_level = 2 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p2_seconds,
+                            SUM(CASE WHEN applied_priority_level = 3 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p3_seconds,
+                            SUM(CASE WHEN is_probation THEN seconds_in_day ELSE 0 END) AS probation_seconds,
+                            SUM(points_in_day) AS total_points
+                        FROM spec_session_day_slices
+                        GROUP BY pr_id, work_date
                         """
                     )
 
@@ -335,11 +440,19 @@ class Database:
                             is_active BOOLEAN DEFAULT TRUE,
                             require_password_change BOOLEAN DEFAULT TRUE,
                             failed_login_attempts INT DEFAULT 0,
+                            last_failed_login TIMESTAMP NULL,
                             last_login TIMESTAMP NULL,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """
                     )
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE web_auth ADD COLUMN last_failed_login TIMESTAMP NULL"
+                        )
+                    except Exception:
+                        pass
 
                     # Sessions (System)
                     await cursor.execute(
@@ -680,8 +793,8 @@ class Database:
                                 ELSE al.target_id
                             END as target_name
                         FROM admin_logs al
-                        LEFT JOIN streamers s ON al.target_type = 'streamer' AND al.target_id = CAST(s.streamer_id AS CHAR)
-                        LEFT JOIN events e ON al.target_type = 'event' AND al.target_id = CAST(e.id AS CHAR)
+                        LEFT JOIN streamers s ON al.target_type = 'streamer' AND al.target_id COLLATE utf8mb4_general_ci = CAST(s.streamer_id AS CHAR)
+                        LEFT JOIN events e ON al.target_type = 'event' AND al.target_id COLLATE utf8mb4_general_ci = CAST(e.id AS CHAR)
                         {where_sql}
                         ORDER BY {sort_column} {sort_dir}
                         LIMIT %s OFFSET %s
@@ -851,16 +964,14 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT 
-                            a.pr_id, 
+                            ss.pr_id, 
                             a.nickname,
                             ss.is_probation,
                             ss.started_at as assigned_at
-                        FROM assistants a
-                        INNER JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                            AND ss.target_type = 'streamer' 
-                            AND ss.target_id = a.assigned_to_id 
-                            AND ss.ended_at IS NULL
-                        WHERE a.assigned_to_type = 'streamer' AND a.assigned_to_id = %s
+                        FROM spec_sessions ss
+                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                        WHERE ss.target_type = 'streamer' AND ss.target_id = %s
+                            AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         """,
                         (streamer_id,),
                     )
@@ -1262,11 +1373,10 @@ class Database:
                                 JSON_ARRAY()
                             ) as assignments
                         FROM streamers s
-                        LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                             AND ss.target_type = 'streamer' 
+                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer' 
                              AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL
+                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
                         GROUP BY s.streamer_id
                         ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
@@ -1299,7 +1409,7 @@ class Database:
                             s.is_pinned, s.stream_points_override, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.pr_slots, s.added_at, s.added_by_id, s.updated_at,
-                            MIN(a.pr_id) as assigned_pr_id,
+                            MIN(ss.pr_id) as assigned_pr_id,
                             COALESCE(
                                 JSON_ARRAYAGG(
                                     CASE WHEN a.pr_id IS NOT NULL THEN
@@ -1314,11 +1424,10 @@ class Database:
                                 JSON_ARRAY()
                             ) as assignments
                         FROM streamers s
-                        LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                             AND ss.target_type = 'streamer' 
+                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer' 
                              AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL
+                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
                         WHERE s.is_online = TRUE
                         GROUP BY s.streamer_id
                         ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
@@ -1350,7 +1459,6 @@ class Database:
         pr_actions_channel_id: Optional[int] = None,
         control_panel_channel_id: Optional[int] = None,
         control_panel_message_id: Optional[int] = None,
-        assistant_role_id: Optional[int] = None,
     ) -> None:
         """Create or update guild settings.
 
@@ -1362,18 +1470,17 @@ class Database:
             pr_actions_channel_id: Discord channel ID for PR actions (optional)
             control_panel_channel_id: Discord channel ID for control panel (optional)
             control_panel_message_id: Discord message ID for control panel embed (optional)
-            assistant_role_id: Discord role ID for assistant
         """
         try:
             self.logger.debug(
                 f"""Saving guild settings: notification channel={notification_channel_id}, monitoring channel={monitoring_channel_id}, 
-                PR actions channel={pr_actions_channel_id}, control panel channel={control_panel_channel_id}, control panel message={control_panel_message_id}, assistant role={assistant_role_id}"""
+                PR actions channel={pr_actions_channel_id}, control panel channel={control_panel_channel_id}, control panel message={control_panel_message_id}"""
             )
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     # First, get existing settings using the same cursor to ensure consistency
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id FROM settings",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id FROM settings",
                     )
                     existing = await cursor.fetchone()
 
@@ -1442,12 +1549,6 @@ class Database:
                         )
                     )
 
-                    final_pr_role = (
-                        assistant_role_id
-                        if assistant_role_id is not None
-                        else (existing.get("assistant_role_id") if existing else None)
-                    )
-
                     final_filter_gta = (
                         monitoring_filter_gta
                         if monitoring_filter_gta is not None
@@ -1456,19 +1557,29 @@ class Database:
                         )
                     )
 
-                    # 1. Try to UPDATE first (Atomic update of existing row)
+                    # 1. Update if exists
+                    # Atomic UPSERT to prevent race conditions
                     await cursor.execute(
                         """
-                        UPDATE settings SET
-                            notification_channel_id = %s,
-                            monitoring_channel_id = %s,
-                            monitoring_message_ids = %s,
-                            monitoring_filter_gta = %s,
-                            pr_actions_channel_id = %s,
-                            control_panel_channel_id = %s,
-                            control_panel_message_id = %s,
-                            assistant_role_id = %s
-                        LIMIT 1
+                        INSERT INTO settings (
+                            id, 
+                            notification_channel_id, 
+                            monitoring_channel_id, 
+                            monitoring_message_ids, 
+                            monitoring_filter_gta, 
+                            pr_actions_channel_id, 
+                            control_panel_channel_id, 
+                            control_panel_message_id
+                        )
+                        VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            notification_channel_id = VALUES(notification_channel_id),
+                            monitoring_channel_id = VALUES(monitoring_channel_id),
+                            monitoring_message_ids = VALUES(monitoring_message_ids),
+                            monitoring_filter_gta = VALUES(monitoring_filter_gta),
+                            pr_actions_channel_id = VALUES(pr_actions_channel_id),
+                            control_panel_channel_id = VALUES(control_panel_channel_id),
+                            control_panel_message_id = VALUES(control_panel_message_id)
                         """,
                         (
                             final_notification,
@@ -1478,29 +1589,8 @@ class Database:
                             final_pr_actions_channel,
                             final_control_panel_channel,
                             final_control_panel_message,
-                            final_pr_role,
                         ),
                     )
-
-                    # 2. If no row updated, try to INSERT atomically (only if empty)
-                    if cursor.rowcount == 0:
-                        await cursor.execute(
-                            """
-                            INSERT INTO settings (id, notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id)
-                            SELECT 1, %s, %s, %s, %s, %s, %s, %s, %s
-                            WHERE NOT EXISTS (SELECT 1 FROM settings)
-                            """,
-                            (
-                                final_notification,
-                                final_monitoring_channel,
-                                final_monitoring_ids_json,
-                                final_filter_gta,
-                                final_pr_actions_channel,
-                                final_control_panel_channel,
-                                final_control_panel_message,
-                                final_pr_role,
-                            ),
-                        )
                     await conn.commit()
                     self.logger.debug("✓ Guild settings saved successfully")
 
@@ -1518,7 +1608,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, assistant_role_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
                     )
                     return await cursor.fetchone()
         except Exception as e:
@@ -1587,17 +1677,22 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # Check if PR already has an active session
                     await cursor.execute(
-                        "SELECT assigned_to_type FROM assistants WHERE pr_id = %s",
+                        """
+                        SELECT id FROM spec_sessions 
+                        WHERE pr_id = %s AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
                         (pr_id,),
                     )
-                    pr_status = await cursor.fetchone()
-                    if pr_status and pr_status.get("assigned_to_type"):
-                        self.logger.warning(f"PR {pr_id} is already assigned")
+                    active = await cursor.fetchone()
+                    if active:
+                        self.logger.warning(f"PR {pr_id} already has active session {active['id']}")
                         raise ValueError(
                             "Вы уже закреплены за другим стримером или событием"
                         )
 
+                    # Check slot availability
                     await cursor.execute(
                         """
                         SELECT ss.pr_id, ss.is_probation 
@@ -1605,37 +1700,80 @@ class Database:
                         WHERE ss.target_type = 'streamer' 
                           AND ss.target_id = %s 
                           AND ss.ended_at IS NULL
+                          AND ss.deleted_at IS NULL
                         """,
                         (streamer_id,),
                     )
                     existing_sessions = await cursor.fetchall()
 
-                    for session in existing_sessions:
-                        if session.get("is_probation") == is_probation:
-                            slot_name = "Probation" if is_probation else "Main"
-                            self.logger.warning(
-                                f"{slot_name} slot for streamer {streamer_id} is occupied by PR {session['pr_id']}"
+                    if not is_probation:
+                        # Main slot: enforce pr_slots limit
+                        await cursor.execute(
+                            "SELECT pr_slots, priority FROM streamers WHERE streamer_id = %s",
+                            (streamer_id,),
+                        )
+                        streamer_row = await cursor.fetchone()
+                        pr_slots = (
+                            streamer_row.get("pr_slots", 1) if streamer_row else 1
+                        )
+                        streamer_priority = (
+                            streamer_row.get("priority", 0) if streamer_row else 0
+                        )
+                        main_count = sum(
+                            1 for s in existing_sessions if not s.get("is_probation")
+                        )
+                        if main_count >= pr_slots:
+                            raise ValueError(
+                                f"Все основные слоты заняты ({main_count}/{pr_slots})"
                             )
-                            raise ValueError(f"Слот {slot_name} уже занят")
+                    else:
+                        # Probation slot: only 1 allowed
+                        for session in existing_sessions:
+                            if session.get("is_probation"):
+                                raise ValueError("Слот Probation уже занят")
+                        # Still need streamer priority for snapshot
+                        await cursor.execute(
+                            "SELECT priority FROM streamers WHERE streamer_id = %s",
+                            (streamer_id,),
+                        )
+                        streamer_row = await cursor.fetchone()
+                        streamer_priority = (
+                            streamer_row.get("priority", 0) if streamer_row else 0
+                        )
 
+                    # Snapshot the rate from config
+                    config = await self.get_points_config()
+                    if is_probation:
+                        rate_auto = await self._get_probation_rate()
+                    else:
+                        rate_auto = config.get(streamer_priority, 0.5)
+
+                    # Ensure assistant exists
                     await cursor.execute(
                         """
-                        INSERT INTO assistants (pr_id, assigned_to_type, assigned_to_id) 
-                        VALUES (%s, 'streamer', %s)
-                        ON DUPLICATE KEY UPDATE 
-                            assigned_to_type = 'streamer',
-                            assigned_to_id = %s
+                        INSERT INTO assistants (pr_id) VALUES (%s)
+                        ON DUPLICATE KEY UPDATE pr_id = pr_id
                         """,
-                        (pr_id, streamer_id, streamer_id),
+                        (pr_id,),
                     )
 
-                    await cursor.execute(
-                        """
-                        INSERT INTO spec_sessions (pr_id, target_type, target_id, is_probation, started_at)
-                        VALUES (%s, 'streamer', %s, %s, NOW())
-                        """,
-                        (pr_id, streamer_id, is_probation),
-                    )
+                    # Insert session with snapshot
+                    try:
+                        await cursor.execute(
+                            """
+                            INSERT INTO spec_sessions 
+                                (pr_id, target_type, target_id, is_probation, started_at,
+                                 priority_auto, rate_auto)
+                            VALUES (%s, 'streamer', %s, %s, NOW(), %s, %s)
+                            """,
+                            (pr_id, streamer_id, is_probation, streamer_priority, rate_auto),
+                        )
+                    except Exception as e:
+                        if "uq_one_active_session_per_pr" in str(e):
+                            raise ValueError(
+                                "Вы уже закреплены за другим стримером или событием"
+                            )
+                        raise
 
                     await conn.commit()
                     slot_name = "Probation" if is_probation else "Main"
@@ -1658,7 +1796,7 @@ class Database:
         end_reason: str = "unknown",
     ) -> List[Dict[str, Any]]:
         """
-        Снятие PR-ассистента(ов) со стримера и обновление статистики.
+        Снятие PR-ассистента(ов) со стримера.
 
         Args:
             streamer_id: Twitch ID стримера
@@ -1671,21 +1809,20 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # 1. Build query to find assignments to unassign
+                    # 1. Find active sessions for this streamer
                     query = """
-                        SELECT a.pr_id, s.started_at, s.is_probation, st.streamer_name, st.priority
-                        FROM assistants a
-                        JOIN spec_sessions s ON s.pr_id = a.pr_id 
-                            AND s.target_type = 'streamer' 
-                            AND s.target_id = a.assigned_to_id
-                            AND s.ended_at IS NULL
-                        JOIN streamers st ON st.streamer_id = a.assigned_to_id
-                        WHERE a.assigned_to_type = 'streamer' AND a.assigned_to_id = %s
+                        SELECT ss.id, ss.pr_id, ss.started_at, ss.is_probation, st.streamer_name
+                        FROM spec_sessions ss
+                        JOIN streamers st ON st.streamer_id = ss.target_id
+                        WHERE ss.target_type = 'streamer' 
+                          AND ss.target_id = %s 
+                          AND ss.ended_at IS NULL
+                          AND ss.deleted_at IS NULL
                     """
                     params = [streamer_id]
 
                     if pr_id is not None:
-                        query += " AND a.pr_id = %s"
+                        query += " AND ss.pr_id = %s"
                         params.append(pr_id)
 
                     await cursor.execute(query, tuple(params))
@@ -1703,15 +1840,10 @@ class Database:
                     if now.tzinfo is None:
                         now = now.replace(tzinfo=timezone.utc)
 
-                    pr_ids_to_process = []
+                    session_ids = []
 
                     for res in results:
-                        p_id = res["pr_id"]
                         started_at = res["started_at"]
-                        is_probation = res.get("is_probation", False)
-                        streamer_name = res["streamer_name"]
-                        priority = res.get("priority", 0)
-
                         if started_at and started_at.tzinfo is None:
                             started_at = started_at.replace(tzinfo=timezone.utc)
 
@@ -1721,65 +1853,29 @@ class Database:
 
                         unassigned_sessions.append(
                             {
-                                "pr_id": p_id,
+                                "pr_id": res["pr_id"],
                                 "duration_seconds": duration_seconds,
-                                "streamer_name": streamer_name,
-                                "is_probation": is_probation,
-                                "started_at": started_at,
-                                "priority": priority,
+                                "streamer_name": res["streamer_name"],
+                                "is_probation": res.get("is_probation", False),
                             }
                         )
-                        pr_ids_to_process.append(p_id)
+                        session_ids.append(res["id"])
 
-                    # 2. Batch Update - Close Sessions
-                    if pr_ids_to_process:
-                        format_strings = ",".join(["%s"] * len(pr_ids_to_process))
-
+                    # 2. Close Sessions (duration_seconds is auto-computed by generated column)
+                    if session_ids:
+                        format_strings = ",".join(["%s"] * len(session_ids))
                         await cursor.execute(
                             f"""
                             UPDATE spec_sessions 
                             SET ended_at = %s, end_reason = %s
-                            WHERE target_type = 'streamer' 
-                              AND target_id = %s 
-                              AND ended_at IS NULL
-                              AND pr_id IN ({format_strings})
+                            WHERE id IN ({format_strings})
                             """,
-                            (now, end_reason, streamer_id, *pr_ids_to_process),
-                        )
-
-                        # 3. Batch Update - Free Assistants
-                        await cursor.execute(
-                            f"""
-                            UPDATE assistants 
-                            SET assigned_to_type = NULL, assigned_to_id = NULL
-                            WHERE pr_id IN ({format_strings})
-                            """,
-                            tuple(pr_ids_to_process),
+                            (now, end_reason, *session_ids),
                         )
 
                     await conn.commit()
 
-            # Record Stats (Outside transaction)
-            for sess in unassigned_sessions:
-                if sess["duration_seconds"] > 0:
-                    await self.record_spec_session(
-                        sess["pr_id"],
-                        sess["started_at"],
-                        now,
-                        sess["priority"],
-                        is_probation=sess["is_probation"],
-                    )
-
-            # Return simplified results matching expected schema
-            return [
-                {
-                    "pr_id": s["pr_id"],
-                    "duration_seconds": s["duration_seconds"],
-                    "streamer_name": s["streamer_name"],
-                    "is_probation": s["is_probation"],
-                }
-                for s in unassigned_sessions
-            ]
+            return unassigned_sessions
 
         except Exception as e:
             self.logger.error(
@@ -1806,13 +1902,14 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get PR1's current assignment
+                    # Get PR1's current active session
                     await cursor.execute(
                         """
-                        SELECT a.assigned_to_id as streamer_id, s.streamer_name
-                        FROM assistants a
-                        JOIN streamers s ON s.streamer_id = a.assigned_to_id
-                        WHERE a.pr_id = %s AND a.assigned_to_type = 'streamer'
+                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, ss.is_probation
+                        FROM spec_sessions ss
+                        JOIN streamers s ON s.streamer_id = ss.target_id
+                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
+                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         """,
                         (pr1_id,),
                     )
@@ -1821,13 +1918,14 @@ class Database:
                     if not pr1_assignment:
                         raise ValueError(f"PR {pr1_id} has no claimed streamer")
 
-                    # Get PR2's current assignment
+                    # Get PR2's current active session
                     await cursor.execute(
                         """
-                        SELECT a.assigned_to_id as streamer_id, s.streamer_name
-                        FROM assistants a
-                        JOIN streamers s ON s.streamer_id = a.assigned_to_id
-                        WHERE a.pr_id = %s AND a.assigned_to_type = 'streamer'
+                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, ss.is_probation
+                        FROM spec_sessions ss
+                        JOIN streamers s ON s.streamer_id = ss.target_id
+                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
+                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         """,
                         (pr2_id,),
                     )
@@ -1844,39 +1942,41 @@ class Database:
                         """
                         UPDATE spec_sessions 
                         SET ended_at = NOW(), end_reason = 'swap'
-                        WHERE pr_id IN (%s, %s) AND ended_at IS NULL
+                        WHERE pr_id IN (%s, %s) AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (pr1_id, pr2_id),
                     )
 
-                    # Swap assignments in assistants table
-                    # PR1 now gets PR2's streamer
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET assigned_to_id = %s
-                        WHERE pr_id = %s AND assigned_to_type = 'streamer'
-                        """,
-                        (streamer2_id, pr1_id),
-                    )
+                    # Snapshot rates for new sessions
+                    config = await self.get_points_config()
+                    
+                    # PR1 gets streamer2
+                    pr1_probation = pr1_assignment.get("is_probation", False)
+                    s2_priority = pr2_assignment.get("priority", 0)
+                    if pr1_probation:
+                        rate1 = await self._get_probation_rate()
+                    else:
+                        rate1 = config.get(s2_priority, 0.5)
 
-                    # PR2 now gets PR1's streamer
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET assigned_to_id = %s
-                        WHERE pr_id = %s AND assigned_to_type = 'streamer'
-                        """,
-                        (streamer1_id, pr2_id),
-                    )
+                    # PR2 gets streamer1
+                    pr2_probation = pr2_assignment.get("is_probation", False)
+                    s1_priority = pr1_assignment.get("priority", 0)
+                    if pr2_probation:
+                        rate2 = await self._get_probation_rate()
+                    else:
+                        rate2 = config.get(s1_priority, 0.5)
 
-                    # Create new spec sessions
+                    # Create new spec sessions with snapshots
                     await cursor.execute(
                         """
-                        INSERT INTO spec_sessions (pr_id, target_type, target_id, started_at)
-                        VALUES (%s, 'streamer', %s, NOW()), (%s, 'streamer', %s, NOW())
+                        INSERT INTO spec_sessions 
+                            (pr_id, target_type, target_id, is_probation, started_at, priority_auto, rate_auto)
+                        VALUES 
+                            (%s, 'streamer', %s, %s, NOW(), %s, %s), 
+                            (%s, 'streamer', %s, %s, NOW(), %s, %s)
                         """,
-                        (pr1_id, streamer2_id, pr2_id, streamer1_id),
+                        (pr1_id, streamer2_id, pr1_probation, s2_priority, rate1,
+                         pr2_id, streamer1_id, pr2_probation, s1_priority, rate2),
                     )
 
                     await conn.commit()
@@ -1906,7 +2006,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT * FROM spec_sessions 
-                        WHERE ended_at IS NULL
+                        WHERE ended_at IS NULL AND deleted_at IS NULL
                         """
                     )
                     return await cursor.fetchall()
@@ -1929,7 +2029,11 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT pr_id FROM assistants WHERE assigned_to_type = 'streamer' AND assigned_to_id = %s",
+                        """
+                        SELECT pr_id FROM spec_sessions 
+                        WHERE target_type = 'streamer' AND target_id = %s 
+                          AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
                         (streamer_id,),
                     )
                     result = await cursor.fetchone()
@@ -1958,13 +2062,10 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url, s.stream_game_id, s.stream_game_name, s.stream_started_at, s.priority, s.added_at, s.added_by_id, s.updated_at, ss.started_at as assigned_at
-                        FROM assistants a
-                        JOIN streamers s ON s.streamer_id = a.assigned_to_id
-                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                             AND ss.target_type = 'streamer' 
-                             AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL
-                        WHERE a.pr_id = %s AND a.assigned_to_type = 'streamer'
+                        FROM spec_sessions ss
+                        JOIN streamers s ON s.streamer_id = ss.target_id
+                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
+                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         """,
                         (pr_id,),
                     )
@@ -1986,7 +2087,7 @@ class Database:
     @db_retry()
     async def get_pr_total_time(self, pr_id: int) -> int:
         """
-        Получение общего времени спека ассистента.
+        Получение общего времени спека ассистента (из spec_sessions).
 
         Args:
             pr_id: Discord ID ассистента
@@ -1998,7 +2099,11 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
+                        """
+                        SELECT COALESCE(SUM(duration_seconds), 0) as total_spec_seconds 
+                        FROM spec_sessions 
+                        WHERE pr_id = %s AND deleted_at IS NULL AND ended_at IS NOT NULL
+                        """,
                         (pr_id,),
                     )
                     result = await cursor.fetchone()
@@ -2007,80 +2112,6 @@ class Database:
             self.logger.error(
                 f"Failed to get total time for PR {pr_id}: {e}",
                 exc_info=True,
-            )
-            raise
-
-    @db_retry()
-    async def add_pr_time(self, pr_id: int, seconds: int) -> int:
-        """
-        Добавление времени к статистике ассистента.
-
-        Args:
-            pr_id: Discord ID ассистента
-            seconds: Секунды для добавления
-
-        Returns:
-            Новое общее время
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id, total_spec_seconds)
-                        VALUES (%s, %s)
-                        ON DUPLICATE KEY UPDATE total_spec_seconds = total_spec_seconds + %s
-                        """,
-                        (pr_id, seconds, seconds),
-                    )
-                    await conn.commit()
-
-                    # Get new total
-                    await cursor.execute(
-                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
-                        (pr_id,),
-                    )
-                    result = await cursor.fetchone()
-                    return result.get("total_spec_seconds", 0) if result else 0
-        except Exception as e:
-            self.logger.error(f"Failed to add time for PR {pr_id}: {e}", exc_info=True)
-            raise
-
-    @db_retry()
-    async def subtract_pr_time(self, pr_id: int, seconds: int) -> int:
-        """
-        Вычитание времени из статистики ассистента (минимум 0).
-
-        Args:
-            pr_id: Discord ID ассистента
-            seconds: Секунды для вычитания
-
-        Returns:
-            Новое общее время
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET total_spec_seconds = GREATEST(0, CAST(total_spec_seconds AS SIGNED) - %s)
-                        WHERE pr_id = %s
-                        """,
-                        (seconds, pr_id),
-                    )
-                    await conn.commit()
-
-                    # Get new total
-                    await cursor.execute(
-                        "SELECT total_spec_seconds FROM assistants WHERE pr_id = %s",
-                        (pr_id,),
-                    )
-                    result = await cursor.fetchone()
-                    return result.get("total_spec_seconds", 0) if result else 0
-        except Exception as e:
-            self.logger.error(
-                f"Failed to subtract time for PR {pr_id}: {e}", exc_info=True
             )
             raise
 
@@ -2155,6 +2186,8 @@ class Database:
         start_time=None,
         required_pr_count=1,
         notification_sent=False,
+        pr_slots: int = 1,
+        priority: int = 0,
     ) -> int:
         """Создание нового события."""
         try:
@@ -2166,9 +2199,10 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO events (
-                            name, description, channel_id, message_id, 
-                            required_pr_count, created_by, start_time, notification_sent
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            name, description, channel_id, message_id,
+                            required_pr_count, created_by, start_time, notification_sent,
+                            pr_slots, priority
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             name,
@@ -2179,6 +2213,8 @@ class Database:
                             created_by,
                             start_time,
                             notification_sent,
+                            pr_slots,
+                            priority,
                         ),
                     )
                     await conn.commit()
@@ -2204,16 +2240,18 @@ class Database:
                     for event in events:
                         await cursor.execute(
                             """
-                            SELECT pr_id, nickname
-                            FROM assistants 
-                            WHERE assigned_to_type = 'event' AND assigned_to_id = %s
+                            SELECT ss.pr_id, a.nickname
+                            FROM spec_sessions ss
+                            LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                            WHERE ss.target_type = 'event' AND ss.target_id = %s
+                              AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                             """,
                             (event["id"],),
                         )
                         participants = await cursor.fetchall()
                         event["current_participants"] = len(participants)
                         event["participants"] = [
-                            {"pr_id": str(p["pr_id"]), "nickname": p["nickname"]}
+                            {"pr_id": str(p["pr_id"]), "nickname": p.get("nickname")}
                             for p in participants
                         ]
 
@@ -2248,7 +2286,7 @@ class Database:
                         """
                         SELECT pr_id, started_at
                         FROM spec_sessions
-                        WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL
+                        WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (event_id,),
                     )
@@ -2280,18 +2318,9 @@ class Database:
                         """
                         UPDATE spec_sessions 
                         SET ended_at = %s, end_reason = 'event_end'
-                        WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL
+                        WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (now, event_id),
-                    )
-
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET assigned_to_type = NULL, assigned_to_id = NULL
-                        WHERE assigned_to_type = 'event' AND assigned_to_id = %s
-                        """,
-                        (event_id,),
                     )
 
                     results = []
@@ -2307,10 +2336,6 @@ class Database:
                         if duration < 0:
                             duration = 0
 
-                        await self.record_spec_session(
-                            user_id, effective_start, now, priority=0
-                        )
-
                         results.append({"user_id": user_id, "duration": duration})
 
                     await conn.commit()
@@ -2320,46 +2345,6 @@ class Database:
             return []
 
     @db_retry()
-    async def record_daily_stats(
-        self,
-        pr_id: int,
-        date_obj: datetime.date,
-        priority: int,
-        duration_seconds: int,
-        points: float,
-        is_probation: bool = False,
-    ):
-        """Обновление ежедневной статистики для конкретной даты и приоритета/испыталки."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    if is_probation:
-                        col_name = "probation_seconds"
-                    else:
-                        col_name = f"p{priority}_seconds"
-
-                    await cursor.execute(
-                        f"""
-                        INSERT INTO daily_stats (pr_id, date, {col_name}, total_points, probation_seconds)
-                        VALUES (%s, %s, %s, %s, 0)
-                        ON DUPLICATE KEY UPDATE
-                        {col_name} = {col_name} + %s,
-                        total_points = total_points + %s
-                        """,
-                        (
-                            pr_id,
-                            date_obj,
-                            duration_seconds,
-                            points,
-                            duration_seconds,
-                            points,
-                        ),
-                    )
-                    await conn.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to record daily stats: {e}", exc_info=True)
-
-    @db_retry()
     async def get_daily_stats(
         self,
         pr_id: int = None,
@@ -2367,11 +2352,11 @@ class Database:
         start_date=None,
         end_date=None,
     ) -> list:
-        """Получение ежедневной статистики с фильтрацией."""
+        """Получение ежедневной статистики из VIEW daily_stats."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    query = "SELECT id, pr_id, date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, probation_seconds, total_points FROM daily_stats WHERE 1=1"
+                    query = "SELECT pr_id, date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, probation_seconds, total_points FROM daily_stats WHERE 1=1"
                     params = []
 
                     if pr_id:
@@ -2401,52 +2386,6 @@ class Database:
             return []
 
     @db_retry()
-    async def update_daily_stats_manual(
-        self,
-        pr_id: int,
-        date_obj: datetime.date,
-        p0_seconds: int,
-        p1_seconds: int,
-        p2_seconds: int,
-        p3_seconds: int,
-        total_points: float,
-        probation_seconds: int = 0,
-    ):
-        """Ручное обновление ежедневной статистики."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO daily_stats (pr_id, date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, probation_seconds, total_points)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                        p0_seconds = %s, p1_seconds = %s, p2_seconds = %s, p3_seconds = %s, probation_seconds = %s, total_points = %s
-                        """,
-                        (
-                            pr_id,
-                            date_obj,
-                            p0_seconds,
-                            p1_seconds,
-                            p2_seconds,
-                            p3_seconds,
-                            probation_seconds,
-                            total_points,
-                            p0_seconds,
-                            p1_seconds,
-                            p2_seconds,
-                            p3_seconds,
-                            probation_seconds,
-                            total_points,
-                        ),
-                    )
-                    await conn.commit()
-                    return True
-        except Exception as e:
-            self.logger.error(f"Failed to manual update stats: {e}")
-            return False
-
-    @db_retry()
     async def create_manual_spec_session(
         self,
         pr_id: int,
@@ -2459,7 +2398,7 @@ class Database:
     ) -> bool:
         """
         Создание ручной записи сессии спека (для админских корректировок).
-        Записывается как уже завершённая сессия + обновляет daily_stats.
+        Записывается как уже завершённая сессия. daily_stats VIEW автоматически пересчитает баллы.
         """
         from datetime import datetime, timedelta
 
@@ -2468,43 +2407,40 @@ class Database:
             start_time = datetime.combine(date_obj, datetime.min.time())
             end_time = start_time + timedelta(seconds=duration_seconds)
 
+            # Snapshot rate from config
+            config = await self.get_points_config()
+            if is_probation:
+                rate_auto = await self._get_probation_rate()
+            else:
+                rate_auto = config.get(priority, 0.5)
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # Ensure assistant exists
+                    await cursor.execute(
+                        "INSERT INTO assistants (pr_id) VALUES (%s) ON DUPLICATE KEY UPDATE pr_id = pr_id",
+                        (pr_id,),
+                    )
+
                     await cursor.execute(
                         """
                         INSERT INTO spec_sessions 
-                        (pr_id, target_type, target_id, started_at, ended_at, end_reason, is_probation)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (pr_id, target_type, target_id, started_at, ended_at, end_reason, 
+                         is_probation, priority_auto, rate_auto)
+                        VALUES (%s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s)
                         """,
                         (
                             pr_id,
                             target_type,
-                            target_id,
+                            target_id if target_type != 'manual' else None,
                             start_time,
                             end_time,
-                            "manual_admin",
                             is_probation,
+                            priority,
+                            rate_auto,
                         ),
                     )
-
-                    await cursor.execute(
-                        """
-                        UPDATE assistants 
-                        SET total_spec_seconds = total_spec_seconds + %s, 
-                            session_count = session_count + 1
-                        WHERE pr_id = %s
-                        """,
-                        (duration_seconds, pr_id),
-                    )
                     await conn.commit()
-
-            await self.record_spec_session(
-                pr_id=pr_id,
-                start_time=start_time,
-                end_time=end_time,
-                priority=priority,
-                is_probation=is_probation,
-            )
 
             self.logger.info(
                 f"Manual spec session created: PR={pr_id}, duration={duration_seconds}s, date={date_str}, probation={is_probation}"
@@ -2575,65 +2511,6 @@ class Database:
             self.logger.error(f"Failed to update streamer {streamer_id}: {e}")
             return False
 
-    @db_retry()
-    async def record_spec_session(
-        self,
-        pr_id: int,
-        start_time: datetime,
-        end_time: datetime,
-        priority: int,
-        is_probation: bool = False,
-    ):
-        """Запись сессии спека с разделением по дням и расчетом баллов (с поддержкой испыталки)."""
-        try:
-            # 1. Split time by day
-            chunks = split_time_by_day(start_time, end_time)
-            if not chunks:
-                return
-
-            # 2. Get Point Rates
-            config = await self.get_points_config()
-
-            # Use probation_rate if probation, else use priority rate
-            if is_probation:
-                # Get probation_rate from settings (default 1.2)
-                rate_per_hour = await self._get_probation_rate()
-            else:
-                # Default rate if not found for priority
-                rate_per_hour = config.get(priority, 0.5)
-
-            # 3. Record each chunk
-            for date_obj, duration in chunks:
-                # Calculate points: (duration / 3600) * rate
-                points = (duration / 3600.0) * rate_per_hour
-
-                await self.record_daily_stats(
-                    pr_id,
-                    date_obj,
-                    priority,
-                    duration,
-                    points,
-                    is_probation=is_probation,
-                )
-
-            # 4. Update Global Assistant Stats (assistants table)
-            total_duration = int((end_time - start_time).total_seconds())
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id, total_spec_seconds, session_count) 
-                        VALUES (%s, %s, 1) 
-                        ON DUPLICATE KEY UPDATE 
-                        total_spec_seconds = total_spec_seconds + %s, 
-                        session_count = session_count + 1
-                        """,
-                        (pr_id, total_duration, total_duration),
-                    )
-                    await conn.commit()
-
-        except Exception as e:
-            self.logger.error(f"Failed to record spec session: {e}", exc_info=True)
 
     async def _get_probation_rate(self) -> float:
         """Get probation rate from settings."""
@@ -2650,38 +2527,72 @@ class Database:
 
     @db_retry()
     async def join_event(self, event_id: int, user_id: int) -> bool:
-        """Добавление пользователя в событие."""
+        """Добавление пользователя в событие с проверкой лимита слотов."""
         try:
             async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Check if already assigned to ANYTHING
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # Check if already has active session
                     await cursor.execute(
-                        "SELECT assigned_to_type FROM assistants WHERE pr_id = %s",
+                        """
+                        SELECT id FROM spec_sessions 
+                        WHERE pr_id = %s AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
                         (user_id,),
                     )
-                    result = await cursor.fetchone()
-
-                    if result and result.get("assigned_to_type"):
+                    active = await cursor.fetchone()
+                    if active:
                         return False  # Busy
 
-                    # Update assistant status
+                    # Capacity check: count current participants vs pr_slots
+                    await cursor.execute(
+                        "SELECT pr_slots, priority FROM events WHERE id = %s AND is_active = TRUE",
+                        (event_id,),
+                    )
+                    event = await cursor.fetchone()
+                    if not event:
+                        return False  # Event not found or inactive
+
+                    pr_slots = event.get("pr_slots", 1)
+                    event_priority = event.get("priority", 0)
+
                     await cursor.execute(
                         """
-                         INSERT INTO assistants (pr_id, assigned_to_type, assigned_to_id)
-                         VALUES (%s, 'event', %s)
-                         ON DUPLICATE KEY UPDATE assigned_to_type = 'event', assigned_to_id = %s
-                         """,
-                        (user_id, event_id, event_id),
+                        SELECT COUNT(*) as cnt FROM spec_sessions
+                        WHERE target_type = 'event' AND target_id = %s 
+                          AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+                    count_row = await cursor.fetchone()
+                    current_count = count_row["cnt"] if count_row else 0
+
+                    if current_count >= pr_slots:
+                        return False  # Full
+
+                    # Snapshot rate from config
+                    config = await self.get_points_config()
+                    rate_auto = config.get(event_priority, 0.5)
+
+                    # Ensure assistant exists
+                    await cursor.execute(
+                        "INSERT INTO assistants (pr_id) VALUES (%s) ON DUPLICATE KEY UPDATE pr_id = pr_id",
+                        (user_id,),
                     )
 
-                    # Create spec session
-                    await cursor.execute(
-                        """
-                        INSERT INTO spec_sessions (pr_id, target_type, target_id, started_at)
-                        VALUES (%s, 'event', %s, NOW())
-                        """,
-                        (user_id, event_id),
-                    )
+                    # Create spec session with snapshot
+                    try:
+                        await cursor.execute(
+                            """
+                            INSERT INTO spec_sessions 
+                                (pr_id, target_type, target_id, started_at, priority_auto, rate_auto)
+                            VALUES (%s, 'event', %s, UTC_TIMESTAMP(), %s, %s)
+                            """,
+                            (user_id, event_id, event_priority, rate_auto),
+                        )
+                    except Exception as e:
+                        if "uq_one_active_session_per_pr" in str(e):
+                            return False
+                        raise
 
                     await conn.commit()
                     return True
@@ -2691,17 +2602,18 @@ class Database:
 
     @db_retry()
     async def leave_event(self, event_id: int, user_id: int) -> int:
-        """Удаление пользователя из события, обновление статистики и возврат длительности."""
+        """Удаление пользователя из события и возврат длительности."""
         try:
-            now = datetime.now(timezone.utc)
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    # 1. Get started_at to calculate duration
+                    # 1. Lock active session row for this participant
                     await cursor.execute(
                         """
-                        SELECT started_at 
+                        SELECT id
                         FROM spec_sessions 
-                        WHERE target_type = 'event' AND target_id = %s AND pr_id = %s AND ended_at IS NULL
+                        WHERE target_type = 'event' AND target_id = %s AND pr_id = %s 
+                          AND ended_at IS NULL AND deleted_at IS NULL
+                        FOR UPDATE
                         """,
                         (event_id, user_id),
                     )
@@ -2710,80 +2622,38 @@ class Database:
                     if not result:
                         return 0
 
-                    started_at = result["started_at"]
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=timezone.utc)
+                    session_id = result["id"]
 
-                    duration = int((now - started_at).total_seconds())
-                    if duration < 0:
-                        duration = 0
-
-                    # 2. Close session
+                    # 2. Close session using DB time and guarantee ended_at > started_at
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
-                        SET ended_at = %s, end_reason = 'manual_leave'
-                        WHERE target_type = 'event' AND target_id = %s AND pr_id = %s AND ended_at IS NULL
+                        SET ended_at = GREATEST(
+                                DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                UTC_TIMESTAMP()
+                            ),
+                            end_reason = 'manual_leave'
+                        WHERE id = %s
                         """,
-                        (now, event_id, user_id),
+                        (session_id,),
                     )
 
-                    # 3. Free assistant
                     await cursor.execute(
                         """
-                        UPDATE assistants 
-                        SET assigned_to_type = NULL, assigned_to_id = NULL
-                        WHERE pr_id = %s
+                        SELECT COALESCE(duration_seconds, 0) AS duration_seconds
+                        FROM spec_sessions
+                        WHERE id = %s
                         """,
-                        (user_id,),
+                        (session_id,),
                     )
-
-                    if duration > 0:
-                        # 4. Record stats
-                        event_data = await self.get_event(event_id)
-                        event_start_time = (
-                            event_data["start_time"].replace(tzinfo=timezone.utc)
-                            if event_data and event_data["start_time"]
-                            else now
-                        )
-
-                        effective_start = max(started_at, event_start_time)
-
-                        await self.record_spec_session(
-                            user_id, effective_start, now, priority=0
-                        )
+                    duration_row = await cursor.fetchone()
 
                     await conn.commit()
-                    return duration
+                    duration = int(duration_row["duration_seconds"]) if duration_row else 0
+                    return max(duration, 0)
         except Exception as e:
             self.logger.error(f"Failed to leave event {event_id}: {e}", exc_info=True)
-            return
-
-    @db_retry()
-    async def set_assistant_role(self, role_id: int) -> None:
-        """Установка роли ассистента для гильдии."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # 1. Try to UPDATE first
-                    await cursor.execute(
-                        "UPDATE settings SET assistant_role_id = %s LIMIT 1",
-                        (role_id,),
-                    )
-
-                    # 2. If no row updated, INSERT atomically if empty
-                    if cursor.rowcount == 0:
-                        await cursor.execute(
-                            """
-                            INSERT INTO settings (id, assistant_role_id) 
-                            SELECT 1, %s 
-                            WHERE NOT EXISTS (SELECT 1 FROM settings)
-                            """,
-                            (role_id,),
-                        )
-                    await conn.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to set assistant role: {e}", exc_info=True)
+            return 0
 
     @db_retry()
     async def mark_event_notification_sent(self, event_id: int) -> None:
@@ -2810,9 +2680,11 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT e.id, e.name 
-                        FROM assistants a
-                        JOIN events e ON a.assigned_to_id = e.id
-                        WHERE a.pr_id = %s AND a.assigned_to_type = 'event' AND e.is_active = TRUE
+                        FROM spec_sessions ss
+                        JOIN events e ON ss.target_id = e.id
+                        WHERE ss.pr_id = %s AND ss.target_type = 'event' 
+                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                          AND e.is_active = TRUE
                         LIMIT 1
                         """,
                         (user_id,),
@@ -2832,7 +2704,8 @@ class Database:
                         """
                         SELECT pr_id as user_id, started_at as joined_at 
                         FROM spec_sessions
-                        WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL
+                        WHERE target_type = 'event' AND target_id = %s 
+                          AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (event_id,),
                     )
@@ -2849,8 +2722,13 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT pr_id, total_spec_seconds, session_count 
-                        FROM assistants 
+                        SELECT 
+                            a.pr_id, 
+                            COALESCE(SUM(ss.duration_seconds), 0) as total_spec_seconds,
+                            COUNT(CASE WHEN ss.ended_at IS NOT NULL THEN 1 END) as session_count
+                        FROM assistants a
+                        LEFT JOIN spec_sessions ss ON ss.pr_id = a.pr_id AND ss.deleted_at IS NULL AND ss.ended_at IS NOT NULL
+                        GROUP BY a.pr_id
                         ORDER BY total_spec_seconds DESC 
                         LIMIT %s
                         """,
@@ -2863,15 +2741,15 @@ class Database:
 
     @db_retry()
     async def reset_assistant_stats(self, pr_id: int) -> bool:
-        """Сброс статистики для конкретного ассистента."""
+        """Сброс статистики для конкретного ассистента (помечает все сессии как удалённые)."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        UPDATE assistants 
-                        SET total_spec_seconds = 0, session_count = 0 
-                        WHERE pr_id = %s
+                        UPDATE spec_sessions 
+                        SET deleted_at = NOW(), delete_reason = 'admin_reset'
+                        WHERE pr_id = %s AND deleted_at IS NULL
                         """,
                         (pr_id,),
                     )
@@ -2887,7 +2765,7 @@ class Database:
 
     @db_retry()
     async def get_all_assistants(self) -> List[Dict[str, Any]]:
-        """Получение всех ассистентов, отсортированных по времени спека."""
+        """Получение всех ассистентов с активными сессиями и статистикой."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -2896,15 +2774,23 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             DATEDIFF(NOW(), a.added_at) as experience_days,
-                            CASE WHEN a.assigned_to_type IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
-                            a.assigned_to_type, a.assigned_to_id, 
-                            a.total_spec_seconds, a.session_count, a.added_at,
+                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
+                            COALESCE(stats.total_secs, 0) as total_spec_seconds, 
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(a.total_spec_seconds / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
                         FROM assistants a
-                        LEFT JOIN streamers s ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN events e ON a.assigned_to_type = 'event' AND a.assigned_to_id = e.id
-                        ORDER BY a.total_spec_seconds DESC
+                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
+                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
+                            FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
+                            GROUP BY pr_id
+                        ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
+                        LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
+                        ORDER BY total_spec_seconds DESC
                         """
                     )
                     return await cursor.fetchall()
@@ -2923,14 +2809,22 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             DATEDIFF(NOW(), a.added_at) as experience_days,
-                            CASE WHEN a.assigned_to_type IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
-                            a.assigned_to_type, a.assigned_to_id, 
-                            a.total_spec_seconds, a.session_count, a.added_at,
+                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
+                            COALESCE(stats.total_secs, 0) as total_spec_seconds, 
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(a.total_spec_seconds / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
                         FROM assistants a
-                        LEFT JOIN streamers s ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN events e ON a.assigned_to_type = 'event' AND a.assigned_to_id = e.id
+                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
+                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
+                            FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
+                            GROUP BY pr_id
+                        ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
+                        LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
                         WHERE a.pr_id = %s
                         """,
                         (user_id,),
@@ -2939,6 +2833,135 @@ class Database:
         except Exception as e:
             self.logger.error(f"Failed to get assistant {user_id}: {e}", exc_info=True)
             return None
+
+    @db_retry()
+    async def get_assistant_logs(
+        self, pr_id: int, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get assistant activity logs derived from spec_sessions."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    session_limit = max(int(limit), 1)
+                    fetch_limit = max(session_limit * 2, session_limit)
+
+                    await cursor.execute(
+                        """
+                        SELECT
+                            ss.id,
+                            ss.target_type,
+                            ss.started_at,
+                            ss.ended_at,
+                            ss.duration_seconds,
+                            ss.end_reason,
+                            CASE
+                                WHEN ss.target_type = 'streamer' THEN s.streamer_name
+                                WHEN ss.target_type = 'event' THEN e.name
+                                ELSE NULL
+                            END AS target
+                        FROM spec_sessions ss
+                        LEFT JOIN streamers s
+                            ON ss.target_type = 'streamer'
+                            AND ss.target_id = s.streamer_id
+                        LEFT JOIN events e
+                            ON ss.target_type = 'event'
+                            AND ss.target_id = e.id
+                        WHERE ss.pr_id = %s
+                          AND ss.deleted_at IS NULL
+                        ORDER BY COALESCE(ss.ended_at, ss.started_at) DESC
+                        LIMIT %s
+                        """,
+                        (pr_id, fetch_limit),
+                    )
+                    rows = await cursor.fetchall()
+
+                    logs: List[Dict[str, Any]] = []
+
+                    def format_duration(seconds: Optional[int]) -> Optional[str]:
+                        if seconds is None:
+                            return None
+                        total = max(int(seconds), 0)
+                        hours, remainder = divmod(total, 3600)
+                        minutes, secs = divmod(remainder, 60)
+                        if hours > 0:
+                            return f"{hours}h {minutes}m"
+                        if minutes > 0:
+                            return f"{minutes}m {secs}s"
+                        return f"{secs}s"
+
+                    def to_epoch(value: Any) -> float:
+                        if value is None:
+                            return 0.0
+                        if hasattr(value, "timestamp"):
+                            try:
+                                return float(value.timestamp())
+                            except Exception:
+                                return 0.0
+                        return 0.0
+
+                    for row in rows:
+                        session_id = row.get("id")
+                        target_type = row.get("target_type")
+                        started_at = row.get("started_at")
+                        ended_at = row.get("ended_at")
+                        end_reason = row.get("end_reason")
+                        duration_seconds = row.get("duration_seconds")
+                        duration = format_duration(duration_seconds)
+
+                        if target_type == "manual":
+                            logs.append(
+                                {
+                                    "id": f"{session_id}:manual",
+                                    "action": "Manual correction",
+                                    "target": row.get("target"),
+                                    "created_at": ended_at or started_at,
+                                    "duration_seconds": duration_seconds,
+                                    "duration": duration,
+                                }
+                            )
+                            continue
+
+                        # Assignment event should always remain in history
+                        logs.append(
+                            {
+                                "id": f"{session_id}:assigned",
+                                "action": "Assigned",
+                                "target": row.get("target"),
+                                "created_at": started_at,
+                                "duration_seconds": None,
+                                "duration": None,
+                            }
+                        )
+
+                        # Unassignment event appears once session is closed
+                        if ended_at is not None:
+                            if end_reason and duration:
+                                unassign_action = f"Unassigned ({end_reason}, {duration})"
+                            elif end_reason:
+                                unassign_action = f"Unassigned ({end_reason})"
+                            elif duration:
+                                unassign_action = f"Unassigned ({duration})"
+                            else:
+                                unassign_action = "Unassigned"
+
+                            logs.append(
+                                {
+                                    "id": f"{session_id}:unassigned",
+                                    "action": unassign_action,
+                                    "target": row.get("target"),
+                                    "created_at": ended_at,
+                                    "duration_seconds": duration_seconds,
+                                    "duration": duration,
+                                }
+                            )
+
+                    logs.sort(key=lambda item: to_epoch(item.get("created_at")), reverse=True)
+                    return logs[:session_limit]
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get assistant logs for {pr_id}: {e}", exc_info=True
+            )
+            return []
 
     @db_retry()
     async def get_assistant_stats(self, user_id: int) -> Optional[Dict[str, Any]]:
@@ -2952,14 +2975,22 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             DATEDIFF(NOW(), a.added_at) as experience_days,
-                            CASE WHEN a.assigned_to_type IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
-                            a.assigned_to_type, a.assigned_to_id, 
-                            a.total_spec_seconds, a.session_count, a.added_at,
+                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
+                            COALESCE(stats.total_secs, 0) as total_spec_seconds, 
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(a.total_spec_seconds / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
                         FROM assistants a
-                        LEFT JOIN streamers s ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN events e ON a.assigned_to_type = 'event' AND a.assigned_to_id = e.id
+                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
+                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
+                            FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
+                            GROUP BY pr_id
+                        ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
+                        LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
                         WHERE a.pr_id = %s
                         """,
                         (user_id,),
@@ -2969,7 +3000,7 @@ class Database:
                     if not assistant:
                         return None
 
-                    # Get daily stats
+                    # Get daily stats from VIEW
                     await cursor.execute(
                         """
                         SELECT date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, total_points
@@ -3007,33 +3038,13 @@ class Database:
 
                     # Create
                     await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id, total_spec_seconds, session_count)
-                        VALUES (%s, 0, 0)
-                        """,
+                        "INSERT INTO assistants (pr_id) VALUES (%s)",
                         (user_id,),
                     )
                     await conn.commit()
 
-                    # Return created
-                    await cursor.execute(
-                        """
-                        SELECT 
-                            a.pr_id, a.nickname, a.role, 
-                            DATEDIFF(NOW(), a.added_at) as experience_days,
-                            CASE WHEN a.assigned_to_type IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
-                            a.assigned_to_type, a.assigned_to_id, 
-                            a.total_spec_seconds, a.session_count, a.added_at,
-                            COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(a.total_spec_seconds / 3600, 1) as total_spec_hours
-                        FROM assistants a
-                        LEFT JOIN streamers s ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                        LEFT JOIN events e ON a.assigned_to_type = 'event' AND a.assigned_to_id = e.id
-                        WHERE a.pr_id = %s
-                        """,
-                        (user_id,),
-                    )
-                    return await cursor.fetchone()
+                    # Return created (use same query pattern)
+                    return await self.get_assistant(user_id)
         except Exception as e:
             self.logger.error(
                 f"Failed to create assistant {user_id}: {e}", exc_info=True
@@ -3050,8 +3061,8 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        INSERT INTO assistants (pr_id, nickname, role, added_at, total_spec_seconds, session_count)
-                        VALUES (%s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), 0, 0)
+                        INSERT INTO assistants (pr_id, nickname, role, added_at)
+                        VALUES (%s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY))
                         ON DUPLICATE KEY UPDATE
                             nickname = VALUES(nickname),
                             role = VALUES(role),
@@ -3240,15 +3251,12 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT s.streamer_id, s.streamer_name, a.pr_id as assigned_pr_id, ss.started_at as assigned_at,
+                        SELECT s.streamer_id, s.streamer_name, ss.pr_id as assigned_pr_id, ss.started_at as assigned_at,
                                TIMESTAMPDIFF(SECOND, ss.started_at, NOW()) as duration_seconds
-                        FROM assistants a
-                        JOIN spec_sessions ss ON ss.pr_id = a.pr_id 
-                             AND ss.target_type = 'streamer' 
-                             AND ss.target_id = a.assigned_to_id 
-                             AND ss.ended_at IS NULL
-                        JOIN streamers s ON s.streamer_id = a.assigned_to_id
-                        WHERE a.assigned_to_type = 'streamer'
+                        FROM spec_sessions ss
+                        JOIN streamers s ON s.streamer_id = ss.target_id
+                        WHERE ss.target_type = 'streamer'
+                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         ORDER BY ss.started_at DESC
                         """
                     )
@@ -3363,7 +3371,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, a.role, a.nickname 
+                        SELECT w.id, w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname 
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         WHERE w.username = %s
@@ -3373,6 +3381,30 @@ class Database:
                     return await cursor.fetchone()
         except Exception as e:
             self.logger.error(f"Failed to get user {username}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def get_user_by_discord_id(
+        self, discord_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Get user by Discord ID (joins assistants for role)."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT w.id, w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname
+                        FROM web_auth w
+                        LEFT JOIN assistants a ON a.pr_id = w.discord_id
+                        WHERE w.discord_id = %s
+                        """,
+                        (discord_id,),
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get user by discord_id {discord_id}: {e}", exc_info=True
+            )
             raise
 
     @db_retry()
@@ -3433,7 +3465,7 @@ class Database:
                         """
                         UPDATE web_auth 
                         SET failed_login_attempts = failed_login_attempts + 1, 
-                            last_login = CURRENT_TIMESTAMP 
+                            last_failed_login = CURRENT_TIMESTAMP
                         WHERE username = %s
                         """,
                         (username,),
@@ -3452,6 +3484,7 @@ class Database:
                         """
                         UPDATE web_auth 
                         SET failed_login_attempts = 0, 
+                            last_failed_login = NULL,
                             last_login = CURRENT_TIMESTAMP
                         WHERE id = %s
                         """,
@@ -3498,6 +3531,29 @@ class Database:
             raise
 
     @db_retry()
+    async def is_session_active(self, user_id: int, session_id: int) -> bool:
+        """Check whether session exists, belongs to user, is not revoked and not expired."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id
+                        FROM sessions
+                        WHERE id = %s
+                          AND user_id = %s
+                          AND revoked = FALSE
+                          AND expires_at > UTC_TIMESTAMP()
+                        LIMIT 1
+                        """,
+                        (session_id, user_id),
+                    )
+                    return await cursor.fetchone() is not None
+        except Exception as e:
+            self.logger.error(f"Failed to validate session: {e}", exc_info=True)
+            return False
+
+    @db_retry()
     async def log_auth_event(
         self,
         user_id: Optional[int],
@@ -3531,20 +3587,21 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # 1. Count assigned PR assistants
+                    # 1. Count assigned PR assistants (active sessions)
                     await cursor.execute(
-                        "SELECT COUNT(*) as count FROM assistants WHERE assigned_to_type IS NOT NULL"
+                        "SELECT COUNT(*) as count FROM spec_sessions WHERE ended_at IS NULL AND deleted_at IS NULL"
                     )
                     assigned_pr_count = (await cursor.fetchone())["count"]
 
-                    # 2. Count unassigned streamers (online but no PR)
+                    # 2. Count unassigned streamers (online but no active PR session)
                     try:
                         await cursor.execute(
                             """
                             SELECT COUNT(*) as count 
                             FROM streamers s
-                            LEFT JOIN assistants a ON a.assigned_to_type = 'streamer' AND a.assigned_to_id = s.streamer_id
-                            WHERE s.is_online = TRUE AND a.pr_id IS NULL
+                            LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer' AND ss.target_id = s.streamer_id
+                                AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                            WHERE s.is_online = TRUE AND ss.id IS NULL
                             """
                         )
                         result = await cursor.fetchone()

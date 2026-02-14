@@ -5,7 +5,7 @@ Split into /settings, /templates, /rates resources per roadmap.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
@@ -115,7 +115,6 @@ async def update_guild_settings(
         pr_actions_channel_id=data.pr_actions_channel_id,
         control_panel_channel_id=data.control_panel_channel_id,
         control_panel_message_id=data.control_panel_message_id,
-        assistant_role_id=data.assistant_role_id,
     )
 
     settings = await db.get_guild()
@@ -162,6 +161,7 @@ async def get_guild_templates(
 
     if isinstance(raw_templates, str):
         import json
+
         try:
             templates_dict = json.loads(raw_templates)
         except json.JSONDecodeError:
@@ -171,10 +171,18 @@ async def get_guild_templates(
 
     # Map DB keys to schema keys, using defaults for missing
     data = GuildTemplatesResponse(
-        stream_online=templates_dict.get("stream_online", Config.template_defaults.get("stream_online")),
-        stream_offline=templates_dict.get("stream_offline", Config.template_defaults.get("stream_offline")),
-        category_to_gta=templates_dict.get("category_to_gta", Config.template_defaults.get("category_to_gta")),
-        category_from_gta=templates_dict.get("category_from_gta", Config.template_defaults.get("category_from_gta")),
+        stream_online=templates_dict.get(
+            "stream_online", Config.template_defaults.get("stream_online")
+        ),
+        stream_offline=templates_dict.get(
+            "stream_offline", Config.template_defaults.get("stream_offline")
+        ),
+        category_to_gta=templates_dict.get(
+            "category_to_gta", Config.template_defaults.get("category_to_gta")
+        ),
+        category_from_gta=templates_dict.get(
+            "category_from_gta", Config.template_defaults.get("category_from_gta")
+        ),
     )
     return JSONResponse(
         content=success_envelope(
@@ -216,6 +224,7 @@ async def update_guild_templates(
 
     if isinstance(raw_templates, str):
         import json
+
         try:
             templates_dict = json.loads(raw_templates)
         except json.JSONDecodeError:
@@ -225,10 +234,18 @@ async def update_guild_templates(
 
     # Map DB keys to schema keys, using defaults for missing
     response_data = GuildTemplatesResponse(
-        stream_online=templates_dict.get("stream_online", Config.template_defaults.get("stream_online")),
-        stream_offline=templates_dict.get("stream_offline", Config.template_defaults.get("stream_offline")),
-        category_to_gta=templates_dict.get("category_to_gta", Config.template_defaults.get("category_to_gta")),
-        category_from_gta=templates_dict.get("category_from_gta", Config.template_defaults.get("category_from_gta")),
+        stream_online=templates_dict.get(
+            "stream_online", Config.template_defaults.get("stream_online")
+        ),
+        stream_offline=templates_dict.get(
+            "stream_offline", Config.template_defaults.get("stream_offline")
+        ),
+        category_to_gta=templates_dict.get(
+            "category_to_gta", Config.template_defaults.get("category_to_gta")
+        ),
+        category_from_gta=templates_dict.get(
+            "category_from_gta", Config.template_defaults.get("category_from_gta")
+        ),
     )
     return JSONResponse(
         content=success_envelope(

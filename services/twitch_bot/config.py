@@ -45,11 +45,6 @@ class Config(BaseSettings):
     gta5_game_id: str = "32982"
 
     # ==========================================================================
-    # Guild (for routing events to correct Discord server)
-    # ==========================================================================
-    guild_id: str = Field(default="0", alias="GUILD_ID")
-
-    # ==========================================================================
     # Logging
     # ==========================================================================
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -68,7 +63,6 @@ class Config(BaseSettings):
         "TWITCH_CLIENT_ID",
         "TWITCH_CLIENT_SECRET",
         "TWITCH_BOT_ID",
-        "GUILD_ID",
     ]
 
     model_config = {
@@ -87,8 +81,6 @@ class Config(BaseSettings):
             missing.append("TWITCH_CLIENT_SECRET")
         if self.twitch_bot_id == 0:
             missing.append("TWITCH_BOT_ID")
-        if self.guild_id == "0":
-            missing.append("GUILD_ID")
         return missing if missing else None
 
     def get_log_level(self) -> int:

@@ -45,15 +45,6 @@ class AdminMainView(disnake.ui.View):
                 style=disnake.ButtonStyle.secondary,
             )
         )
-        self.add_item(
-            disnake.ui.Button(
-                label="Ассистенты",
-                custom_id="admin_assistants",
-                emoji="👥",
-                row=0,
-                style=disnake.ButtonStyle.secondary,
-            )
-        )
 
         # Row 1 - Secondary categories
         self.add_item(
@@ -128,7 +119,9 @@ class AdminCore(commands.Cog):
         try:
             settings = await self.api.get_guild_settings()
             if not settings:
-                self.bot.logger.warning("No guild settings found, skipping control panel")
+                self.bot.logger.warning(
+                    "No guild settings found, skipping control panel"
+                )
                 return
 
             cp_channel_id = settings.get("control_panel_channel_id")
@@ -138,21 +131,26 @@ class AdminCore(commands.Cog):
 
             channel = self.bot.get_channel(int(cp_channel_id))
             if not channel:
-                self.bot.logger.warning(f"Control panel channel {cp_channel_id} not found")
+                self.bot.logger.warning(
+                    f"Control panel channel {cp_channel_id} not found"
+                )
                 return
 
             old_msg_id = settings.get("control_panel_message_id")
             old_msg = None
 
-
             if old_msg_id:
                 try:
                     old_msg = await channel.fetch_message(int(old_msg_id))
                 except (disnake.NotFound, disnake.Forbidden):
-                    self.bot.logger.info("Old control panel message not found, will create new")
+                    self.bot.logger.info(
+                        "Old control panel message not found, will create new"
+                    )
                     old_msg = None
                 except Exception as e:
-                    self.bot.logger.warning(f"Error fetching control panel message: {e}")
+                    self.bot.logger.warning(
+                        f"Error fetching control panel message: {e}"
+                    )
                     old_msg = None
 
             if old_msg:
@@ -160,7 +158,9 @@ class AdminCore(commands.Cog):
                 try:
                     embed = get_main_embed()
                     await old_msg.edit(embed=embed, view=AdminMainView(self.bot))
-                    self.bot.logger.info(f"✓ Updated control panel message in #{channel.name}")
+                    self.bot.logger.info(
+                        f"✓ Updated control panel message in #{channel.name}"
+                    )
                 except Exception as e:
                     self.bot.logger.error(f"Failed to edit control panel: {e}")
             else:

@@ -238,9 +238,11 @@ def create_streamers_component(
             accent_colour=disnake.Colour(65358),
         )]
 
-    # Sort streamers by priority
+    # Sort streamers: pinned first, then by priority DESC
     online_streamers_sorted = sorted(
-        online_streamers, key=lambda s: s.get("priority", 0), reverse=True
+        online_streamers,
+        key=lambda s: (s.get("is_pinned", False), s.get("priority", 0)),
+        reverse=True,
     )
     
     def build_streamer_components(streamer: Dict[str, Any]) -> List:
@@ -256,8 +258,9 @@ def create_streamers_component(
             streamer.get("stream_thumbnail_url")
             or "https://static-cdn.jtvnw.net/previews-ttv/live_user_placeholder-320x180.jpg"
         )
+        pr_slots = streamer.get("pr_slots", 1)
         assignments = streamer.get("assignments", [])
-        
+        main_prs = [a for a in assignments if not a.get("is_probation")]
         main_pr = None
         prob_pr = None
         if assignments:
@@ -265,13 +268,19 @@ def create_streamers_component(
                 if a.get("is_probation"):
                     prob_pr = a.get("pr_id")
                 else:
-                    main_pr = a.get("pr_id")
+                    if main_pr is None:
+                        main_pr = a.get("pr_id")
 
         lines = []
-        if main_pr:
-            lines.append(f"👤 PR: <@{main_pr}>")
+        if pr_slots > 1:
+            # Multi-slot: show count
+            main_names = ", ".join(f"<@{a.get('pr_id')}>" for a in main_prs) if main_prs else "*свободен*"
+            lines.append(f"👤 PR ({len(main_prs)}/{pr_slots}): {main_names}")
         else:
-            lines.append("👤 PR: *свободен*")
+            if main_pr:
+                lines.append(f"👤 PR: <@{main_pr}>")
+            else:
+                lines.append("👤 PR: *свободен*")
         if prob_pr:
             lines.append(f"👤 PR стажировка: <@{prob_pr}>")
         pr_line = "\n".join(lines)
@@ -294,7 +303,7 @@ def create_streamers_component(
         """Build components for a single event."""
         start_unix = parse_to_unix(event.get("start_time"))
         participant_count = event.get("current_participants", 0)
-        required = event.get("required_pr_count", 0)
+        slots = event.get("pr_slots", event.get("required_pr_count", 0))
         return [
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
             disnake.ui.TextDisplay(content=f"### {event['name']}"),
@@ -302,7 +311,7 @@ def create_streamers_component(
                 content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', '')) > 100 else ''}"
             ),
             disnake.ui.TextDisplay(
-                content=f"👥 **Участников:** {participant_count} / {required}\n🕒 **Начало:** <t:{start_unix}:R>"
+                content=f"👥 **Участников:** {participant_count} / {slots}\n🕒 **Начало:** <t:{start_unix}:R>"
             ),
         ]
 

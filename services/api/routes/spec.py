@@ -6,7 +6,7 @@ Refactored to use envelope responses.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
@@ -18,7 +18,6 @@ from fastapi.responses import JSONResponse
 from middleware import get_trace_id
 from schemas.envelope import success_envelope
 from schemas.spec import (
-    ActiveSpecResponse,
     SpecClaimRequest,
     SpecSessionResponse,
     SpecSwapRequest,
@@ -39,33 +38,6 @@ def get_broker(request: Request):
     return request.app.state.broker
 
 
-@router.get("/active")
-async def get_active_specs(
-    request: Request,
-    db: "Database" = Depends(get_db),
-):
-    """Get all currently active spec sessions."""
-    trace_id = get_trace_id(request)
-    active = await db.get_active_spec_sessions()
-
-    data = [
-        ActiveSpecResponse(
-            streamer_id=a["streamer_id"],
-            streamer_name=a["streamer_name"],
-            pr_id=a["assigned_pr_id"],
-            assigned_at=a["assigned_at"],
-            duration_seconds=a["duration_seconds"] or 0,
-        ).model_dump(mode="json")
-        for a in active
-    ]
-
-    return JSONResponse(
-        content=success_envelope(
-            data=data,
-            message=f"Found {len(active)} active specs",
-            trace_id=trace_id,
-        )
-    )
 
 
 @router.post("/claim")
@@ -157,10 +129,10 @@ async def unclaim_streamer(
         pass
 
     # Call DB with pr_id (if None, it unassigns ALL, but for manual unclaim we usually want specific)
-    # However, if data.pr_id is None, we might be unclaiming ALL? 
-    # The new requirement says "pr_id=None for auto unassign". 
+    # However, if data.pr_id is None, we might be unclaiming ALL?
+    # The new requirement says "pr_id=None for auto unassign".
     # For manual unclaim via API, we expect pr_id usually.
-    
+
     results = await db.unassign_pr_from_streamer(
         data.streamer_id, pr_id=data.pr_id, end_reason=data.reason
     )
@@ -168,7 +140,9 @@ async def unclaim_streamer(
     if not results:
         # If we asked for specific pr_id and got nothing -> 404/400
         if data.pr_id:
-             raise HTTPException(status_code=400, detail="Стример не закреплен за указанным сотрудником")
+            raise HTTPException(
+                status_code=400, detail="Стример не закреплен за указанным сотрудником"
+            )
         raise HTTPException(status_code=400, detail="Стример не закреплен")
 
     # For API response, we return the first one (backward compat) or list?
@@ -195,7 +169,7 @@ async def unclaim_streamer(
                 "streamer_name": streamer["streamer_name"],
                 "pr_id": result["pr_id"],
                 "duration_seconds": result.get("duration_seconds", 0),
-                "unclaimed_count": len(results)
+                "unclaimed_count": len(results),
             },
             message=f"Unclaimed {streamer['streamer_name']}",
             code="SPEC_UNCLAIMED",
@@ -230,13 +204,13 @@ async def transfer_streamer(
     results = await db.unassign_pr_from_streamer(
         data.streamer_id, pr_id=data.from_pr_id, end_reason="transfer"
     )
-    
+
     if not results:
-         raise HTTPException(
+        raise HTTPException(
             status_code=400,
             detail="Стример не закреплен за указанным исходным PR",
         )
-    
+
     result = results[0]
 
     # Claim for new PR
@@ -387,16 +361,16 @@ async def get_claimable_streamers(
 ):
     """
     Get streamers available for claim by a specific user.
-    
+
     Filters based on:
     - Online status
     - GTA category
     - User permissions (can_spec_probation for probation slots)
-    
+
     Returns streamers with slot availability info.
     """
     trace_id = get_trace_id(request)
-    
+
     # Get user capabilities via role-based permissions
     assistant = await db.get_assistant(user_id)
     can_spec_probation = False
@@ -404,24 +378,25 @@ async def get_claimable_streamers(
         role = assistant.get("role", "employee")
         permissions = await db.get_role_permissions(role)
         can_spec_probation = permissions.get("can_spec_probation", False)
-    
+
     # Get all online GTA streamers with assignments
     all_streamers = await db.list_online_streamers()
-    
+
     claimable = []
     gta_game_id = Config.gta5_game_id
-    
+
     for s in all_streamers:
         # Must be GTA
         if str(s.get("game_id")) != gta_game_id:
             continue
-        
+
         # Determine slot availability
         assignments = s.get("assignments", [])
         if isinstance(assignments, str):
             import json
+
             assignments = json.loads(assignments)
-        
+
         main_free = True
         probation_free = True
         for a in assignments:
@@ -431,8 +406,7 @@ async def get_claimable_streamers(
                 probation_free = False
             else:
                 main_free = False
-        
-        
+
         # Filter logic:
         # - Regular user: only show if main_free
         # - Junior (can_spec_probation): show if main_free OR probation_free
@@ -442,18 +416,20 @@ async def get_claimable_streamers(
         else:
             if not main_free:
                 continue  # Main slot taken
-        
-        claimable.append({
-            "streamer_id": s["streamer_id"],
-            "streamer_name": s["streamer_name"],
-            "priority": s.get("priority", 3),
-            "main_free": main_free,
-            "probation_free": probation_free,
-        })
-    
+
+        claimable.append(
+            {
+                "streamer_id": s["streamer_id"],
+                "streamer_name": s["streamer_name"],
+                "priority": s.get("priority", 3),
+                "main_free": main_free,
+                "probation_free": probation_free,
+            }
+        )
+
     # Sort by priority (P0 first)
     claimable.sort(key=lambda x: x["priority"])
-    
+
     return JSONResponse(
         content=success_envelope(
             data={

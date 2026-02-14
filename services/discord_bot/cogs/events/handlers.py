@@ -13,6 +13,27 @@ class EventsHandlers(commands.Cog):
         self.bot = bot
         self.api = bot.api_client
 
+    @staticmethod
+    def _extract_api_error(result) -> str | None:
+        """Extract readable error text from API response."""
+        if result is None:
+            return "API недоступно"
+
+        if not isinstance(result, dict):
+            return "Некорректный ответ API"
+
+        status = result.get("status")
+        if status and status != "success":
+            return str(result.get("message") or result.get("detail") or "Ошибка API")
+
+        if result.get("error"):
+            return str(result["error"])
+
+        if "detail" in result and "event_id" not in result:
+            return str(result["detail"])
+
+        return None
+
     async def _update_event_message(self, event_id: int):
         """Update event message embed with current participant count."""
         try:
@@ -100,7 +121,7 @@ class EventsHandlers(commands.Cog):
             )
             try:
                 await interaction.followup.send(
-                    "❌ Произошла ошибка обработки.", ephemeral=True
+                    f"❌ Произошла ошибка обработки: {e}", ephemeral=True
                 )
             except Exception as e:
                 self.bot.logger.debug(f"Failed to send error response: {e}")
@@ -112,8 +133,12 @@ class EventsHandlers(commands.Cog):
         try:
             # Check if already joined
             result = await self.api.join_event(event_id, user_id)
+            error_message = self._extract_api_error(result)
+            if error_message:
+                await interaction.followup.send(f"❌ {error_message}", ephemeral=True)
+                return
 
-            if result.get("already_joined"):
+            if isinstance(result, dict) and result.get("already_joined"):
                 # Already in event - offer to leave
                 leave_btn = disnake.ui.Button(
                     label="Покинуть событие",
@@ -128,8 +153,19 @@ class EventsHandlers(commands.Cog):
                 )
                 return
 
-            if result.get("error"):
-                await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+            if not isinstance(result, dict):
+                await interaction.followup.send(
+                    "❌ Некорректный ответ API при входе в событие", ephemeral=True
+                )
+                return
+
+            if str(result.get("event_id")) != str(event_id) or str(
+                result.get("user_id")
+            ) != str(user_id):
+                await interaction.followup.send(
+                    "❌ API вернул неполный ответ при входе в событие",
+                    ephemeral=True,
+                )
                 return
 
             await interaction.followup.send(
@@ -150,7 +186,7 @@ class EventsHandlers(commands.Cog):
 
         except Exception as e:
             self.bot.logger.error(f"Event join error: {e}")
-            await interaction.followup.send("❌ Ошибка", ephemeral=True)
+            await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
     async def _handle_event_leave(self, interaction: MessageInteraction, event_id: int):
         """Handle user leaving an event."""
@@ -158,9 +194,24 @@ class EventsHandlers(commands.Cog):
 
         try:
             result = await self.api.leave_event(event_id, user_id)
+            error_message = self._extract_api_error(result)
+            if error_message:
+                await interaction.followup.send(f"❌ {error_message}", ephemeral=True)
+                return
 
-            if result.get("error"):
-                await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+            if not isinstance(result, dict):
+                await interaction.followup.send(
+                    "❌ Некорректный ответ API при выходе из события", ephemeral=True
+                )
+                return
+
+            if str(result.get("event_id")) != str(event_id) or str(
+                result.get("user_id")
+            ) != str(user_id):
+                await interaction.followup.send(
+                    "❌ API вернул неполный ответ при выходе из события",
+                    ephemeral=True,
+                )
                 return
 
             duration = result.get("duration", 0)
@@ -185,7 +236,7 @@ class EventsHandlers(commands.Cog):
 
         except Exception as e:
             self.bot.logger.error(f"Event leave error: {e}")
-            await interaction.followup.send("❌ Ошибка", ephemeral=True)
+            await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
 
 def setup(bot: commands.Bot) -> None:

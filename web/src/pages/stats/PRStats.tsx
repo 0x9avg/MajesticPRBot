@@ -1,12 +1,22 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronUp, ChevronDown } from 'lucide-react';
+import type { Assistant } from '../../types/domain';
+import { unwrapApiData } from '../../types/api';
+
+type SortKey =
+    | 'nickname'
+    | 'role'
+    | 'experience_days'
+    | 'status'
+    | 'total_spec_seconds'
+    | 'session_count';
 
 export function PRStats() {
     const navigate = useNavigate();
-    const [assistants, setAssistants] = React.useState<any[]>([]);
+    const [assistants, setAssistants] = React.useState<Assistant[]>([]);
     const [loading, setLoading] = React.useState(true);
-    const [sortConfig, setSortConfig] = React.useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'role', direction: 'desc' });
+    const [sortConfig, setSortConfig] = React.useState<{ key: SortKey, direction: 'asc' | 'desc' }>({ key: 'role', direction: 'desc' });
 
     React.useEffect(() => {
         fetchAssistants();
@@ -19,9 +29,10 @@ export function PRStats() {
         try {
             const response = await fetch('/api/assistants');
             if (response.ok) {
-                const json = await response.json();
-                const data = json.data || json;
-                setAssistants(Array.isArray(data) ? data : []);
+                const json = await response.json() as unknown;
+                const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
+                const normalized = Array.isArray(data) ? data : data.assistants;
+                setAssistants(Array.isArray(normalized) ? normalized : []);
             }
         } catch (error) {
             console.error('Failed to fetch assistants:', error);
@@ -30,12 +41,31 @@ export function PRStats() {
         }
     };
 
-    const handleSort = (key: string) => {
+    const handleSort = (key: SortKey) => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig.key === key && sortConfig.direction === 'asc') {
             direction = 'desc';
         }
         setSortConfig({ key, direction });
+    };
+
+    const getSortValue = (assistant: Assistant, key: SortKey): string | number => {
+        switch (key) {
+            case 'nickname':
+                return assistant.nickname || '';
+            case 'role':
+                return assistant.role || '';
+            case 'experience_days':
+                return assistant.experience_days || 0;
+            case 'status':
+                return assistant.status || '';
+            case 'total_spec_seconds':
+                return assistant.total_spec_seconds || 0;
+            case 'session_count':
+                return assistant.session_count || 0;
+            default:
+                return 0;
+        }
     };
 
     const getSortedAssistants = () => {
@@ -54,10 +84,12 @@ export function PRStats() {
                 return sortConfig.direction === 'asc' ? weightA - weightB : weightB - weightA;
             }
 
-            if (a[sortConfig.key] < b[sortConfig.key]) {
+            const aValue = getSortValue(a, sortConfig.key);
+            const bValue = getSortValue(b, sortConfig.key);
+            if (aValue < bValue) {
                 return sortConfig.direction === 'asc' ? -1 : 1;
             }
-            if (a[sortConfig.key] > b[sortConfig.key]) {
+            if (aValue > bValue) {
                 return sortConfig.direction === 'asc' ? 1 : -1;
             }
             return 0;
@@ -92,7 +124,7 @@ export function PRStats() {
         );
     };
 
-    const getStatusBadge = (assistant: any) => {
+    const getStatusBadge = (assistant: Assistant) => {
         if (assistant.status === 'free') {
             return <span className="px-3 py-1 rounded-full text-xs font-medium bg-green-500/20 text-green-400 border border-green-500/30">Свободен</span>;
         }
@@ -115,7 +147,7 @@ export function PRStats() {
         return sortConfig.direction === 'asc' ? <ChevronUp className="w-4 h-4 text-[#3b82f6]" /> : <ChevronDown className="w-4 h-4 text-[#3b82f6]" />;
     };
 
-    const renderHeader = (label: string, sortKey: string) => (
+    const renderHeader = (label: string, sortKey: SortKey) => (
         <th
             className="text-left p-4 text-sm font-semibold text-white/60 select-none cursor-pointer hover:text-white transition-colors group"
             onClick={() => handleSort(sortKey)}

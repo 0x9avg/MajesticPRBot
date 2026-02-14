@@ -116,6 +116,14 @@ class APIClient:
         """Get a specific streamer."""
         return await self._request("GET", f"/streamers/{twitch_id}")
 
+    async def sync_streamers(self) -> Dict[str, Any]:
+        """Trigger streamers sync (via refreshing monitoring for now)."""
+        return await self.refresh_monitoring(force=True)
+
+    async def refresh_monitoring(self, force: bool = False) -> Optional[Dict]:
+        """Request monitoring refresh."""
+        return await self._request("POST", "/monitoring/refresh", data={"force": force})
+
     async def create_streamer(
         self,
         streamer_id: int,
@@ -217,10 +225,8 @@ class APIClient:
             },
         )
 
-    async def get_available_gta_streamers(self) -> List[Dict]:
-        """Get available GTA streamers for claiming."""
-        result = await self._request("GET", "/streamers/available-gta")
-        return result if isinstance(result, list) else []
+
+
 
     async def sync_streamers_status_bulk(self, updates: List[Dict]) -> int:
         """

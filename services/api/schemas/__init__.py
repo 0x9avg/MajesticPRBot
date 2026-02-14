@@ -3,6 +3,15 @@ Schemas package - Pydantic models for API requests and responses.
 """
 
 # Envelope (API response wrapper)
+# Auth
+# Assistants
+from schemas.assistant import (
+    AssistantBase,
+    AssistantCreate,
+    AssistantResponse,
+    AssistantStatsResponse,
+)
+from schemas.auth import LoginRequest, TokenResponse, UserResponse
 from schemas.envelope import (
     APIEnvelope,
     FieldError,
@@ -14,17 +23,6 @@ from schemas.envelope import (
     success_envelope,
     validation_failed_envelope,
 )
-
-# Auth
-
-# Assistants
-from schemas.assistant import (
-    AssistantBase,
-    AssistantCreate,
-    AssistantResponse,
-    AssistantStatsResponse,
-)
-from schemas.auth import LoginRequest, TokenResponse, UserResponse
 
 # Guild
 from schemas.guild import (
@@ -70,7 +68,6 @@ __all__ = [
     "LoginRequest",
     "TokenResponse",
     "UserResponse",
-
     # Streamers
     "StreamerBase",
     "StreamerCreate",

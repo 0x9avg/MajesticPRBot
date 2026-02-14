@@ -5,7 +5,7 @@ Assistant schemas for API requests and responses.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.common import Snowflake
 
@@ -39,8 +39,7 @@ class AssistantResponse(BaseModel):
     session_count: int
     added_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AssistantStatsResponse(BaseModel):
@@ -51,9 +50,9 @@ class AssistantStatsResponse(BaseModel):
     daily_stats: List[dict] = []
 
 
-
 class AssistantFull(BaseModel):
     """Complete assistant data from database."""
+
     pr_id: Snowflake
     nickname: Optional[str] = None
     role: str
@@ -67,12 +66,12 @@ class AssistantFull(BaseModel):
     assigned_to_name: Optional[str] = None
     total_spec_hours: float = 0.0
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DailyStatsUpdate(BaseModel):
     """Schema for manual daily stats update by admin."""
+
     date: str  # YYYY-MM-DD
     p0_seconds: Optional[int] = None
     p1_seconds: Optional[int] = None
@@ -82,9 +81,9 @@ class DailyStatsUpdate(BaseModel):
     total_points: Optional[float] = None
 
 
-
 class ManualSpecSession(BaseModel):
     """Schema for creating a manual spec session (admin feature)."""
+
     target_id: Optional[Snowflake] = None  # Streamer ID (optional)
     target_name: Optional[str] = None  # For display purposes
     target_type: str = "streamer"  # 'streamer' or 'event'
@@ -122,5 +121,3 @@ class DailyStatsResponse(BaseModel):
 class SessionCreatedResponse(BaseModel):
     pr_id: Snowflake
     duration_seconds: int
-
-

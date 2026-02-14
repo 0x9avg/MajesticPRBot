@@ -1,11 +1,13 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Annotated, List, Optional, Union
+
+from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from database import Database
     from services.broker import BrokerService
 
 from config import Config
+from dependencies import get_current_user
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -17,7 +19,6 @@ from schemas.streamer import (
     StreamerStatusUpdate,
     StreamerUpdate,
 )
-from dependencies import get_current_user
 
 router = APIRouter(prefix="/streamers", tags=["Streamers"])
 
@@ -158,7 +159,11 @@ async def create_streamer(
         # Emit verification event so Twitch Bot can resolve ID
         await broker.emit_streamer_verify(
             username,
-            {"priority": data.priority, "pr_slots": data.pr_slots, "added_by_id": data.added_by_id},
+            {
+                "priority": data.priority,
+                "pr_slots": data.pr_slots,
+                "added_by_id": data.added_by_id,
+            },
             trace_id=trace_id,
         )
 
@@ -201,22 +206,31 @@ async def update_streamer(
         if data.priority != streamer["priority"]:
             changes["priority"] = {"old": streamer["priority"], "new": data.priority}
             update_data["priority"] = data.priority
-    
+
     if data.pr_slots is not None:
         if data.pr_slots != streamer.get("pr_slots", 1):
-            changes["pr_slots"] = {"old": streamer.get("pr_slots", 1), "new": data.pr_slots}
+            changes["pr_slots"] = {
+                "old": streamer.get("pr_slots", 1),
+                "new": data.pr_slots,
+            }
             update_data["pr_slots"] = data.pr_slots
-            
+
     if data.is_pinned is not None:
         if data.is_pinned != streamer.get("is_pinned", False):
-            changes["is_pinned"] = {"old": streamer.get("is_pinned", False), "new": data.is_pinned}
+            changes["is_pinned"] = {
+                "old": streamer.get("is_pinned", False),
+                "new": data.is_pinned,
+            }
             update_data["is_pinned"] = data.is_pinned
 
     if data.stream_points_override is not None:
         # Handle cases where value might be None/float
         old_val = streamer.get("stream_points_override")
         if data.stream_points_override != old_val:
-            changes["stream_points_override"] = {"old": old_val, "new": data.stream_points_override}
+            changes["stream_points_override"] = {
+                "old": old_val,
+                "new": data.stream_points_override,
+            }
             update_data["stream_points_override"] = data.stream_points_override
 
     if update_data:
@@ -228,19 +242,18 @@ async def update_streamer(
             is_pinned=update_data.get("is_pinned"),
             stream_points_override=update_data.get("stream_points_override"),
         )
-        
+
         # Log to admin_logs
         if changes:
-             await db.log_admin_action(
+            await db.log_admin_action(
                 admin_name=user.get("nickname", user.get("username", "Unknown")),
                 action="update_streamer",
                 admin_role=user.get("role"),
                 target_type="streamer",
                 target_id=str(twitch_id),
                 details=changes,
-                ip_address=request.client.host
+                ip_address=request.client.host,
             )
-
 
     # Get updated streamer
     streamer = await db.get_streamer(twitch_id)

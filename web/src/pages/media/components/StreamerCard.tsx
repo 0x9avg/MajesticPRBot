@@ -3,15 +3,18 @@ import { useState } from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { MapPin, ExternalLink, Users, Settings } from 'lucide-react';
 import NotificationToast from '../../action-logs/components/NotificationToast';
+import type { OutletUserContext } from '../../../types/auth';
+import type { Streamer, StreamerAssignment } from '../../../types/domain';
+import { getApiErrorMessage } from '../../../types/api';
 
 interface StreamerCardProps {
-    streamer: any;
-    onSettingsClick?: (streamer: any) => void;
+    streamer: Streamer;
+    onSettingsClick?: (streamer: Streamer) => void;
 }
 
 const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
     const navigate = useNavigate();
-    const { user } = useOutletContext<any>() || {};
+    const { user } = useOutletContext<OutletUserContext>();
     const userRole = user?.role;
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -42,8 +45,8 @@ const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
                 // Reload page to refresh data
                 window.location.reload();
             } else {
-                const error = await response.json();
-                showNotification(error.detail || error.message || 'Не удалось закрепиться', 'error');
+                const error = await response.json().catch(() => ({} as unknown));
+                showNotification(getApiErrorMessage(error, 'Не удалось закрепиться'), 'error');
             }
         } catch (error) {
             console.error('Error claiming streamer:', error);
@@ -75,8 +78,8 @@ const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
             if (response.ok) {
                 window.location.reload();
             } else {
-                const error = await response.json();
-                showNotification(error.detail || error.message || 'Не удалось открепиться', 'error');
+                const error = await response.json().catch(() => ({} as unknown));
+                showNotification(getApiErrorMessage(error, 'Не удалось открепиться'), 'error');
             }
         } catch (error) {
             console.error('Error unclaiming streamer:', error);
@@ -139,7 +142,7 @@ const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
                         <div className="w-full relative flex items-center justify-center">
                             <div className="flex items-center gap-2 text-white/60">
                                 <div className="flex flex-wrap gap-2 justify-center">
-                                    {streamer.assignments.map((assignment: any) => (
+                                    {streamer.assignments.map((assignment: StreamerAssignment) => (
                                         <span
                                             key={assignment.pr_id}
                                             onClick={(e) => {
@@ -156,7 +159,7 @@ const StreamerCard = ({ streamer, onSettingsClick }: StreamerCardProps) => {
 
                             {/* Actions */}
                             <div className="absolute right-0 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 items-end">
-                                {streamer.assignments.some((a: any) => String(a.pr_id) === String(user?.discord_id)) ? (
+                                {streamer.assignments.some((assignment: StreamerAssignment) => String(assignment.pr_id) === String(user?.discord_id)) ? (
                                     <button
                                         onClick={handleUnclaimStreamer}
                                         className="px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-semibold hover:bg-red-500/20 transition-colors text-red-400 whitespace-nowrap w-full"

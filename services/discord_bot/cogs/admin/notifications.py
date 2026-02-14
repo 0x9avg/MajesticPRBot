@@ -14,7 +14,6 @@ import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
 
-
 # =============================================================================
 # Constants
 # =============================================================================
@@ -26,13 +25,7 @@ EVENT_TYPES = {
     "category_from_gta": "🚫 Уход с GTA 5",
 }
 
-# Default templates used when no custom template is set
-DEFAULT_TEMPLATES = {
-    "stream_online": "🟢 **{streamer_name}** начал стрим!",
-    "stream_offline": "🔴 **{streamer_name}** закончил стрим.",
-    "category_to_gta": "🎮 **{streamer_name}** сменил категорию на **GTA 5**!",
-    "category_from_gta": "🚫 **{streamer_name}** ушёл с GTA 5.",
-}
+
 
 
 # =============================================================================
@@ -101,7 +94,7 @@ class TemplateEditModal(disnake.ui.Modal):
             )
         except Exception as e:
             self.bot.logger.error(f"Template update error: {e}")
-            await interaction.edit_original_message(content="❌ Ошибка")
+            await interaction.edit_original_message(content=f"❌ Ошибка: {e}")
 
 
 # =============================================================================
@@ -203,9 +196,9 @@ class AdminNotifications(commands.Cog):
             )
             try:
                 await interaction.followup.send(
-                    "❌ Произошла ошибка обработки.", ephemeral=True
+                    f"❌ Произошла ошибка обработки: {e}", ephemeral=True
                 )
-            except:
+            except:  # noqa: E722
                 pass
 
     @commands.Cog.listener("on_dropdown")
@@ -221,19 +214,11 @@ class AdminNotifications(commands.Cog):
         try:
             event_type = interaction.values[0]
 
-            # Get current template (fallback to default if empty)
             try:
-                settings = await self.bot.api_client.get_guild_settings()
-                templates = (
-                    settings.get("notification_templates", {}) if settings else {}
-                )
-                current = templates.get(event_type) or DEFAULT_TEMPLATES.get(
-                    event_type, ""
-                )
+                current = await self.bot.api_client.get_notification_template(event_type)
             except Exception:
-                current = DEFAULT_TEMPLATES.get(event_type, "")
+                current = ""
 
-            # Open Modal
             await interaction.response.send_modal(
                 TemplateEditModal(self.bot, event_type, current)
             )
@@ -244,9 +229,9 @@ class AdminNotifications(commands.Cog):
             try:
                 if not interaction.response.is_done():
                     await interaction.response.send_message(
-                        "❌ Ошибка.", ephemeral=True
+                        f"❌ Ошибка: {e}", ephemeral=True
                     )
-            except:
+            except:  # noqa: E722
                 pass
 
 

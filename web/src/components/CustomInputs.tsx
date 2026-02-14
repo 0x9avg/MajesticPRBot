@@ -134,7 +134,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
         if (value && !isNaN(Date.parse(value))) {
             setViewDate(new Date(value));
         }
-    }, [isOpen]); // Only sync when opening
+    }, [isOpen, value]); // Sync selected value when picker is opened or value changes
 
     const months = [
         "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",

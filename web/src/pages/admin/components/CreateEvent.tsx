@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { CalendarPlus, Check, AlertCircle } from 'lucide-react';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import { getApiErrorMessage } from '../../../types/api';
 
 const CreateEvent = () => {
     const [priority, setPriority] = useState(0);
@@ -24,7 +25,8 @@ const CreateEvent = () => {
 
         try {
             const token = localStorage.getItem('access_token');
-            const user = JSON.parse(localStorage.getItem('user') || '{}');
+            const stored = localStorage.getItem('user');
+            const user = (stored ? JSON.parse(stored) : {}) as { discord_id?: string | number };
 
             // Combine date and time if provided
             let startTime = null;
@@ -49,10 +51,10 @@ const CreateEvent = () => {
                 })
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({} as unknown));
 
             if (!response.ok) {
-                throw new Error(data.detail || 'Ошибка при создании события');
+                throw new Error(getApiErrorMessage(data, 'Ошибка при создании события'));
             }
 
             setMessage({ type: 'success', text: 'Событие успешно создано' });
@@ -64,8 +66,8 @@ const CreateEvent = () => {
             setPriority(0);
             setPrSlots(1);
 
-        } catch (err: any) {
-            setMessage({ type: 'error', text: err.message || 'Произошла ошибка' });
+        } catch (err: unknown) {
+            setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Произошла ошибка' });
         } finally {
             setLoading(false);
         }

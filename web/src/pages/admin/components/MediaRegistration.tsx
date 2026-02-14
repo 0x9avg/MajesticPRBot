@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Radio, Check, AlertCircle } from 'lucide-react';
+import { getApiErrorMessage } from '../../../types/api';
 
 
 const MediaRegistration = () => {
@@ -43,16 +44,15 @@ const MediaRegistration = () => {
                 })
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({} as unknown));
 
             if (!response.ok) {
-                // Try to extract detail from FastAPI error
-                const errorText = data.detail || (data.errors && data.errors[0]?.message) || 'Ошибка при добавлении медиа';
-                throw new Error(errorText);
+                throw new Error(getApiErrorMessage(data, 'Ошибка при добавлении медиа'));
             }
 
+            const responseData = data as { data?: { username?: string } };
             if (response.status === 202) {
-                const username = data.data?.username || 'пользователя';
+                const username = responseData.data?.username || 'пользователя';
                 setMessage({ type: 'success', text: `Запрос на добавление ${username} отправлен` });
                 setUrlInput('');
             } else {
@@ -60,8 +60,8 @@ const MediaRegistration = () => {
                 setUrlInput('');
             }
 
-        } catch (err: any) {
-            setMessage({ type: 'error', text: err.message || 'Произошла ошибка' });
+        } catch (err: unknown) {
+            setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Произошла ошибка' });
         } finally {
             setLoading(false);
         }

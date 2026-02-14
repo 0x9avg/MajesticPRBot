@@ -238,3 +238,50 @@ class BrokerConsumer:
                     f"Processing streamer.removed: {data.get('streamer_name')} ({streamer_id})"
                 )
                 await self.bot.remove_subscription(streamer_id)
+
+        elif key == "streamer.updated":
+            streamer_id = data.get("streamer_id")
+            if not streamer_id:
+                self.logger.warning("streamer.updated event missing streamer_id")
+                return
+
+            self.logger.info(
+                f"Processing streamer.updated: {data.get('streamer_name')} ({streamer_id})"
+            )
+
+            # Keep EventSub subscriptions in sync for this streamer.
+            try:
+                await self.bot.remove_subscription(streamer_id)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to remove subscriptions for updated streamer {streamer_id}: {e}"
+                )
+
+            try:
+                await self.bot.add_notification(streamer_id)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to re-subscribe updated streamer {streamer_id}: {e}"
+                )
+
+            # Refresh online status snapshot safely (no hard failure for consumer).
+            try:
+                stream_info = await self.bot.get_stream_info(streamer_id)
+                is_online = stream_info.get("is_online", False)
+                await self.bot.api.update_streamer_status(
+                    streamer_id,
+                    is_online,
+                    started_at=(
+                        str(stream_info.get("started_at"))
+                        if stream_info.get("started_at")
+                        else None
+                    ),
+                    game_id=stream_info.get("game_id"),
+                    game_name=stream_info.get("game_name"),
+                    stream_title=stream_info.get("title"),
+                    stream_thumbnail_url=stream_info.get("thumbnail_url"),
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Status refresh failed for updated streamer {streamer_id}: {e}"
+                )

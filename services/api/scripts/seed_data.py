@@ -1,12 +1,12 @@
-"""
-Unified seed script — creates all test data in one run.
+"""Unified seed script for the current DB architecture.
 
-Combines: bulk_add_streamers.py, create_admin_user.py, generate_test_pr.py
-
-Data sources:
-  - Streamers: real Twitch usernames → resolved to real Twitch IDs via Helix API
-  - Admins: 3 real admin accounts (developer, developer2, EpikeS)
-  - PRs: 16 test assistants with random assignments and historical sessions
+What it seeds:
+  - Streamers (resolved from Twitch API)
+  - Web users + assistants
+  - Events
+  - Active + historical spec_sessions
+  - Assistant points/sanctions/warnings snapshots
+  - Compact universal admin_logs entries
 
 Usage:
   cd services/api
@@ -21,6 +21,7 @@ import os
 import random
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 import aiohttp
 
@@ -120,6 +121,30 @@ EVENTS = [
 ]
 
 
+PRIORITY_RATES = {0: 0.25, 1: 0.4, 2: 0.5, 3: 0.6}
+
+
+def make_log_details(
+    summary: str,
+    *,
+    changes: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    details: Dict[str, Any] = {"summary": summary}
+    if changes:
+        details["changes"] = changes
+    if payload:
+        details["payload"] = payload
+    if meta:
+        details["meta"] = meta
+    return details
+
+
+def random_rate_for_priority(priority: int) -> float:
+    return PRIORITY_RATES.get(min(max(priority, 0), 3), 0.25)
+
+
 
 # ─── Twitch API helpers ────────────────────────────────────────────────
 
@@ -203,7 +228,16 @@ async def seed():
                 if clean:
                     print("🗑️  Очистка таблиц...")
                     await cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-                    for table in ["admin_logs", "spec_sessions", "assistants", "streamers", "events", "web_auth"]:
+                    for table in [
+                        "admin_logs",
+                        "auth_logs",
+                        "sessions",
+                        "spec_sessions",
+                        "events",
+                        "assistants",
+                        "web_auth",
+                        "streamers",
+                    ]:
                         await cursor.execute(f"TRUNCATE TABLE {table}")
                     await cursor.execute("SET FOREIGN_KEY_CHECKS=1")
                     await conn.commit()
@@ -252,6 +286,10 @@ async def seed():
                     streamer_rows.append({"id": twitch_id, "name": display_name, "online": is_online, "priority": priority})
 
                 await conn.commit()
+                if not streamer_rows:
+                    raise RuntimeError(
+                        "Не удалось получить ни одного стримера с Twitch API. Seed остановлен."
+                    )
                 print()
 
                 # ── Step 2: Admin users ────────────────────────────
@@ -273,9 +311,12 @@ async def seed():
                     # assistants profile
                     await cursor.execute(
                         """
-                        INSERT INTO assistants (pr_id, nickname, role, added_at)
-                        VALUES (%s, %s, %s, NOW())
-                        ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), role = VALUES(role)
+                        INSERT INTO assistants (pr_id, nickname, role, appointed_at)
+                        VALUES (%s, %s, %s, UTC_TIMESTAMP())
+                        ON DUPLICATE KEY UPDATE
+                            nickname = VALUES(nickname),
+                            role = VALUES(role),
+                            appointed_at = VALUES(appointed_at)
                         """,
                         (user["discord_id"], user["nickname"], user["role"]),
                     )
@@ -291,17 +332,20 @@ async def seed():
                 all_pr_ids = list(admin_pr_ids)  # admins are also potential PRs
                 for pr in PR_ASSISTANTS:
                     exp_days = random.randint(10, 300)
-                    added_at = (datetime.now(timezone.utc) - timedelta(days=exp_days)).strftime(
+                    appointed_at = (datetime.now(timezone.utc) - timedelta(days=exp_days)).strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
 
                     await cursor.execute(
                         """
-                        INSERT INTO assistants (pr_id, nickname, role, added_at)
+                        INSERT INTO assistants (pr_id, nickname, role, appointed_at)
                         VALUES (%s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), role = VALUES(role)
+                        ON DUPLICATE KEY UPDATE
+                            nickname = VALUES(nickname),
+                            role = VALUES(role),
+                            appointed_at = VALUES(appointed_at)
                         """,
-                        (pr["discord_id"], pr["nickname"], pr["role"], added_at),
+                        (pr["discord_id"], pr["nickname"], pr["role"], appointed_at),
                     )
                     all_pr_ids.append(pr["discord_id"])
                     print(f"   ✅ {pr['nickname']} ({pr['role']}, {exp_days}d exp)")
@@ -365,7 +409,7 @@ async def seed():
                                 random.random() < 0.2,  # 20% probation
                                 started_at,
                                 streamer["priority"],
-                                [0.25, 0.4, 0.5, 0.6][min(streamer["priority"], 3)],
+                                random_rate_for_priority(streamer["priority"]),
                             ),
                         )
                         print(f"   🎮 PR {pr_id} → streamer {streamer['name']}")
@@ -393,7 +437,7 @@ async def seed():
                                  priority_auto, rate_auto)
                             VALUES (%s, 'event', %s, FALSE, %s, %s, %s)
                             """,
-                            (pr_id, event["id"], started_at, 0, 0.25),
+                            (pr_id, event["id"], started_at, 0, random_rate_for_priority(0)),
                         )
                         print(f"   📅 PR {pr_id} → event {event['name']}")
 
@@ -417,33 +461,37 @@ async def seed():
                         end = start + timedelta(minutes=duration_min)
 
                         # Pick a random streamer or event
-                        if random.random() < 0.8:
+                        if streamer_rows and (not event_rows or random.random() < 0.8):
                             target_type = "streamer"
                             target = random.choice(streamer_rows)
                             target_id = target["id"]
                             priority = target["priority"]
-                        else:
+                        elif event_rows:
                             target_type = "event"
                             target = random.choice(event_rows)
                             target_id = target["id"]
                             priority = 0
+                        else:
+                            continue
 
-                        rate = [0.25, 0.4, 0.5, 0.6][min(priority, 3)]
+                        rate = random_rate_for_priority(priority)
+                        duration_seconds = int((end - start).total_seconds())
+                        credited_points = round((duration_seconds / 3600.0) * rate, 4)
 
                         await cursor.execute(
                             """
                             INSERT INTO spec_sessions 
                                 (pr_id, target_type, target_id, is_probation,
                                  started_at, ended_at, end_reason,
-                                 priority_auto, rate_auto)
-                            VALUES (%s, %s, %s, %s, %s, %s, 'completed', %s, %s)
+                                 priority_auto, rate_auto, credited_points)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'completed', %s, %s, %s)
                             """,
                             (
                                 pr_id, target_type, target_id,
                                 random.random() < 0.1,
                                 start.strftime("%Y-%m-%d %H:%M:%S"),
                                 end.strftime("%Y-%m-%d %H:%M:%S"),
-                                priority, rate,
+                                priority, rate, credited_points,
                             ),
                         )
                         historical_count += 1
@@ -451,134 +499,345 @@ async def seed():
                 await conn.commit()
                 print(f"   ✅ {historical_count} исторических сессий создано\n")
 
-                # ── Step 7: Admin logs (lifecycle simulation) ───────
-                print("📝  Создание логов администрирования...")
-                log_count = 0
-                admin_pool = [(u["nickname"], u["role"]) for u in ADMIN_USERS]
-                pr_nicknames = {p["discord_id"]: p["nickname"] for p in PR_ASSISTANTS}
-                ip_pool = ["192.168.1.10", "10.0.0.5", "172.16.0.100", None]
+                # ── Step 6.5: Reconcile points + seed sanctions/warnings ────
+                print("🧮  Синхронизация баллов ассистентов...")
+                await cursor.execute(
+                    """
+                    UPDATE spec_sessions
+                    SET credited_points = ROUND(
+                        CASE
+                            WHEN ended_at IS NULL OR deleted_at IS NOT NULL THEN 0
+                            ELSE (COALESCE(duration_seconds, 0) / 3600.0) * COALESCE(applied_hourly_rate, 0)
+                        END,
+                        4
+                    )
+                    """
+                )
+                await cursor.execute(
+                    """
+                    UPDATE assistants a
+                    LEFT JOIN (
+                        SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
+                        FROM spec_sessions
+                        GROUP BY pr_id
+                    ) s ON s.pr_id = a.pr_id
+                    SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
+                    """
+                )
 
-                # Build a timeline of events over last 30 days
-                log_entries = []
-                now = datetime.now(timezone.utc)
+                assistant_adjustments: dict[int, dict[str, Any]] = {}
+                seeded_sanctions = 0
+                for pr_id in all_pr_ids:
+                    manual_adjustment = (
+                        round(random.uniform(-2.0, 5.0), 4)
+                        if random.random() < 0.45
+                        else 0.0
+                    )
+                    penalty_points = (
+                        round(random.uniform(0.5, 4.5), 4)
+                        if random.random() < 0.25
+                        else 0.0
+                    )
+                    penalty_percent = (
+                        float(random.choice([5, 10, 15, 20]))
+                        if random.random() < 0.30
+                        else 0.0
+                    )
+                    warnings_units = random.choice([0, 0, 1, 2, 3, 4, 5])
 
-                # --- Phase 1: System setup (25-30 days ago) ---
-                for admin in ADMIN_USERS:
-                    ts = now - timedelta(days=random.randint(28, 30), hours=random.randint(0, 12))
-                    log_entries.append((
-                        admin["nickname"], admin["role"], "reg_user",
-                        "user", str(admin["discord_id"]),
-                        json.dumps({"username": admin["username"], "role": admin["role"]}),
-                        "192.168.1.10", ts,
-                    ))
-
-                # --- Phase 2: Streamer registrations (20-28 days ago) ---
-                for s in streamer_rows:
-                    admin_name, admin_role = random.choice(admin_pool)
-                    ts = now - timedelta(days=random.randint(20, 28), hours=random.randint(0, 23))
-                    log_entries.append((
-                        admin_name, admin_role, "add_streamer",
-                        "streamer", str(s["id"]),
-                        json.dumps({"streamer_name": s["name"], "priority": s["priority"]}),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 3: Priority updates (10-20 days ago) ---
-                for s in random.sample(streamer_rows, min(5, len(streamer_rows))):
-                    admin_name, admin_role = random.choice(admin_pool)
-                    old_p = s["priority"]
-                    new_p = random.choice([p for p in [0, 1, 2, 3] if p != old_p])
-                    ts = now - timedelta(days=random.randint(10, 20), hours=random.randint(0, 23))
-                    log_entries.append((
-                        admin_name, admin_role, "update_streamer",
-                        "streamer", str(s["id"]),
-                        json.dumps({"priority": {"old": old_p, "new": new_p}}),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 4: Event creation (5-15 days ago) ---
-                for evt in event_rows:
-                    admin_name, admin_role = random.choice(admin_pool)
-                    ts = now - timedelta(days=random.randint(5, 15), hours=random.randint(0, 12))
-                    log_entries.append((
-                        admin_name, admin_role, "create_event",
-                        "event", str(evt["id"]),
-                        json.dumps({"name": evt["name"]}),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 5: PR employee additions (15-25 days ago) ---
-                for pr in PR_ASSISTANTS:
-                    admin_name, admin_role = random.choice(admin_pool)
-                    ts = now - timedelta(days=random.randint(15, 25), hours=random.randint(0, 23))
-                    log_entries.append((
-                        admin_name, admin_role, "create_assistant",
-                        "assistant", str(pr["discord_id"]),
-                        json.dumps({"nickname": pr["nickname"], "role": pr["role"]}),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 6: Session claims/unclaims (1-15 days ago) ---
-                for _ in range(random.randint(15, 25)):
-                    admin_name, admin_role = random.choice(admin_pool)
-                    s = random.choice(streamer_rows)
-                    pr = random.choice(PR_ASSISTANTS)
-                    action = random.choice(["assign_pr", "unassign_pr"])
-                    ts = now - timedelta(days=random.randint(1, 15), hours=random.randint(0, 23))
-                    details = {
-                        "streamer_name": s["name"],
-                        "pr_nickname": pr["nickname"],
-                    }
-                    if action == "unassign_pr":
-                        details["reason"] = random.choice(["manual", "stream_offline", "category_from_gta"])
-                    log_entries.append((
-                        admin_name, admin_role, action,
-                        "streamer", str(s["id"]),
-                        json.dumps(details),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 7: Manual sessions (1-10 days ago) ---
-                for _ in range(random.randint(3, 6)):
-                    admin_name, admin_role = random.choice(admin_pool)
-                    pr = random.choice(PR_ASSISTANTS)
-                    s = random.choice(streamer_rows)
-                    ts = now - timedelta(days=random.randint(1, 10), hours=random.randint(0, 12))
-                    dur_min = random.randint(30, 180)
-                    log_entries.append((
-                        admin_name, admin_role, "create_manual_session",
-                        "assistant", str(pr["discord_id"]),
-                        json.dumps({
-                            "pr_nickname": pr["nickname"],
-                            "streamer_name": s["name"],
-                            "duration_minutes": dur_min,
-                        }),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # --- Phase 8: Event endings (0-3 days ago) ---
-                inactive_events = [e for e in event_rows if not e["active"]]
-                for evt in inactive_events:
-                    admin_name, admin_role = random.choice(admin_pool)
-                    ts = now - timedelta(days=random.randint(0, 3), hours=random.randint(0, 12))
-                    log_entries.append((
-                        admin_name, admin_role, "end_event",
-                        "event", str(evt["id"]),
-                        json.dumps({"name": evt["name"]}),
-                        random.choice(ip_pool), ts,
-                    ))
-
-                # Sort by timestamp and insert
-                log_entries.sort(key=lambda x: x[7])
-                for entry in log_entries:
-                    admin_name, admin_role, action, target_type, target_id, details, ip, ts = entry
                     await cursor.execute(
                         """
-                        INSERT INTO admin_logs 
-                            (admin_name, admin_role, action, target_type, target_id, details, ip_address, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        UPDATE assistants
+                        SET manual_points_adjustment = %s,
+                            penalty_points = %s,
+                            penalty_percent = %s,
+                            warnings_units = %s
+                        WHERE pr_id = %s
                         """,
-                        (admin_name, admin_role, action, target_type, target_id, details, ip, ts.strftime("%Y-%m-%d %H:%M:%S")),
+                        (
+                            manual_adjustment,
+                            penalty_points,
+                            penalty_percent,
+                            warnings_units,
+                            pr_id,
+                        ),
+                    )
+                    assistant_adjustments[pr_id] = {
+                        "manual_points_adjustment": manual_adjustment,
+                        "penalty_points": penalty_points,
+                        "penalty_percent": penalty_percent,
+                        "warnings_units": warnings_units,
+                    }
+                    if penalty_points > 0 or penalty_percent > 0 or warnings_units > 0:
+                        seeded_sanctions += 1
+
+                await conn.commit()
+                print(f"   ✅ Синхронизированы auto/manual баллы")
+                print(f"   ✅ Санкции/выговоры выставлены для {seeded_sanctions} ассистентов\n")
+
+                # ── Step 7: Admin logs (compact universal schema) ───────────
+                print("📝  Создание логов администрирования...")
+                log_count = 0
+                now = datetime.now(timezone.utc)
+                ip_pool = ["192.168.1.10", "10.0.0.5", "172.16.0.100", None]
+                admin_pool = [
+                    {
+                        "name": user["nickname"],
+                        "role": user["role"],
+                        "actor_id": user["discord_id"],
+                    }
+                    for user in ADMIN_USERS
+                ]
+
+                log_entries: list[dict[str, Any]] = []
+
+                # user.create
+                for admin in ADMIN_USERS:
+                    ts = now - timedelta(
+                        days=random.randint(28, 30), hours=random.randint(0, 12)
+                    )
+                    ip = random.choice(ip_pool)
+                    log_entries.append(
+                        {
+                            "actor_name": admin["nickname"],
+                            "actor_role": admin["role"],
+                            "action": "user.create",
+                            "target_type": "user",
+                            "target_id": str(admin["discord_id"]),
+                            "created_at": ts,
+                            "details": make_log_details(
+                                f"Создан пользователь {admin['username']}",
+                                payload={
+                                    "username": admin["username"],
+                                    "nickname": admin["nickname"],
+                                    "discord_id": admin["discord_id"],
+                                    "role": admin["role"],
+                                },
+                                meta={"actor_id": admin["discord_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                # streamer.add
+                for streamer in streamer_rows:
+                    actor = random.choice(admin_pool)
+                    ip = random.choice(ip_pool)
+                    ts = now - timedelta(
+                        days=random.randint(20, 28), hours=random.randint(0, 23)
+                    )
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": "streamer.add",
+                            "target_type": "streamer",
+                            "target_id": str(streamer["id"]),
+                            "created_at": ts,
+                            "details": make_log_details(
+                                f"Добавлен стример {streamer['name']}",
+                                payload={
+                                    "streamer_name": streamer["name"],
+                                    "priority": streamer["priority"],
+                                },
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                # streamer.update + event.create + event.update
+                for streamer in random.sample(streamer_rows, min(6, len(streamer_rows))):
+                    actor = random.choice(admin_pool)
+                    ip = random.choice(ip_pool)
+                    old_priority = streamer["priority"]
+                    new_priority = random.choice([p for p in [0, 1, 2, 3] if p != old_priority])
+                    ts = now - timedelta(
+                        days=random.randint(8, 18), hours=random.randint(0, 23)
+                    )
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": "streamer.update",
+                            "target_type": "streamer",
+                            "target_id": str(streamer["id"]),
+                            "created_at": ts,
+                            "details": make_log_details(
+                                f"Изменен приоритет стримера {streamer['name']}",
+                                changes={
+                                    "before": {"priority": old_priority},
+                                    "after": {"priority": new_priority},
+                                    "delta": {"priority": new_priority - old_priority},
+                                    "source": "manual_update",
+                                },
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                for event in event_rows:
+                    actor = random.choice(admin_pool)
+                    ip = random.choice(ip_pool)
+                    ts_create = now - timedelta(
+                        days=random.randint(5, 15), hours=random.randint(0, 12)
+                    )
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": "event.create",
+                            "target_type": "event",
+                            "target_id": str(event["id"]),
+                            "created_at": ts_create,
+                            "details": make_log_details(
+                                f"Создано событие {event['name']}",
+                                payload={"name": event["name"]},
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                    ts_update = ts_create + timedelta(days=random.randint(1, 3))
+                    new_priority = random.randint(0, 3)
+                    new_slots = random.randint(1, 7)
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": "event.update",
+                            "target_type": "event",
+                            "target_id": str(event["id"]),
+                            "created_at": ts_update,
+                            "details": make_log_details(
+                                f"Обновлено событие {event['name']}",
+                                changes={
+                                    "before": {
+                                        "priority": random.randint(0, 3),
+                                        "pr_slots": random.randint(1, 5),
+                                    },
+                                    "after": {"priority": new_priority, "pr_slots": new_slots},
+                                    "delta": {"priority": new_priority, "pr_slots": new_slots},
+                                    "source": "event_edit",
+                                },
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                # assistant logs for time/points/sanctions
+                for pr in PR_ASSISTANTS:
+                    pr_id = pr["discord_id"]
+                    adjustments = assistant_adjustments.get(pr_id, {})
+                    actor = random.choice(admin_pool)
+                    ip = random.choice(ip_pool)
+                    ts = now - timedelta(
+                        days=random.randint(1, 10), hours=random.randint(0, 23)
+                    )
+                    delta_minutes = random.randint(30, 180)
+                    action = random.choice(
+                        ["assistant.spec_time.add", "assistant.spec_time.subtract"]
+                    )
+                    signed_delta = delta_minutes if action.endswith(".add") else -delta_minutes
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": action,
+                            "target_type": "assistant",
+                            "target_id": str(pr_id),
+                            "created_at": ts,
+                            "details": make_log_details(
+                                f"{'Добавлено' if signed_delta > 0 else 'Убрано'} время спека для {pr['nickname']}",
+                                changes={
+                                    "delta": {"duration_minutes": signed_delta},
+                                    "source": "session_edit",
+                                },
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                    manual_adj = float(adjustments.get("manual_points_adjustment", 0.0))
+                    if manual_adj != 0.0:
+                        ts_points = ts + timedelta(hours=1)
+                        log_entries.append(
+                            {
+                                "actor_name": actor["name"],
+                                "actor_role": actor["role"],
+                                "action": "assistant.spec_points.adjust.permanent",
+                                "target_type": "assistant",
+                                "target_id": str(pr_id),
+                                "created_at": ts_points,
+                                "details": make_log_details(
+                                    f"Ручная корректировка баллов {pr['nickname']}",
+                                    changes={
+                                        "delta": {"manual_points_adjustment": manual_adj},
+                                        "reason": random.choice(
+                                            [
+                                                "manual_correction",
+                                                "retroactive_fix",
+                                                "quality_bonus",
+                                            ]
+                                        ),
+                                        "source": "manual_adjust",
+                                    },
+                                    meta={"actor_id": actor["actor_id"], "ip": ip},
+                                ),
+                            }
+                        )
+
+                # Additional operational actions for new action taxonomy
+                for action in [
+                    "system.maintenance.enable",
+                    "system.maintenance.disable",
+                    "rbac.matrix.update",
+                    "event.request.approve",
+                ]:
+                    actor = random.choice(admin_pool)
+                    ip = random.choice(ip_pool)
+                    ts = now - timedelta(days=random.randint(0, 7), hours=random.randint(0, 23))
+                    if action.startswith("system."):
+                        target_type = "system"
+                        target_id = "global"
+                    elif action.startswith("rbac."):
+                        target_type = "rbac"
+                        target_id = "global"
+                    else:
+                        target_type = "event"
+                        target_id = str(random.choice(event_rows)["id"]) if event_rows else "global"
+                    log_entries.append(
+                        {
+                            "actor_name": actor["name"],
+                            "actor_role": actor["role"],
+                            "action": action,
+                            "target_type": target_type,
+                            "target_id": target_id,
+                            "created_at": ts,
+                            "details": make_log_details(
+                                f"Операция {action}",
+                                payload={"action": action},
+                                meta={"actor_id": actor["actor_id"], "ip": ip},
+                            ),
+                        }
+                    )
+
+                # Sort and insert
+                log_entries.sort(key=lambda item: item["created_at"])
+                for entry in log_entries:
+                    await cursor.execute(
+                        """
+                        INSERT INTO admin_logs
+                            (actor_name, actor_role, action, target_type, target_id, details, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            entry["actor_name"],
+                            entry["actor_role"],
+                            entry["action"],
+                            entry["target_type"],
+                            entry["target_id"],
+                            json.dumps(entry["details"], ensure_ascii=False, default=str),
+                            entry["created_at"].strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
                     )
                     log_count += 1
 

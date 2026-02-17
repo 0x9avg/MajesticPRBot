@@ -12,13 +12,17 @@ def user_payload(
     nickname: str = "Test User",
     role: str = "employee",
     discord_id: int = 1001,
+    appointed_at: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "username": username,
         "nickname": nickname,
         "role": role,
         "discord_id": discord_id,
     }
+    if appointed_at is not None:
+        payload["appointed_at"] = appointed_at
+    return payload
 
 
 async def post_create_user(app, payload: dict):
@@ -96,6 +100,17 @@ async def test_user_without_register_permission_gets_403(app, set_current_user):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Недостаточно прав для регистрации пользователей"
+
+
+async def test_non_admin_role_cannot_access_admin_users_endpoint(app, set_current_user):
+    set_current_user(
+        role="employee", permissions={"can_register_users": True}, nickname="Employee"
+    )
+    payload = user_payload(username="blocked_by_role", role="employee", discord_id=3002)
+    response = await post_create_user(app, payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Недостаточно прав для доступа к админ-панели"
 
 
 async def test_duplicate_username_returns_400(app, fake_db, set_current_user):
@@ -185,4 +200,29 @@ async def test_success_case_writes_admin_log(app, fake_db, set_current_user):
     assert "password" in body["data"]
 
     assert len(fake_db.logged_actions) == 1
-    assert fake_db.logged_actions[0]["action"] == "reg_user"
+    assert fake_db.logged_actions[0]["action"] == "user.create"
+
+
+async def test_create_user_with_appointed_at(
+    app, fake_db, set_current_user
+):
+    set_current_user(
+        role="manager", permissions={"can_register_users": True}, nickname="Boss"
+    )
+    response = await post_create_user(
+        app,
+        user_payload(
+            username="appointed_user",
+            nickname="Appointed User",
+            role="employee",
+            discord_id=9201,
+            appointed_at="2026-01-05",
+        ),
+    )
+
+    assert response.status_code == 200
+    created = fake_db.assistants_by_id[9201]
+    assert created["appointed_at"].strftime("%Y-%m-%d") == "2026-01-05"
+    assert len(fake_db.logged_actions) == 1
+    payload = fake_db.logged_actions[0].get("details", {}).get("payload", {})
+    assert payload.get("appointed_at") == "2026-01-05"

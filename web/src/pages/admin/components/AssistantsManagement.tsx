@@ -1,0 +1,995 @@
+import { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, Check, Coins, RefreshCw, Shield, Timer, Wrench } from 'lucide-react';
+import { CustomSelect } from '../../../components/CustomInputs';
+import type { Assistant, Event, Streamer } from '../../../types/domain';
+import { unwrapApiData } from '../../../types/api';
+
+interface AssistantSessionRecord {
+    id: number;
+    pr_id: number | string;
+    target_type?: string | null;
+    target_id?: number | string | null;
+    target_name?: string | null;
+    started_at: string;
+    ended_at?: string | null;
+    duration_seconds?: number | null;
+    end_reason?: string | null;
+    is_probation?: boolean;
+    priority_auto?: number | null;
+    priority_override?: number | null;
+    rate_auto?: number | null;
+    rate_override?: number | null;
+    credited_points?: number | null;
+    session_admin_comment?: string | null;
+    deleted_at?: string | null;
+    delete_reason?: string | null;
+}
+
+interface SelectOption {
+    value: string;
+    label: string;
+}
+
+const formatDateTime = (value?: string | null) => {
+    if (!value) return '—';
+    return new Date(value).toLocaleString('ru-RU', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+};
+
+const toNumberOrUndefined = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const toLocalDateTimeInput = (isoValue?: string | null) => {
+    if (!isoValue) return '';
+    const dt = new Date(isoValue);
+    if (Number.isNaN(dt.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+};
+
+const parseLocalDateTimeToIso = (localValue: string) => {
+    const dt = new Date(localValue);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt.toISOString();
+};
+
+const getDefaultManualWindow = () => {
+    const end = new Date();
+    end.setSeconds(0, 0);
+    const start = new Date(end.getTime() - 60 * 60 * 1000);
+    return {
+        started_at: toLocalDateTimeInput(start.toISOString()),
+        ended_at: toLocalDateTimeInput(end.toISOString()),
+    };
+};
+
+const makeStreamerOption = (streamer: Streamer): SelectOption => {
+    const status = streamer.is_online ? 'онлайн' : 'оффлайн';
+    return {
+        value: String(streamer.streamer_id),
+        label: `${streamer.streamer_name} · ID ${streamer.streamer_id} · ${status}`,
+    };
+};
+
+const makeEventOption = (event: Event): SelectOption => {
+    const status = event.is_active ? 'активно' : 'неактивно';
+    return {
+        value: String(event.id),
+        label: `${event.name} · ID ${event.id} · ${status}`,
+    };
+};
+
+const ensureOptionExists = (
+    options: SelectOption[],
+    value?: string,
+    prefix = 'ID',
+): SelectOption[] => {
+    if (!value) return options;
+    if (options.some((option) => option.value === value)) return options;
+    return [{ value, label: `${prefix} ${value} (не найден)` }, ...options];
+};
+
+const AssistantsManagement = () => {
+    const [assistants, setAssistants] = useState<Assistant[]>([]);
+    const [selectedPrId, setSelectedPrId] = useState<string | null>(null);
+    const [selectedAssistant, setSelectedAssistant] = useState<Assistant | null>(null);
+    const [sessions, setSessions] = useState<AssistantSessionRecord[]>([]);
+    const [streamerOptions, setStreamerOptions] = useState<SelectOption[]>([]);
+    const [eventOptions, setEventOptions] = useState<SelectOption[]>([]);
+    const [streamerNameById, setStreamerNameById] = useState<Record<string, string>>({});
+    const [eventNameById, setEventNameById] = useState<Record<string, string>>({});
+    const [optionsLoading, setOptionsLoading] = useState(false);
+    const [optionsError, setOptionsError] = useState<string | null>(null);
+    const [search, setSearch] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
+    const [sessionEdit, setSessionEdit] = useState({
+        target_type: 'streamer',
+        target_id: '',
+        started_at: '',
+        ended_at: '',
+        session_admin_comment: '',
+        priority_override: '',
+        rate_override: '',
+        reason: '',
+    });
+
+    const [pointsForm, setPointsForm] = useState({ delta: '', reason: '' });
+    const [sanctionsForm, setSanctionsForm] = useState({ penalty_points: '', penalty_percent: '', reason: '' });
+    const [warningsForm, setWarningsForm] = useState({ oral_delta: '0', strict_delta: '0', reason: '' });
+    const manualWindow = getDefaultManualWindow();
+    const [manualSessionForm, setManualSessionForm] = useState({
+        target_type: 'streamer',
+        target_id: '',
+        started_at: manualWindow.started_at,
+        ended_at: manualWindow.ended_at,
+        is_probation: false,
+        priority: '0',
+        session_admin_comment: '',
+    });
+
+    const getAccessToken = () => localStorage.getItem('access_token');
+
+    const filteredAssistants = useMemo(() => {
+        const query = search.trim().toLowerCase();
+        if (!query) return assistants;
+        return assistants.filter((assistant) =>
+            assistant.nickname.toLowerCase().includes(query)
+            || String(assistant.pr_id).includes(query)
+        );
+    }, [assistants, search]);
+
+    const canUseStreamerOrEventSelectors = !optionsLoading && !optionsError;
+
+    const manualTargetOptions = useMemo(() => {
+        const baseOptions = manualSessionForm.target_type === 'event' ? eventOptions : streamerOptions;
+        const prefix = manualSessionForm.target_type === 'event' ? 'Событие ID' : 'Стример ID';
+        return ensureOptionExists(baseOptions, manualSessionForm.target_id || undefined, prefix);
+    }, [manualSessionForm.target_type, manualSessionForm.target_id, eventOptions, streamerOptions]);
+
+    const editTargetOptions = useMemo(() => {
+        const baseOptions = sessionEdit.target_type === 'event' ? eventOptions : streamerOptions;
+        const prefix = sessionEdit.target_type === 'event' ? 'Событие ID' : 'Стример ID';
+        return ensureOptionExists(baseOptions, sessionEdit.target_id || undefined, prefix);
+    }, [sessionEdit.target_type, sessionEdit.target_id, eventOptions, streamerOptions]);
+
+    const fetchAssistants = async () => {
+        const response = await fetch('/api/assistants');
+        if (!response.ok) throw new Error('Не удалось загрузить ассистентов');
+        const json = await response.json() as unknown;
+        const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
+        const normalized = Array.isArray(data) ? data : data.assistants;
+        const list = Array.isArray(normalized) ? normalized : [];
+        setAssistants(list);
+        if (list.length > 0) {
+            setSelectedPrId((prev) => prev ?? String(list[0].pr_id));
+        }
+    };
+
+    const fetchSessionTargetOptions = async () => {
+        setOptionsLoading(true);
+        setOptionsError(null);
+        try {
+            const [streamersResponse, eventsResponse] = await Promise.all([
+                fetch('/api/streamers'),
+                fetch('/api/events'),
+            ]);
+
+            if (!streamersResponse.ok || !eventsResponse.ok) {
+                throw new Error('Не удалось загрузить списки стримеров/событий');
+            }
+
+            const streamersJson = await streamersResponse.json() as unknown;
+            const eventsJson = await eventsResponse.json() as unknown;
+
+            const streamersData = unwrapApiData<{ streamers?: Streamer[] } | Streamer[]>(streamersJson);
+            const eventsData = unwrapApiData<Event[] | { events: Event[] }>(eventsJson);
+
+            const rawStreamers = Array.isArray(streamersData)
+                ? streamersData
+                : (streamersData.streamers || []);
+            const rawEvents = Array.isArray(eventsData)
+                ? eventsData
+                : ((eventsData && 'events' in eventsData) ? eventsData.events : []);
+
+            const sortedStreamers = [...rawStreamers].sort((a, b) => {
+                const onlineCmp = Number(Boolean(b.is_online)) - Number(Boolean(a.is_online));
+                if (onlineCmp !== 0) return onlineCmp;
+                return (a.streamer_name || '').localeCompare(b.streamer_name || '', 'ru');
+            });
+            const sortedEvents = [...rawEvents].sort((a, b) => {
+                const activeCmp = Number(Boolean(b.is_active)) - Number(Boolean(a.is_active));
+                if (activeCmp !== 0) return activeCmp;
+                return (a.name || '').localeCompare(b.name || '', 'ru');
+            });
+
+            const nextStreamerNameById: Record<string, string> = {};
+            const nextEventNameById: Record<string, string> = {};
+            sortedStreamers.forEach((streamer) => {
+                nextStreamerNameById[String(streamer.streamer_id)] = streamer.streamer_name;
+            });
+            sortedEvents.forEach((event) => {
+                nextEventNameById[String(event.id)] = event.name;
+            });
+
+            setStreamerNameById(nextStreamerNameById);
+            setEventNameById(nextEventNameById);
+            setStreamerOptions(sortedStreamers.map(makeStreamerOption));
+            setEventOptions(sortedEvents.map(makeEventOption));
+        } catch (error: unknown) {
+            setOptionsError(error instanceof Error ? error.message : 'Не удалось загрузить списки стримеров/событий');
+        } finally {
+            setOptionsLoading(false);
+        }
+    };
+
+    const fetchAssistantDetail = async (prId: string) => {
+        const response = await fetch(`/api/assistants/${prId}`);
+        if (!response.ok) throw new Error('Не удалось загрузить профиль ассистента');
+        const json = await response.json() as unknown;
+        const data = unwrapApiData<Assistant>(json);
+        setSelectedAssistant(data);
+    };
+
+    const fetchAssistantSessions = async (prId: string) => {
+        const token = getAccessToken();
+        if (!token) throw new Error('Требуется авторизация');
+
+        const response = await fetch(`/api/assistants/${prId}/sessions?limit=50`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (response.ok) {
+            const json = await response.json() as unknown;
+            const data = unwrapApiData<AssistantSessionRecord[]>(json);
+            setSessions(Array.isArray(data) ? data : []);
+            return;
+        }
+
+        // Fallback: if auth header is stripped somewhere in the chain,
+        // still show read-only streamer sessions from public spec endpoint.
+        if (response.status === 401 || response.status === 403) {
+            const fallback = await fetch(`/api/spec/sessions/${prId}?limit=50`);
+            if (fallback.ok) {
+                const fallbackJson = await fallback.json() as unknown;
+                const fallbackData = unwrapApiData<Array<{
+                    id: number;
+                    pr_id: number | string;
+                    streamer_id?: number | string | null;
+                    started_at: string;
+                    ended_at?: string | null;
+                    duration_seconds?: number | null;
+                    end_reason?: string | null;
+                }>>(fallbackJson);
+                const normalized = Array.isArray(fallbackData)
+                    ? fallbackData.map((item) => ({
+                        id: item.id,
+                        pr_id: item.pr_id,
+                        target_type: 'streamer',
+                        target_id: item.streamer_id ?? null,
+                        target_name: null,
+                        started_at: item.started_at,
+                        ended_at: item.ended_at ?? null,
+                        duration_seconds: item.duration_seconds ?? null,
+                        end_reason: item.end_reason ?? null,
+                        session_admin_comment: null,
+                        credited_points: null,
+                    } satisfies AssistantSessionRecord))
+                    : [];
+                setSessions(normalized);
+                setMessage({
+                    type: 'error',
+                    text: 'Сессии загружены в режиме read-only. Для админ-редактирования выполните повторный вход.',
+                });
+                return;
+            }
+        }
+
+        throw new Error('Не удалось загрузить сессии ассистента');
+    };
+
+    const refreshSelectedAssistant = async (prId: string) => {
+        const [detailResult, sessionsResult, assistantsResult] = await Promise.allSettled([
+            fetchAssistantDetail(prId),
+            fetchAssistantSessions(prId),
+            fetchAssistants(),
+        ]);
+
+        if (detailResult.status === 'rejected') {
+            throw detailResult.reason;
+        }
+        if (assistantsResult.status === 'rejected') {
+            throw assistantsResult.reason;
+        }
+        if (sessionsResult.status === 'rejected') {
+            setSessions([]);
+            setMessage({
+                type: 'error',
+                text: sessionsResult.reason instanceof Error
+                    ? sessionsResult.reason.message
+                    : 'Не удалось загрузить сессии ассистента',
+            });
+        }
+    };
+
+    useEffect(() => {
+        const load = async () => {
+            try {
+                setLoading(true);
+                await Promise.all([fetchAssistants(), fetchSessionTargetOptions()]);
+            } catch (error: unknown) {
+                setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка загрузки' });
+            } finally {
+                setLoading(false);
+            }
+        };
+        void load();
+    }, []);
+
+    useEffect(() => {
+        if (!selectedPrId) return;
+        const loadSelected = async () => {
+            try {
+                setBusy(true);
+                await refreshSelectedAssistant(selectedPrId);
+            } catch (error: unknown) {
+                setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка загрузки данных ассистента' });
+            } finally {
+                setBusy(false);
+            }
+        };
+        void loadSelected();
+    }, [selectedPrId]);
+
+    const runMutation = async (
+        endpoint: string,
+        method: 'POST' | 'PATCH' | 'DELETE',
+        payload?: Record<string, unknown>,
+    ) => {
+        if (!selectedPrId) return;
+        const token = getAccessToken();
+        if (!token) throw new Error('Требуется авторизация');
+        setBusy(true);
+        setMessage(null);
+        try {
+            const response = await fetch(endpoint, {
+                method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                body: payload ? JSON.stringify(payload) : undefined,
+            });
+            const json = await response.json().catch(() => ({} as unknown));
+            if (!response.ok) {
+                throw new Error((json as { detail?: string }).detail || 'Операция не выполнена');
+            }
+            await refreshSelectedAssistant(selectedPrId);
+            setMessage({ type: 'success', text: 'Изменения сохранены' });
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const handlePointsAdjust = async () => {
+        if (!selectedPrId) return;
+        const delta = toNumberOrUndefined(pointsForm.delta);
+        if (delta === undefined || delta === 0) {
+            setMessage({ type: 'error', text: 'Укажите изменение баллов (не 0)' });
+            return;
+        }
+        await runMutation(`/api/assistants/${selectedPrId}/points/adjust`, 'POST', {
+            delta,
+            reason: pointsForm.reason || null,
+            source: 'manual_adjust',
+        });
+        setPointsForm({ delta: '', reason: '' });
+    };
+
+    const handleSanctionsUpdate = async () => {
+        if (!selectedPrId) return;
+        const penaltyPoints = toNumberOrUndefined(sanctionsForm.penalty_points);
+        const penaltyPercent = toNumberOrUndefined(sanctionsForm.penalty_percent);
+        if (penaltyPoints === undefined && penaltyPercent === undefined) {
+            setMessage({ type: 'error', text: 'Укажите хотя бы одно поле санкций' });
+            return;
+        }
+        await runMutation(`/api/assistants/${selectedPrId}/sanctions`, 'PATCH', {
+            penalty_points: penaltyPoints,
+            penalty_percent: penaltyPercent,
+            reason: sanctionsForm.reason || null,
+        });
+    };
+
+    const handleWarningsUpdate = async () => {
+        if (!selectedPrId) return;
+        const oralDelta = Number(warningsForm.oral_delta || '0');
+        const strictDelta = Number(warningsForm.strict_delta || '0');
+        if (!Number.isInteger(oralDelta) || !Number.isInteger(strictDelta) || (oralDelta === 0 && strictDelta === 0)) {
+            setMessage({ type: 'error', text: 'Укажите изменение выговоров (не 0)' });
+            return;
+        }
+        await runMutation(`/api/assistants/${selectedPrId}/warnings`, 'POST', {
+            oral_delta: oralDelta,
+            strict_delta: strictDelta,
+            reason: warningsForm.reason || null,
+        });
+    };
+
+    const handleManualSessionCreate = async () => {
+        if (!selectedPrId) return;
+        const startedAtIso = parseLocalDateTimeToIso(manualSessionForm.started_at);
+        const endedAtIso = parseLocalDateTimeToIso(manualSessionForm.ended_at);
+        if (!startedAtIso || !endedAtIso) {
+            setMessage({ type: 'error', text: 'Укажите корректные начало и конец сессии' });
+            return;
+        }
+        if (new Date(endedAtIso).getTime() <= new Date(startedAtIso).getTime()) {
+            setMessage({ type: 'error', text: 'Конец сессии должен быть позже начала' });
+            return;
+        }
+        const targetType = manualSessionForm.target_type;
+        const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
+        if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
+            setMessage({ type: 'error', text: optionsError || 'Справочники стримеров/событий пока недоступны' });
+            return;
+        }
+        if (targetType !== 'manual' && targetOptions.length === 0) {
+            setMessage({ type: 'error', text: targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров' });
+            return;
+        }
+        if (manualSessionForm.target_type !== 'manual' && !manualSessionForm.target_id.trim()) {
+            setMessage({ type: 'error', text: 'Выберите цель спека' });
+            return;
+        }
+        const parsedTargetId = toNumberOrUndefined(manualSessionForm.target_id);
+        if (manualSessionForm.target_type !== 'manual' && parsedTargetId === undefined) {
+            setMessage({ type: 'error', text: 'Некорректная цель спека' });
+            return;
+        }
+        if (manualSessionForm.target_type === 'manual' && !manualSessionForm.session_admin_comment.trim()) {
+            setMessage({ type: 'error', text: 'Для manual-сессии обязателен комментарий' });
+            return;
+        }
+        const targetName = parsedTargetId !== undefined
+            ? (
+                targetType === 'event'
+                    ? eventNameById[String(parsedTargetId)]
+                    : streamerNameById[String(parsedTargetId)]
+            ) || null
+            : null;
+        await runMutation(`/api/assistants/${selectedPrId}/session`, 'POST', {
+            target_type: manualSessionForm.target_type,
+            target_id: manualSessionForm.target_type === 'manual'
+                ? null
+                : parsedTargetId,
+            target_name: manualSessionForm.target_type === 'manual'
+                ? null
+                : targetName,
+            started_at: startedAtIso,
+            ended_at: endedAtIso,
+            is_probation: manualSessionForm.is_probation,
+            priority: Number(manualSessionForm.priority || '0'),
+            session_admin_comment: manualSessionForm.session_admin_comment || null,
+        });
+    };
+
+    const handleSessionPatch = async (sessionId: number) => {
+        if (!selectedPrId) return;
+        const startedAtIso = parseLocalDateTimeToIso(sessionEdit.started_at);
+        const endedAtIso = parseLocalDateTimeToIso(sessionEdit.ended_at);
+        if (!startedAtIso || !endedAtIso) {
+            setMessage({ type: 'error', text: 'Укажите корректные начало и конец сессии' });
+            return;
+        }
+        if (new Date(endedAtIso).getTime() <= new Date(startedAtIso).getTime()) {
+            setMessage({ type: 'error', text: 'Конец сессии должен быть позже начала' });
+            return;
+        }
+        const targetType = sessionEdit.target_type;
+        const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
+        if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
+            setMessage({ type: 'error', text: optionsError || 'Справочники стримеров/событий пока недоступны' });
+            return;
+        }
+        if (targetType !== 'manual' && targetOptions.length === 0) {
+            setMessage({ type: 'error', text: targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров' });
+            return;
+        }
+        if (sessionEdit.target_type !== 'manual' && !sessionEdit.target_id.trim()) {
+            setMessage({ type: 'error', text: 'Выберите цель спека' });
+            return;
+        }
+        const parsedTargetId = toNumberOrUndefined(sessionEdit.target_id);
+        if (sessionEdit.target_type !== 'manual' && parsedTargetId === undefined) {
+            setMessage({ type: 'error', text: 'Некорректная цель спека' });
+            return;
+        }
+        if (sessionEdit.target_type === 'manual' && !sessionEdit.session_admin_comment.trim()) {
+            setMessage({ type: 'error', text: 'Для manual-сессии обязателен комментарий' });
+            return;
+        }
+        const payload: Record<string, unknown> = {
+            target_type: sessionEdit.target_type,
+            target_id: sessionEdit.target_type === 'manual' ? null : parsedTargetId,
+            started_at: startedAtIso,
+            ended_at: endedAtIso,
+        };
+        if (sessionEdit.session_admin_comment.trim() !== '') payload.session_admin_comment = sessionEdit.session_admin_comment;
+        if (sessionEdit.priority_override.trim() !== '') payload.priority_override = Number(sessionEdit.priority_override);
+        if (sessionEdit.rate_override.trim() !== '') payload.rate_override = Number(sessionEdit.rate_override);
+        if (sessionEdit.reason.trim() !== '') payload.reason = sessionEdit.reason;
+        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'PATCH', payload);
+        setEditingSessionId(null);
+    };
+
+    const handleSessionDelete = async (sessionId: number) => {
+        if (!selectedPrId) return;
+        const reason = window.prompt('Причина удаления сессии', 'admin_delete') || 'admin_delete';
+        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}?reason=${encodeURIComponent(reason)}`, 'DELETE');
+    };
+
+    const handleResetStats = async () => {
+        if (!selectedPrId) return;
+        const confirmed = window.confirm('Сбросить статистику ассистента? Это удалит активные данные по сессиям.');
+        if (!confirmed) return;
+        await runMutation(`/api/assistants/${selectedPrId}/reset`, 'POST');
+    };
+
+    return (
+        <div className="space-y-6 animate-[fadeIn_0.3s_ease-in-out]">
+            <div className="flex items-center gap-4 border-b border-white/10 pb-6">
+                <div className="w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+                    <Wrench className="w-6 h-6" />
+                </div>
+                <div>
+                    <h2 className="text-2xl font-bold text-white">Ассистенты</h2>
+                    <p className="text-white/60">Управление баллами, санкциями, выговорами и сессиями</p>
+                </div>
+            </div>
+
+            {message && (
+                <div className={`px-4 py-3 rounded-xl flex items-center gap-3 ${message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-300' : 'bg-red-500/10 border border-red-500/20 text-red-300'}`}>
+                    {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                    {message.text}
+                </div>
+            )}
+
+            {optionsError && (
+                <div className="px-4 py-3 rounded-xl flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200">
+                    <AlertCircle className="w-5 h-5" />
+                    {optionsError}. Для `manual`-спека форма продолжит работать.
+                </div>
+            )}
+
+            <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">
+                <div className="xl:col-span-1 bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Поиск: ник или PR ID"
+                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-xl px-3 py-2 text-sm text-white"
+                    />
+                    <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
+                        {loading ? (
+                            <div className="text-white/50 text-sm">Загрузка...</div>
+                        ) : filteredAssistants.length === 0 ? (
+                            <div className="text-white/40 text-sm">Ничего не найдено</div>
+                        ) : (
+                            filteredAssistants.map((assistant) => (
+                                <button
+                                    key={assistant.pr_id}
+                                    onClick={() => setSelectedPrId(String(assistant.pr_id))}
+                                    className={`w-full text-left rounded-xl border px-3 py-2 transition-colors ${String(assistant.pr_id) === selectedPrId ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200' : 'border-white/10 bg-white/5 text-white/80 hover:bg-white/10'}`}
+                                >
+                                    <div className="font-medium truncate">{assistant.nickname}</div>
+                                    <div className="text-xs text-white/50">PR ID: {assistant.pr_id}</div>
+                                </button>
+                            ))
+                        )}
+                    </div>
+                </div>
+
+                <div className="xl:col-span-3 space-y-4">
+                    {!selectedAssistant ? (
+                        <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-8 text-white/50 text-center">
+                            Выберите ассистента для управления
+                        </div>
+                    ) : (
+                        <>
+                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Ник</div>
+                                    <div className="text-white font-semibold">{selectedAssistant.nickname}</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Баллы</div>
+                                    <div className="text-green-300 font-semibold">{selectedAssistant.display_points ?? 0}</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Штрафные баллы</div>
+                                    <div className="text-amber-300 font-semibold">{selectedAssistant.penalty_points ?? 0}</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Штраф, %</div>
+                                    <div className="text-amber-300 font-semibold">{selectedAssistant.penalty_percent ?? 0}%</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Выговоры</div>
+                                    <div className="text-white font-semibold">{selectedAssistant.warnings_display ?? '0/2 0/2'}</div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                    <div className="text-white font-semibold flex items-center gap-2"><Coins className="w-4 h-4 text-green-400" />Баллы</div>
+                                    <input
+                                        type="number"
+                                        step="0.0001"
+                                        value={pointsForm.delta}
+                                        onChange={(e) => setPointsForm((prev) => ({ ...prev, delta: e.target.value }))}
+                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Изменение баллов"
+                                    />
+                                    <input
+                                        type="text"
+                                        value={pointsForm.reason}
+                                        onChange={(e) => setPointsForm((prev) => ({ ...prev, reason: e.target.value }))}
+                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Причина"
+                                    />
+                                    <button
+                                        onClick={() => void handlePointsAdjust()}
+                                        disabled={busy}
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-50"
+                                    >
+                                        Применить изменение
+                                    </button>
+                                </div>
+
+                                <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                    <div className="text-white font-semibold flex items-center gap-2"><Shield className="w-4 h-4 text-amber-400" />Санкции и выговоры</div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                            type="number"
+                                            step="0.0001"
+                                            min="0"
+                                            value={sanctionsForm.penalty_points}
+                                            onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_points: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                            placeholder="Штрафные баллы"
+                                        />
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0"
+                                            value={sanctionsForm.penalty_percent}
+                                            onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_percent: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                            placeholder="Штраф, %"
+                                        />
+                                    </div>
+                                    <input
+                                        type="text"
+                                        value={sanctionsForm.reason}
+                                        onChange={(e) => setSanctionsForm((prev) => ({ ...prev, reason: e.target.value }))}
+                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Причина штрафов"
+                                    />
+                                    <button
+                                        onClick={() => void handleSanctionsUpdate()}
+                                        disabled={busy}
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50"
+                                    >
+                                        Обновить штрафы
+                                    </button>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                            type="number"
+                                            step="1"
+                                            value={warningsForm.oral_delta}
+                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, oral_delta: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                            placeholder="Устные +/-"
+                                        />
+                                        <input
+                                            type="number"
+                                            step="1"
+                                            value={warningsForm.strict_delta}
+                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, strict_delta: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                            placeholder="Строгие +/-"
+                                        />
+                                    </div>
+                                    <input
+                                        type="text"
+                                        value={warningsForm.reason}
+                                        onChange={(e) => setWarningsForm((prev) => ({ ...prev, reason: e.target.value }))}
+                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Причина выговоров"
+                                    />
+                                    <button
+                                        onClick={() => void handleWarningsUpdate()}
+                                        disabled={busy}
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/30 disabled:opacity-50"
+                                    >
+                                        Обновить выговоры
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <div className="text-white font-semibold flex items-center gap-2"><Timer className="w-4 h-4 text-indigo-400" />Ручная сессия</div>
+                                    <button
+                                        onClick={() => void handleResetStats()}
+                                        disabled={busy}
+                                        className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                                    >
+                                        Сбросить статистику
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                                    <select
+                                        value={manualSessionForm.target_type}
+                                        onChange={(e) => setManualSessionForm((prev) => ({
+                                            ...prev,
+                                            target_type: e.target.value,
+                                            target_id: '',
+                                        }))}
+                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                    >
+                                        <option value="streamer">Стример</option>
+                                        <option value="event">Событие</option>
+                                        <option value="manual">Manual</option>
+                                    </select>
+                                    {manualSessionForm.target_type !== 'manual' && (
+                                        <div className="md:col-span-2 lg:col-span-2">
+                                            <CustomSelect
+                                                options={manualTargetOptions}
+                                                value={manualSessionForm.target_id}
+                                                onChange={(value) => setManualSessionForm((prev) => ({ ...prev, target_id: String(value) }))}
+                                                placeholder={
+                                                    optionsLoading
+                                                        ? 'Loading...'
+                                                        : manualTargetOptions.length > 0
+                                                            ? (manualSessionForm.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                            : (manualSessionForm.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                }
+                                            />
+                                        </div>
+                                    )}
+                                    <input
+                                        type="datetime-local"
+                                        value={manualSessionForm.started_at}
+                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, started_at: e.target.value }))}
+                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Начало"
+                                    />
+                                    <input
+                                        type="datetime-local"
+                                        value={manualSessionForm.ended_at}
+                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, ended_at: e.target.value }))}
+                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Конец"
+                                    />
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        max="3"
+                                        value={manualSessionForm.priority}
+                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, priority: e.target.value }))}
+                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder="Приоритет"
+                                    />
+                                    <label className="inline-flex items-center gap-2 text-sm text-white/80 px-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={manualSessionForm.is_probation}
+                                            onChange={(e) => setManualSessionForm((prev) => ({ ...prev, is_probation: e.target.checked }))}
+                                        />
+                                        Испытательный слот
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={manualSessionForm.session_admin_comment}
+                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, session_admin_comment: e.target.value }))}
+                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        placeholder={
+                                            manualSessionForm.target_type === 'manual'
+                                                ? 'Комментарий (обязательно для manual)'
+                                                : 'Комментарий'
+                                        }
+                                    />
+                                </div>
+                                <button
+                                    onClick={() => void handleManualSessionCreate()}
+                                    disabled={busy}
+                                    className="rounded-lg px-3 py-2 text-sm font-medium bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 disabled:opacity-50"
+                                >
+                                    Добавить ручную сессию
+                                </button>
+                            </div>
+
+                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <div className="text-white font-semibold">Сессии ассистента</div>
+                                    <button
+                                        onClick={() => selectedPrId && void refreshSelectedAssistant(selectedPrId)}
+                                        disabled={busy}
+                                        className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 hover:bg-white/10 disabled:opacity-50"
+                                    >
+                                        <RefreshCw className="w-3.5 h-3.5" />
+                                        Обновить
+                                    </button>
+                                </div>
+                                <div className="space-y-2 max-h-[440px] overflow-y-auto pr-1">
+                                    {sessions.length === 0 ? (
+                                        <div className="text-white/40 text-sm">Сессий нет</div>
+                                    ) : sessions.map((session) => (
+                                        <div key={session.id} className="border border-white/10 rounded-xl bg-white/5 p-3 space-y-2">
+                                            <div className="flex flex-wrap items-center gap-3 text-xs text-white/50">
+                                                <span>ID: {session.id}</span>
+                                                <span>Тип: {session.target_type || '—'}</span>
+                                                <span>
+                                                    Цель: {session.target_type === 'manual'
+                                                        ? 'manual'
+                                                        : (session.target_name || session.target_id || '—')}
+                                                </span>
+                                                <span>Начало: {formatDateTime(session.started_at)}</span>
+                                                <span>Конец: {formatDateTime(session.ended_at)}</span>
+                                                <span>Длительность: {session.duration_seconds ?? 0} сек.</span>
+                                                <span>Баллы: {session.credited_points ?? 0}</span>
+                                            </div>
+                                            <div className="text-sm text-white/70">
+                                                Комментарий: {session.session_admin_comment || '—'}
+                                            </div>
+                                            {editingSessionId === session.id && (
+                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                                                    <select
+                                                        value={sessionEdit.target_type}
+                                                        onChange={(e) => setSessionEdit((prev) => ({
+                                                            ...prev,
+                                                            target_type: e.target.value,
+                                                            target_id: '',
+                                                        }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                    >
+                                                        <option value="streamer">Стример</option>
+                                                        <option value="event">Событие</option>
+                                                        <option value="manual">Manual</option>
+                                                    </select>
+                                                    {sessionEdit.target_type !== 'manual' && (
+                                                        <CustomSelect
+                                                            options={editTargetOptions}
+                                                            value={sessionEdit.target_id}
+                                                            onChange={(value) => setSessionEdit((prev) => ({ ...prev, target_id: String(value) }))}
+                                                            placeholder={
+                                                                optionsLoading
+                                                                    ? 'Loading...'
+                                                                    : editTargetOptions.length > 0
+                                                                        ? (sessionEdit.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                                        : (sessionEdit.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                            }
+                                                        />
+                                                    )}
+                                                    <input
+                                                        type="datetime-local"
+                                                        value={sessionEdit.started_at}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, started_at: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Начало"
+                                                    />
+                                                    <input
+                                                        type="datetime-local"
+                                                        value={sessionEdit.ended_at}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, ended_at: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Конец"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={sessionEdit.session_admin_comment}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, session_admin_comment: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Комментарий"
+                                                    />
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        max="3"
+                                                        value={sessionEdit.priority_override}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, priority_override: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Priority override"
+                                                    />
+                                                    <input
+                                                        type="number"
+                                                        step="0.0001"
+                                                        min="0"
+                                                        value={sessionEdit.rate_override}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, rate_override: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Rate override"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={sessionEdit.reason}
+                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, reason: e.target.value }))}
+                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        placeholder="Причина"
+                                                    />
+                                                </div>
+                                            )}
+                                            <div className="flex items-center gap-2">
+                                                {editingSessionId === session.id ? (
+                                                    <>
+                                                        <button
+                                                            onClick={() => void handleSessionPatch(session.id)}
+                                                            disabled={busy}
+                                                            className="text-xs px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+                                                        >
+                                                            Сохранить
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setEditingSessionId(null)}
+                                                            disabled={busy}
+                                                            className="text-xs px-3 py-1.5 rounded-lg border border-white/20 bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-50"
+                                                        >
+                                                            Отмена
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => {
+                                                            setEditingSessionId(session.id);
+                                                            setSessionEdit({
+                                                                target_type: session.target_type || 'streamer',
+                                                                target_id: session.target_id != null ? String(session.target_id) : '',
+                                                                started_at: toLocalDateTimeInput(session.started_at),
+                                                                ended_at: toLocalDateTimeInput(session.ended_at),
+                                                                session_admin_comment: session.session_admin_comment || '',
+                                                                priority_override: session.priority_override != null ? String(session.priority_override) : '',
+                                                                rate_override: session.rate_override != null ? String(session.rate_override) : '',
+                                                                reason: '',
+                                                            });
+                                                        }}
+                                                        disabled={busy}
+                                                        className="text-xs px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+                                                    >
+                                                        Редактировать
+                                                    </button>
+                                                )}
+                                                <button
+                                                    onClick={() => void handleSessionDelete(session.id)}
+                                                    disabled={busy}
+                                                    className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                                                >
+                                                    Удалить
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default AssistantsManagement;

@@ -18,7 +18,13 @@ from fastapi.responses import JSONResponse
 from middleware import get_trace_id
 from schemas.admin import UserCreate
 from schemas.envelope import success_envelope
-from services.rbac import ROLE_RANK, can_create_role, can_register_users, is_valid_role
+from services.rbac import (
+    ROLE_RANK,
+    can_create_role,
+    can_register_users,
+    is_admin_role,
+    is_valid_role,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 logger = logging.getLogger("API")
@@ -50,6 +56,12 @@ async def create_user(
 ):
     trace_id = get_trace_id(request)
     creator_role = current_user.get("role", "")
+
+    if not is_admin_role(creator_role):
+        raise HTTPException(
+            status_code=403,
+            detail="Недостаточно прав для доступа к админ-панели",
+        )
 
     if not can_register_users(current_user):
         raise HTTPException(
@@ -115,22 +127,37 @@ async def create_user(
 
         # Create/Update assistant profile
         await db.create_or_update_assistant(
-            pr_id=user_data.discord_id, nickname=user_data.nickname, role=user_data.role
+            pr_id=user_data.discord_id,
+            nickname=user_data.nickname,
+            role=user_data.role,
+            appointed_at=user_data.appointed_at,
         )
 
         # Log action
-        await db.log_admin_action(
-            admin_name=current_user["nickname"],
-            action="reg_user",
-            admin_role=current_user.get("role"),
+        await db.log_admin_action_v2(
+            actor_name=current_user["nickname"],
+            actor_role=current_user.get("role"),
+            action="user.create",
             target_type="user",
-            target_id=user_data.nickname,
+            target_id=str(user_data.discord_id),
             details={
-                "nickname": user_data.nickname,
-                "login": user_data.username,
-                "discord_user_id": user_data.discord_id,
+                "summary": f"Created user {user_data.username}",
+                "payload": {
+                    "nickname": user_data.nickname,
+                    "login": user_data.username,
+                    "discord_user_id": user_data.discord_id,
+                    "role": user_data.role,
+                    "appointed_at": user_data.appointed_at.isoformat()
+                    if user_data.appointed_at
+                    else None,
+                },
+                "meta": {
+                    "ip": request.client.host if request.client else None,
+                    "request_path": str(request.url.path),
+                    "method": request.method,
+                    "actor_id": current_user.get("id"),
+                },
             },
-            ip_address=request.client.host if request.client else None,
         )
 
         return JSONResponse(

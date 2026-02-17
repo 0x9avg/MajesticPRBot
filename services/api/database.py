@@ -6,13 +6,12 @@
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Dict, List, Optional
 
 import aiomysql
-from config import Config
-from utils import split_time_by_day  # NOTE: kept for potential future use by views migration
+from config import Config  # NOTE: kept for potential future use by views migration
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
@@ -217,8 +216,78 @@ class Database:
                             pr_id BIGINT UNSIGNED PRIMARY KEY,
                             nickname VARCHAR(100),
                             role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL DEFAULT 'employee',
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            appointed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            auto_points_total FLOAT NOT NULL DEFAULT 0,
+                            manual_points_adjustment FLOAT NOT NULL DEFAULT 0,
+                            total_points FLOAT GENERATED ALWAYS AS (
+                                ROUND(COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0), 4)
+                            ) STORED,
+                            penalty_points FLOAT NOT NULL DEFAULT 0,
+                            penalty_percent FLOAT NOT NULL DEFAULT 0,
+                            warnings_units INT UNSIGNED NOT NULL DEFAULT 0,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                         )
+                        """
+                    )
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN appointed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN auto_points_total FLOAT NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN manual_points_adjustment FLOAT NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            ALTER TABLE assistants
+                            ADD COLUMN total_points FLOAT
+                            GENERATED ALWAYS AS (
+                                ROUND(COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0), 4)
+                            ) STORED
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN penalty_points FLOAT NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN penalty_percent FLOAT NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN warnings_units INT UNSIGNED NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE assistants ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                        )
+                    except Exception:
+                        pass
+                    await cursor.execute(
+                        """
+                        UPDATE assistants
+                        SET appointed_at = COALESCE(appointed_at, added_at, UTC_TIMESTAMP())
                         """
                     )
 
@@ -260,8 +329,11 @@ class Database:
                                 END
                             ) STORED,
                             
-                            # Admin comment if manual spec 
-                            manual_comment VARCHAR(255) NULL,
+                            # Admin comment if manual spec
+                            session_admin_comment VARCHAR(255) NULL,
+
+                            # Persisted contribution to assistant auto points (for deterministic delta recalculation)
+                            credited_points FLOAT NOT NULL DEFAULT 0,
                             
                             # Soft-delete
                             deleted_at TIMESTAMP NULL,
@@ -288,6 +360,80 @@ class Database:
                             INDEX idx_pr_ended (pr_id, ended_at),
                             INDEX idx_target_started (target_type, target_id, started_at)
                         )
+                        """
+                    )
+                    try:
+                        await cursor.execute(
+                            """
+                            ALTER TABLE spec_sessions
+                            ADD COLUMN session_admin_comment VARCHAR(255) NULL
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            ALTER TABLE spec_sessions
+                            CHANGE COLUMN manual_comment session_admin_comment VARCHAR(255) NULL
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE spec_sessions
+                            SET session_admin_comment = manual_comment
+                            WHERE session_admin_comment IS NULL
+                              AND manual_comment IS NOT NULL
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            ALTER TABLE spec_sessions
+                            DROP COLUMN manual_comment
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            ALTER TABLE spec_sessions
+                            ADD COLUMN credited_points FLOAT NOT NULL DEFAULT 0
+                            """
+                        )
+                    except Exception:
+                        pass
+
+                    # Deterministic backfill for automatic points component:
+                    # - each session stores its factual credited_points;
+                    # - assistants.auto_points_total mirrors sum of credited sessions.
+                    await cursor.execute(
+                        """
+                        UPDATE spec_sessions
+                        SET credited_points = ROUND(
+                            CASE
+                                WHEN ended_at IS NULL OR deleted_at IS NOT NULL THEN 0
+                                ELSE (COALESCE(duration_seconds, 0) / 3600.0) * COALESCE(applied_hourly_rate, 0)
+                            END,
+                            4
+                        )
+                        """
+                    )
+                    await cursor.execute(
+                        """
+                        UPDATE assistants a
+                        LEFT JOIN (
+                            SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
+                            FROM spec_sessions
+                            GROUP BY pr_id
+                        ) s ON s.pr_id = a.pr_id
+                        SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
                         """
                     )
 
@@ -503,21 +649,139 @@ class Database:
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS admin_logs (
-                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            admin_name VARCHAR(255) NOT NULL,
-                            admin_role VARCHAR(50),
-                            action VARCHAR(50) NOT NULL,
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            actor_name VARCHAR(255) NOT NULL,
+                            actor_role VARCHAR(50),
+                            action VARCHAR(100) NOT NULL,
                             target_type VARCHAR(50),
                             target_id VARCHAR(100),
-                            details JSON,
-                            ip_address VARCHAR(45),
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            INDEX idx_admin_name (admin_name),
-                            INDEX idx_action (action),
-                            INDEX idx_created_at (created_at)
+                            details JSON NOT NULL,
+                            INDEX idx_created_at (created_at),
+                            INDEX idx_action_created (action, created_at),
+                            INDEX idx_actor_created (actor_name, created_at),
+                            INDEX idx_target_created (target_type, target_id, created_at)
                         )
                         """
                     )
+
+                    # Admin logs migration (legacy -> compact universal schema)
+                    # Keep this migration idempotent for environments with mixed schema history.
+                    for statement in [
+                        "ALTER TABLE admin_logs ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                        "ALTER TABLE admin_logs ADD COLUMN actor_name VARCHAR(255) NULL",
+                        "ALTER TABLE admin_logs ADD COLUMN actor_role VARCHAR(50) NULL",
+                        "ALTER TABLE admin_logs ADD COLUMN details JSON NULL",
+                        "ALTER TABLE admin_logs MODIFY action VARCHAR(100) NOT NULL",
+                    ]:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception:
+                            pass
+
+                    # Backfill actor fields from legacy columns when present
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE admin_logs
+                            SET actor_name = COALESCE(actor_name, admin_name)
+                            WHERE actor_name IS NULL
+                            """
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE admin_logs
+                            SET actor_role = COALESCE(actor_role, admin_role)
+                            WHERE actor_role IS NULL
+                            """
+                        )
+                    except Exception:
+                        pass
+
+                    # Ensure details is always present and preserve legacy ip in meta
+                    await cursor.execute(
+                        """
+                        UPDATE admin_logs
+                        SET details = COALESCE(details, JSON_OBJECT())
+                        WHERE details IS NULL
+                        """
+                    )
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE admin_logs
+                            SET details = JSON_SET(
+                                COALESCE(details, JSON_OBJECT()),
+                                '$.meta.ip',
+                                ip_address
+                            )
+                            WHERE ip_address IS NOT NULL
+                              AND ip_address != ''
+                            """
+                        )
+                    except Exception:
+                        pass
+
+                    # Finalize constraints
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE admin_logs MODIFY actor_name VARCHAR(255) NOT NULL"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE admin_logs MODIFY details JSON NOT NULL"
+                        )
+                    except Exception:
+                        pass
+
+                    # Drop legacy indexes/columns where they still exist
+                    for statement in [
+                        "ALTER TABLE admin_logs DROP INDEX idx_admin_name",
+                        "ALTER TABLE admin_logs DROP INDEX idx_action",
+                    ]:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception:
+                            pass
+
+                    for statement in [
+                        "ALTER TABLE admin_logs DROP COLUMN admin_name",
+                        "ALTER TABLE admin_logs DROP COLUMN admin_role",
+                        "ALTER TABLE admin_logs DROP COLUMN ip_address",
+                    ]:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception:
+                            pass
+
+                    # Create compact-schema indexes if missing
+                    for statement in [
+                        "ALTER TABLE admin_logs ADD INDEX idx_created_at (created_at)",
+                        "ALTER TABLE admin_logs ADD INDEX idx_action_created (action, created_at)",
+                        "ALTER TABLE admin_logs ADD INDEX idx_actor_created (actor_name, created_at)",
+                        "ALTER TABLE admin_logs ADD INDEX idx_target_created (target_type, target_id, created_at)",
+                    ]:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception:
+                            pass
+
+                    # High+medium indexes
+                    for statement in [
+                        "ALTER TABLE spec_sessions ADD INDEX idx_target_active (target_type, target_id, ended_at, deleted_at)",
+                        "ALTER TABLE spec_sessions ADD INDEX idx_pr_active (pr_id, ended_at, deleted_at)",
+                        "ALTER TABLE events ADD INDEX idx_events_active_order (is_active, is_pinned, priority, start_time)",
+                        "ALTER TABLE streamers ADD INDEX idx_streamers_online_order (is_online, is_pinned, priority, streamer_name)",
+                    ]:
+                        try:
+                            await cursor.execute(statement)
+                        except Exception:
+                            pass
 
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
@@ -659,6 +923,46 @@ class Database:
                 }
 
     @db_retry()
+    async def log_admin_action_v2(
+        self,
+        actor_name: str,
+        action: str,
+        actor_role: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> None:
+        """Write compact universal admin log event."""
+        event_details = details or {}
+        if not isinstance(event_details, dict):
+            event_details = {"payload": {"value": event_details}}
+
+        if "summary" not in event_details:
+            event_details["summary"] = action
+
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO admin_logs
+                            (actor_name, actor_role, action, target_type, target_id, details)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            actor_name,
+                            actor_role,
+                            action,
+                            target_type,
+                            target_id,
+                            json.dumps(event_details, default=str),
+                        ),
+                    )
+                    await conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to log admin action: {e}", exc_info=True)
+
+    @db_retry()
     async def log_admin_action(
         self,
         admin_name: str,
@@ -669,41 +973,44 @@ class Database:
         details: Optional[dict] = None,
         ip_address: Optional[str] = None,
     ) -> None:
-        """
-        Log an admin action to the admin_logs table for auditing.
+        """Backward-compatible wrapper to v2 admin logs."""
+        payload = details.copy() if isinstance(details, dict) else {}
+        meta = payload.get("meta", {})
+        if ip_address:
+            meta["ip"] = ip_address
+        if meta:
+            payload["meta"] = meta
+        await self.log_admin_action_v2(
+            actor_name=admin_name,
+            actor_role=admin_role,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            details=payload,
+        )
 
-        Args:
-            admin_name: Nickname/Username of the admin performing the action
-            action: Action name (e.g., 'update_streamer', 'delete_assistant')
-            admin_role: Role of the admin (e.g. 'manager')
-            target_type: Type of target entity (e.g., 'streamer', 'assistant')
-            target_id: ID of the target entity
-            details: Optional JSON details (old_value, new_value, etc.)
-            ip_address: Optional IP address of the request source
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO admin_logs 
-                            (admin_name, admin_role, action, target_type, target_id, details, ip_address)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            admin_name,
-                            admin_role,
-                            action,
-                            target_type,
-                            target_id,
-                            json.dumps(details) if details else None,
-                            ip_address,
-                        ),
-                    )
-                    await conn.commit()
-                    self.logger.debug(f"Admin log: {action} by {admin_name}")
-        except Exception as e:
-            self.logger.error(f"Failed to log admin action: {e}", exc_info=True)
+    @staticmethod
+    def _action_matches_kind(action: str, kind: str) -> bool:
+        if kind == "other":
+            return "." not in action
+        prefix = Database._kind_to_action_prefix(kind)
+        if not prefix:
+            return False
+        return action.startswith(prefix)
+
+    @staticmethod
+    def _kind_to_action_prefix(kind: str) -> Optional[str]:
+        prefix_map = {
+            "user": "user.",
+            "streamer": "streamer.",
+            "event": "event.",
+            "assistant": "assistant.",
+            "system": "system.",
+            "rbac": "rbac.",
+            "spec": "spec.",
+            "guild": "guild.",
+        }
+        return prefix_map.get(kind)
 
     @db_retry()
     async def get_admin_logs(
@@ -735,8 +1042,9 @@ class Database:
             where_clauses = []
             params = []
             allowed_sorts = {
-                "created_at": "al.id",
-                "admin_name": "al.admin_name",
+                "created_at": "al.created_at",
+                "actor_name": "al.actor_name",
+                "admin_name": "al.actor_name",
                 "action": "al.action",
                 "target_name": "target_name",
             }
@@ -753,9 +1061,10 @@ class Database:
                     where_clauses.append("al.action = %s")
                     params.append(actions)
 
-            if filters.get("admin_name"):
-                where_clauses.append("al.admin_name LIKE %s")
-                params.append(f"%{filters['admin_name']}%")
+            actor_name = filters.get("actor_name") or filters.get("admin_name")
+            if actor_name:
+                where_clauses.append("al.actor_name LIKE %s")
+                params.append(f"%{actor_name}%")
 
             if filters.get("target_type") and filters["target_type"] != "all":
                 where_clauses.append("al.target_type = %s")
@@ -769,6 +1078,18 @@ class Database:
                 where_clauses.append("al.created_at <= %s")
                 params.append(filters["end_date"])
 
+            kind = filters.get("kind")
+            if kind:
+                if kind == "other":
+                    where_clauses.append("al.action NOT LIKE %s")
+                    params.append("%.%")
+                else:
+                    prefix = self._kind_to_action_prefix(kind)
+                    if not prefix:
+                        return []
+                    where_clauses.append("al.action LIKE %s")
+                    params.append(f"{prefix}%")
+
             where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
             params.append(limit)
@@ -779,13 +1100,12 @@ class Database:
                     sql_query = f"""
                         SELECT 
                             al.id,
-                            al.admin_name,
-                            al.admin_role,
+                            al.actor_name,
+                            al.actor_role,
                             al.action,
                             al.target_type,
                             al.target_id,
                             al.details,
-                            al.ip_address,
                             al.created_at,
                             CASE 
                                 WHEN al.target_type = 'streamer' THEN s.streamer_name
@@ -806,6 +1126,11 @@ class Database:
 
                     for log in logs:
                         log_dict = dict(log)
+                        log_dict["kind"] = (
+                            log_dict["action"].split(".", 1)[0]
+                            if "." in log_dict["action"]
+                            else "other"
+                        )
                         if log_dict.get("details"):
                             try:
                                 if isinstance(log_dict["details"], str):
@@ -814,6 +1139,8 @@ class Database:
                                     )
                             except (json.JSONDecodeError, TypeError):
                                 pass
+                        log_dict["admin_name"] = log_dict.get("actor_name")
+                        log_dict["admin_role"] = log_dict.get("actor_role")
                         result.append(log_dict)
 
                     return result
@@ -1656,6 +1983,104 @@ class Database:
     # Spec System Operations
     # =========================================================================
 
+    @staticmethod
+    def _round_points(value: float) -> float:
+        return round(float(value), 4)
+
+    @staticmethod
+    def _warnings_breakdown(units: int) -> Dict[str, Any]:
+        safe_units = max(int(units or 0), 0)
+        strict = safe_units // 2
+        oral = safe_units % 2
+        return {
+            "warnings_units": safe_units,
+            "strict_warnings": strict,
+            "oral_warnings": oral,
+            "warnings_display": f"{strict}/2 {oral}/2",
+        }
+
+    @staticmethod
+    def _normalize_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _compute_session_points(self, session_row: Dict[str, Any]) -> float:
+        """Compute deterministic points contribution for a single session row."""
+        if not session_row:
+            return 0.0
+        if session_row.get("ended_at") is None:
+            return 0.0
+        if session_row.get("deleted_at") is not None:
+            return 0.0
+        duration_seconds = float(session_row.get("duration_seconds") or 0.0)
+        applied_rate = float(session_row.get("applied_hourly_rate") or 0.0)
+        return self._round_points((duration_seconds / 3600.0) * applied_rate)
+
+    async def _recalc_session_points_delta(
+        self, conn, session_id: int, lock: bool = True
+    ) -> float:
+        """
+        Recalculate one session and apply ONLY delta to assistant auto points.
+        Returns applied delta.
+        """
+        lock_sql = "FOR UPDATE" if lock else ""
+        async with conn.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT id, pr_id, ended_at, deleted_at, duration_seconds,
+                       applied_hourly_rate, credited_points
+                FROM spec_sessions
+                WHERE id = %s
+                {lock_sql}
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return 0.0
+
+            new_points = self._compute_session_points(row)
+            old_points = float(row.get("credited_points") or 0.0)
+            delta = self._round_points(new_points - old_points)
+
+            if abs(delta) < 0.00005:
+                delta = 0.0
+
+            if new_points != old_points:
+                await cursor.execute(
+                    "UPDATE spec_sessions SET credited_points = %s WHERE id = %s",
+                    (new_points, session_id),
+                )
+
+            if delta != 0.0:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistants (pr_id)
+                    VALUES (%s)
+                    ON DUPLICATE KEY UPDATE pr_id = pr_id
+                    """,
+                    (row["pr_id"],),
+                )
+                await cursor.execute(
+                    """
+                    UPDATE assistants
+                    SET auto_points_total = ROUND(COALESCE(auto_points_total, 0) + %s, 4)
+                    WHERE pr_id = %s
+                    """,
+                    (delta, row["pr_id"]),
+                )
+
+            return delta
+
+    async def _recalc_points_for_sessions(
+        self, conn, session_ids: List[int], lock: bool = True
+    ) -> None:
+        for session_id in session_ids:
+            await self._recalc_session_points_delta(conn, session_id, lock=lock)
+
     @db_retry()
     async def assign_pr_to_streamer(
         self, streamer_id: int, pr_id: int, is_probation: bool = False
@@ -1687,7 +2112,9 @@ class Database:
                     )
                     active = await cursor.fetchone()
                     if active:
-                        self.logger.warning(f"PR {pr_id} already has active session {active['id']}")
+                        self.logger.warning(
+                            f"PR {pr_id} already has active session {active['id']}"
+                        )
                         raise ValueError(
                             "Вы уже закреплены за другим стримером или событием"
                         )
@@ -1764,9 +2191,15 @@ class Database:
                             INSERT INTO spec_sessions 
                                 (pr_id, target_type, target_id, is_probation, started_at,
                                  priority_auto, rate_auto)
-                            VALUES (%s, 'streamer', %s, %s, NOW(), %s, %s)
+                            VALUES (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s)
                             """,
-                            (pr_id, streamer_id, is_probation, streamer_priority, rate_auto),
+                            (
+                                pr_id,
+                                streamer_id,
+                                is_probation,
+                                streamer_priority,
+                                rate_auto,
+                            ),
                         )
                     except Exception as e:
                         if "uq_one_active_session_per_pr" in str(e):
@@ -1808,7 +2241,7 @@ class Database:
         """
         try:
             async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
                     # 1. Find active sessions for this streamer
                     query = """
                         SELECT ss.id, ss.pr_id, ss.started_at, ss.is_probation, st.streamer_name
@@ -1818,6 +2251,7 @@ class Database:
                           AND ss.target_id = %s 
                           AND ss.ended_at IS NULL
                           AND ss.deleted_at IS NULL
+                        FOR UPDATE
                     """
                     params = [streamer_id]
 
@@ -1832,29 +2266,14 @@ class Database:
                         return []
 
                     unassigned_sessions = []
-
-                    # Prepare time calculation
-                    await cursor.execute("SELECT NOW() as now")
-                    now_result = await cursor.fetchone()
-                    now = now_result["now"]
-                    if now.tzinfo is None:
-                        now = now.replace(tzinfo=timezone.utc)
-
                     session_ids = []
 
                     for res in results:
-                        started_at = res["started_at"]
-                        if started_at and started_at.tzinfo is None:
-                            started_at = started_at.replace(tzinfo=timezone.utc)
-
-                        duration_seconds = 0
-                        if started_at:
-                            duration_seconds = int((now - started_at).total_seconds())
-
                         unassigned_sessions.append(
                             {
+                                "_session_id": int(res["id"]),
                                 "pr_id": res["pr_id"],
-                                "duration_seconds": duration_seconds,
+                                "duration_seconds": 0,
                                 "streamer_name": res["streamer_name"],
                                 "is_probation": res.get("is_probation", False),
                             }
@@ -1867,11 +2286,37 @@ class Database:
                         await cursor.execute(
                             f"""
                             UPDATE spec_sessions 
-                            SET ended_at = %s, end_reason = %s
+                            SET ended_at = GREATEST(
+                                    DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                    UTC_TIMESTAMP()
+                                ),
+                                end_reason = %s
                             WHERE id IN ({format_strings})
                             """,
-                            (now, end_reason, *session_ids),
+                            (end_reason, *session_ids),
                         )
+
+                        await self._recalc_points_for_sessions(
+                            conn, session_ids, lock=False
+                        )
+
+                        await cursor.execute(
+                            f"""
+                            SELECT id, COALESCE(duration_seconds, 0) AS duration_seconds
+                            FROM spec_sessions
+                            WHERE id IN ({format_strings})
+                            """,
+                            tuple(session_ids),
+                        )
+                        duration_rows = await cursor.fetchall()
+                        duration_map = {
+                            int(row["id"]): int(row.get("duration_seconds") or 0)
+                            for row in duration_rows
+                        }
+                        for session in unassigned_sessions:
+                            sid = session.get("_session_id")
+                            session["duration_seconds"] = duration_map.get(int(sid), 0)
+                            session.pop("_session_id", None)
 
                     await conn.commit()
 
@@ -1937,19 +2382,42 @@ class Database:
                     streamer1_id = pr1_assignment["streamer_id"]
                     streamer2_id = pr2_assignment["streamer_id"]
 
+                    await cursor.execute(
+                        """
+                        SELECT id
+                        FROM spec_sessions
+                        WHERE pr_id IN (%s, %s)
+                          AND ended_at IS NULL
+                          AND deleted_at IS NULL
+                        FOR UPDATE
+                        """,
+                        (pr1_id, pr2_id),
+                    )
+                    rows_to_close = await cursor.fetchall()
+                    close_session_ids = [int(row["id"]) for row in rows_to_close]
+
                     # Close existing spec sessions for both PRs (with reason 'swap')
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
-                        SET ended_at = NOW(), end_reason = 'swap'
+                        SET ended_at = GREATEST(
+                                DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                UTC_TIMESTAMP()
+                            ),
+                            end_reason = 'swap'
                         WHERE pr_id IN (%s, %s) AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (pr1_id, pr2_id),
                     )
 
+                    if close_session_ids:
+                        await self._recalc_points_for_sessions(
+                            conn, close_session_ids, lock=False
+                        )
+
                     # Snapshot rates for new sessions
                     config = await self.get_points_config()
-                    
+
                     # PR1 gets streamer2
                     pr1_probation = pr1_assignment.get("is_probation", False)
                     s2_priority = pr2_assignment.get("priority", 0)
@@ -1972,11 +2440,21 @@ class Database:
                         INSERT INTO spec_sessions 
                             (pr_id, target_type, target_id, is_probation, started_at, priority_auto, rate_auto)
                         VALUES 
-                            (%s, 'streamer', %s, %s, NOW(), %s, %s), 
-                            (%s, 'streamer', %s, %s, NOW(), %s, %s)
+                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s), 
+                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s)
                         """,
-                        (pr1_id, streamer2_id, pr1_probation, s2_priority, rate1,
-                         pr2_id, streamer1_id, pr2_probation, s1_priority, rate2),
+                        (
+                            pr1_id,
+                            streamer2_id,
+                            pr1_probation,
+                            s2_priority,
+                            rate1,
+                            pr2_id,
+                            streamer1_id,
+                            pr2_probation,
+                            s1_priority,
+                            rate2,
+                        ),
                     )
 
                     await conn.commit()
@@ -2151,11 +2629,16 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT streamer_id, streamer_name
-                        FROM streamers
-                        WHERE is_online = TRUE 
-                        AND game_id = %s
-                        AND assigned_pr_id IS NULL
+                        SELECT s.streamer_id, s.streamer_name
+                        FROM streamers s
+                        LEFT JOIN spec_sessions ss
+                          ON ss.target_type = 'streamer'
+                         AND ss.target_id = s.streamer_id
+                         AND ss.ended_at IS NULL
+                         AND ss.deleted_at IS NULL
+                        WHERE s.is_online = TRUE
+                          AND s.stream_game_id = %s
+                          AND ss.id IS NULL
                         ORDER BY streamer_name ASC
                         """,
                         (Config.gta5_game_id,),
@@ -2224,6 +2707,45 @@ class Database:
             return None
 
     @db_retry()
+    async def get_all_events(self) -> list:
+        """Получение всех событий (активных и неактивных)."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, name, description, created_at, start_time, is_active,
+                               channel_id, message_id, created_by, notification_sent,
+                               required_pr_count, priority, pr_slots, is_pinned
+                        FROM events
+                        ORDER BY is_active DESC, is_pinned DESC, created_at DESC
+                        """
+                    )
+                    events = await cursor.fetchall()
+                    for event in events:
+                        await cursor.execute(
+                            """
+                            SELECT ss.pr_id, a.nickname
+                            FROM spec_sessions ss
+                            LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                            WHERE ss.target_type = 'event' AND ss.target_id = %s
+                              AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                            """,
+                            (event["id"],),
+                        )
+                        participants = await cursor.fetchall()
+                        event["current_participants"] = len(participants)
+                        event["participants"] = [
+                            {"pr_id": str(p["pr_id"]), "nickname": p.get("nickname")}
+                            for p in participants
+                        ]
+
+                    return events
+        except Exception as e:
+            self.logger.error(f"Failed to get all events: {e}", exc_info=True)
+            return []
+
+    @db_retry()
     async def get_active_events(self) -> list:
         """Получение активных событий гильдии."""
         try:
@@ -2284,9 +2806,10 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT pr_id, started_at
+                        SELECT id, pr_id, started_at
                         FROM spec_sessions
                         WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL AND deleted_at IS NULL
+                        FOR UPDATE
                         """,
                         (event_id,),
                     )
@@ -2317,11 +2840,21 @@ class Database:
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
-                        SET ended_at = %s, end_reason = 'event_end'
+                        SET ended_at = GREATEST(
+                                DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                UTC_TIMESTAMP()
+                            ),
+                            end_reason = 'event_end'
                         WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL AND deleted_at IS NULL
                         """,
-                        (now, event_id),
+                        (event_id,),
                     )
+
+                    session_ids = [int(p["id"]) for p in participants]
+                    if session_ids:
+                        await self._recalc_points_for_sessions(
+                            conn, session_ids, lock=False
+                        )
 
                     results = []
                     for p in participants:
@@ -2391,28 +2924,59 @@ class Database:
         pr_id: int,
         target_type: str,
         target_id: Optional[int],
-        duration_seconds: int,
-        date_str: str,
+        started_at: datetime,
+        ended_at: datetime,
         is_probation: bool = False,
         priority: int = 0,
+        session_admin_comment: Optional[str] = None,
     ) -> bool:
         """
         Создание ручной записи сессии спека (для админских корректировок).
-        Записывается как уже завершённая сессия. daily_stats VIEW автоматически пересчитает баллы.
+        Сессия всегда создается завершенной по явным границам started_at/ended_at.
         """
-        from datetime import datetime, timedelta
-
         try:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-            start_time = datetime.combine(date_obj, datetime.min.time())
-            end_time = start_time + timedelta(seconds=duration_seconds)
+            if target_type not in {"streamer", "event", "manual"}:
+                self.logger.warning(
+                    "Invalid target_type for manual spec session: %s", target_type
+                )
+                return False
+
+            start_time = self._normalize_utc_datetime(started_at)
+            end_time = self._normalize_utc_datetime(ended_at)
+            if start_time is None or end_time is None or end_time <= start_time:
+                self.logger.warning(
+                    "Invalid manual session window for PR=%s: start=%s end=%s",
+                    pr_id,
+                    started_at,
+                    ended_at,
+                )
+                return False
+
+            if target_type == "manual":
+                target_id_value: Optional[int] = None
+                if not (session_admin_comment or "").strip():
+                    self.logger.warning(
+                        "Manual session requires non-empty session_admin_comment (PR=%s)",
+                        pr_id,
+                    )
+                    return False
+            else:
+                if target_id is None:
+                    self.logger.warning(
+                        "Non-manual session requires target_id (PR=%s, type=%s)",
+                        pr_id,
+                        target_type,
+                    )
+                    return False
+                target_id_value = int(target_id)
 
             # Snapshot rate from config
             config = await self.get_points_config()
+            safe_priority = max(0, min(int(priority), 3))
             if is_probation:
                 rate_auto = await self._get_probation_rate()
             else:
-                rate_auto = config.get(priority, 0.5)
+                rate_auto = config.get(safe_priority, 0.5)
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -2426,24 +2990,33 @@ class Database:
                         """
                         INSERT INTO spec_sessions 
                         (pr_id, target_type, target_id, started_at, ended_at, end_reason, 
-                         is_probation, priority_auto, rate_auto)
-                        VALUES (%s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s)
+                         is_probation, priority_auto, rate_auto, session_admin_comment)
+                        VALUES (%s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s, %s)
                         """,
                         (
                             pr_id,
                             target_type,
-                            target_id if target_type != 'manual' else None,
+                            target_id_value,
                             start_time,
                             end_time,
                             is_probation,
-                            priority,
+                            safe_priority,
                             rate_auto,
+                            session_admin_comment,
                         ),
                     )
+                    session_id = cursor.lastrowid
+                    await self._recalc_session_points_delta(conn, session_id, lock=False)
                     await conn.commit()
 
             self.logger.info(
-                f"Manual spec session created: PR={pr_id}, duration={duration_seconds}s, date={date_str}, probation={is_probation}"
+                "Manual spec session created: PR=%s, target_type=%s, target_id=%s, start=%s, end=%s, probation=%s",
+                pr_id,
+                target_type,
+                target_id_value,
+                start_time.isoformat(),
+                end_time.isoformat(),
+                is_probation,
             )
             return True
 
@@ -2510,7 +3083,6 @@ class Database:
         except Exception as e:
             self.logger.error(f"Failed to update streamer {streamer_id}: {e}")
             return False
-
 
     async def _get_probation_rate(self) -> float:
         """Get probation rate from settings."""
@@ -2638,6 +3210,8 @@ class Database:
                         (session_id,),
                     )
 
+                    await self._recalc_session_points_delta(conn, session_id, lock=False)
+
                     await cursor.execute(
                         """
                         SELECT COALESCE(duration_seconds, 0) AS duration_seconds
@@ -2649,7 +3223,9 @@ class Database:
                     duration_row = await cursor.fetchone()
 
                     await conn.commit()
-                    duration = int(duration_row["duration_seconds"]) if duration_row else 0
+                    duration = (
+                        int(duration_row["duration_seconds"]) if duration_row else 0
+                    )
                     return max(duration, 0)
         except Exception as e:
             self.logger.error(f"Failed to leave event {event_id}: {e}", exc_info=True)
@@ -2744,20 +3320,425 @@ class Database:
         """Сброс статистики для конкретного ассистента (помечает все сессии как удалённые)."""
         try:
             async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id
+                        FROM spec_sessions
+                        WHERE pr_id = %s AND deleted_at IS NULL
+                        FOR UPDATE
+                        """,
+                        (pr_id,),
+                    )
+                    rows = await cursor.fetchall()
+                    session_ids = [int(row["id"]) for row in rows]
+                    if not session_ids:
+                        return False
+
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
-                        SET deleted_at = NOW(), delete_reason = 'admin_reset'
+                        SET deleted_at = UTC_TIMESTAMP(), delete_reason = 'admin_reset'
                         WHERE pr_id = %s AND deleted_at IS NULL
                         """,
                         (pr_id,),
                     )
+                    await self._recalc_points_for_sessions(conn, session_ids, lock=False)
                     await conn.commit()
-                    return cursor.rowcount > 0
+                    return True
         except Exception as e:
             self.logger.error(f"Failed to reset assistant stats: {e}", exc_info=True)
             return False
+
+    async def _get_assistant_points_snapshot(
+        self, cursor, pr_id: int, for_update: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        lock_sql = " FOR UPDATE" if for_update else ""
+        await cursor.execute(
+            f"""
+            SELECT
+                pr_id,
+                ROUND(COALESCE(auto_points_total, 0), 4) AS auto_points_total,
+                ROUND(COALESCE(manual_points_adjustment, 0), 4) AS manual_points_adjustment,
+                ROUND(
+                    COALESCE(total_points, COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0)),
+                    4
+                ) AS total_points,
+                ROUND(COALESCE(penalty_points, 0), 4) AS penalty_points,
+                ROUND(COALESCE(penalty_percent, 0), 4) AS penalty_percent,
+                COALESCE(warnings_units, 0) AS warnings_units,
+                ROUND(
+                    COALESCE(total_points, COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0))
+                    - COALESCE(penalty_points, 0),
+                    4
+                ) AS display_points
+            FROM assistants
+            WHERE pr_id = %s{lock_sql}
+            """,
+            (pr_id,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            row.update(self._warnings_breakdown(row.get("warnings_units", 0)))
+        return row
+
+    @db_retry()
+    async def adjust_assistant_points(
+        self,
+        pr_id: int,
+        delta: float,
+        reason: Optional[str] = None,
+        source: str = "manual_adjust",
+    ) -> Optional[Dict[str, Any]]:
+        """Adjust manual assistant points component (persistent across auto recalculation)."""
+        try:
+            rounded_delta = self._round_points(delta)
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id)
+                        VALUES (%s)
+                        ON DUPLICATE KEY UPDATE pr_id = pr_id
+                        """,
+                        (pr_id,),
+                    )
+                    before = await self._get_assistant_points_snapshot(
+                        cursor, pr_id, for_update=True
+                    )
+                    if not before:
+                        return None
+                    await cursor.execute(
+                        """
+                        UPDATE assistants
+                        SET manual_points_adjustment = ROUND(
+                                COALESCE(manual_points_adjustment, 0) + %s,
+                                4
+                            )
+                        WHERE pr_id = %s
+                        """,
+                        (rounded_delta, pr_id),
+                    )
+                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
+                    await conn.commit()
+                    return {
+                        "pr_id": pr_id,
+                        "delta": rounded_delta,
+                        "reason": reason,
+                        "source": source,
+                        "before": before,
+                        "after": after,
+                    }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to adjust assistant points for {pr_id}: {e}", exc_info=True
+            )
+            return None
+
+    @db_retry()
+    async def update_assistant_sanctions(
+        self,
+        pr_id: int,
+        penalty_points: Optional[float] = None,
+        penalty_percent: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update assistant sanctions (penalty points/percent)."""
+        if penalty_points is None and penalty_percent is None:
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id)
+                        VALUES (%s)
+                        ON DUPLICATE KEY UPDATE pr_id = pr_id
+                        """,
+                        (pr_id,),
+                    )
+                    before = await self._get_assistant_points_snapshot(
+                        cursor, pr_id, for_update=True
+                    )
+                    if not before:
+                        return None
+
+                    clauses: List[str] = []
+                    params: List[Any] = []
+                    if penalty_points is not None:
+                        clauses.append("penalty_points = GREATEST(0, ROUND(%s, 4))")
+                        params.append(penalty_points)
+                    if penalty_percent is not None:
+                        clauses.append("penalty_percent = GREATEST(0, ROUND(%s, 4))")
+                        params.append(penalty_percent)
+                    params.append(pr_id)
+                    await cursor.execute(
+                        f"UPDATE assistants SET {', '.join(clauses)} WHERE pr_id = %s",
+                        tuple(params),
+                    )
+                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
+                    await conn.commit()
+                    return {
+                        "pr_id": pr_id,
+                        "reason": reason,
+                        "before": before,
+                        "after": after,
+                    }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update assistant sanctions for {pr_id}: {e}",
+                exc_info=True,
+            )
+            return None
+
+    @db_retry()
+    async def update_assistant_warnings(
+        self,
+        pr_id: int,
+        oral_delta: int = 0,
+        strict_delta: int = 0,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update warnings units (oral=1 unit, strict=2 units)."""
+        units_delta = int(oral_delta or 0) + int(strict_delta or 0) * 2
+        if units_delta == 0:
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistants (pr_id)
+                        VALUES (%s)
+                        ON DUPLICATE KEY UPDATE pr_id = pr_id
+                        """,
+                        (pr_id,),
+                    )
+                    before = await self._get_assistant_points_snapshot(
+                        cursor, pr_id, for_update=True
+                    )
+                    if not before:
+                        return None
+                    await cursor.execute(
+                        """
+                        UPDATE assistants
+                        SET warnings_units = GREATEST(0, COALESCE(warnings_units, 0) + %s)
+                        WHERE pr_id = %s
+                        """,
+                        (units_delta, pr_id),
+                    )
+                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
+                    await conn.commit()
+                    return {
+                        "pr_id": pr_id,
+                        "units_delta": units_delta,
+                        "oral_delta": int(oral_delta or 0),
+                        "strict_delta": int(strict_delta or 0),
+                        "reason": reason,
+                        "before": before,
+                        "after": after,
+                    }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update warnings for assistant {pr_id}: {e}", exc_info=True
+            )
+            return None
+
+    @db_retry()
+    async def update_assistant_session(
+        self, pr_id: int, session_id: int, patch: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Admin patch of one spec session with deterministic points delta recalculation."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT
+                            id, pr_id, target_type, target_id, started_at, ended_at,
+                            is_probation, priority_override, rate_override,
+                            session_admin_comment, deleted_at, credited_points
+                        FROM spec_sessions
+                        WHERE id = %s AND pr_id = %s AND deleted_at IS NULL
+                        FOR UPDATE
+                        """,
+                        (session_id, pr_id),
+                    )
+                    before = await cursor.fetchone()
+                    if not before:
+                        return None
+
+                    updates: List[str] = []
+                    params: List[Any] = []
+
+                    current_target_type = before.get("target_type")
+                    current_target_id = before.get("target_id")
+                    current_started = self._normalize_utc_datetime(
+                        before.get("started_at")
+                    )
+                    current_ended = self._normalize_utc_datetime(before.get("ended_at"))
+
+                    next_target_type = (
+                        patch.get("target_type")
+                        if patch.get("target_type") is not None
+                        else current_target_type
+                    )
+                    next_target_id = (
+                        patch.get("target_id")
+                        if "target_id" in patch
+                        else current_target_id
+                    )
+
+                    next_started = current_started
+                    next_ended = current_ended
+
+                    started_in_patch = (
+                        "started_at" in patch and patch.get("started_at") is not None
+                    )
+                    ended_in_patch = (
+                        "ended_at" in patch and patch.get("ended_at") is not None
+                    )
+                    if started_in_patch != ended_in_patch:
+                        raise ValueError(
+                            "started_at and ended_at must be provided together"
+                        )
+
+                    if started_in_patch and ended_in_patch:
+                        next_started = self._normalize_utc_datetime(patch["started_at"])
+                        next_ended = self._normalize_utc_datetime(patch["ended_at"])
+                        if not next_started or not next_ended or next_ended <= next_started:
+                            raise ValueError("ended_at must be greater than started_at")
+                        updates.append("started_at = %s")
+                        params.append(next_started)
+                        updates.append("ended_at = %s")
+                        params.append(next_ended)
+
+                    if next_target_type == "manual":
+                        next_target_id = None
+                    elif next_target_type in ("streamer", "event"):
+                        if next_target_id is None:
+                            raise ValueError(
+                                "target_id is required for streamer/event sessions"
+                            )
+                    else:
+                        raise ValueError("Unsupported target_type")
+
+                    merged_comment = (
+                        patch.get("session_admin_comment")
+                        if "session_admin_comment" in patch
+                        else before.get("session_admin_comment")
+                    )
+                    if next_target_type == "manual" and not (merged_comment or "").strip():
+                        raise ValueError(
+                            "session_admin_comment is required for manual sessions"
+                        )
+
+                    if next_target_type != current_target_type:
+                        updates.append("target_type = %s")
+                        params.append(next_target_type)
+
+                    if next_target_id != current_target_id:
+                        updates.append("target_id = %s")
+                        params.append(next_target_id)
+
+                    if "priority_override" in patch:
+                        updates.append("priority_override = %s")
+                        params.append(patch.get("priority_override"))
+
+                    if "rate_override" in patch:
+                        updates.append("rate_override = %s")
+                        params.append(patch.get("rate_override"))
+
+                    if "session_admin_comment" in patch:
+                        updates.append("session_admin_comment = %s")
+                        params.append(patch.get("session_admin_comment"))
+
+                    if updates:
+                        params.append(session_id)
+                        await cursor.execute(
+                            f"UPDATE spec_sessions SET {', '.join(updates)} WHERE id = %s",
+                            tuple(params),
+                        )
+
+                    await self._recalc_session_points_delta(conn, session_id, lock=False)
+
+                    await cursor.execute(
+                        """
+                        SELECT
+                            id, pr_id, target_type, target_id, started_at, ended_at,
+                            is_probation, priority_override, rate_override,
+                            session_admin_comment, credited_points
+                        FROM spec_sessions
+                        WHERE id = %s
+                        """,
+                        (session_id,),
+                    )
+                    after = await cursor.fetchone()
+                    await conn.commit()
+                    return {"session_id": session_id, "before": before, "after": after}
+        except ValueError:
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update assistant session {session_id}: {e}", exc_info=True
+            )
+            return None
+
+    @db_retry()
+    async def soft_delete_assistant_session(
+        self,
+        pr_id: int,
+        session_id: int,
+        deleted_by_id: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Soft-delete one session and apply delta recalculation."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT
+                            id, pr_id, target_type, target_id, started_at, ended_at,
+                            credited_points, deleted_at
+                        FROM spec_sessions
+                        WHERE id = %s AND pr_id = %s AND deleted_at IS NULL
+                        FOR UPDATE
+                        """,
+                        (session_id, pr_id),
+                    )
+                    before = await cursor.fetchone()
+                    if not before:
+                        return None
+
+                    await cursor.execute(
+                        """
+                        UPDATE spec_sessions
+                        SET deleted_at = UTC_TIMESTAMP(),
+                            deleted_by_id = %s,
+                            delete_reason = %s
+                        WHERE id = %s
+                        """,
+                        (deleted_by_id, reason or "admin_delete", session_id),
+                    )
+                    await self._recalc_session_points_delta(conn, session_id, lock=False)
+
+                    await cursor.execute(
+                        """
+                        SELECT id, pr_id, deleted_at, deleted_by_id, delete_reason, credited_points
+                        FROM spec_sessions
+                        WHERE id = %s
+                        """,
+                        (session_id,),
+                    )
+                    after = await cursor.fetchone()
+                    await conn.commit()
+                    return {"session_id": session_id, "before": before, "after": after}
+        except Exception as e:
+            self.logger.error(
+                f"Failed to soft-delete session {session_id}: {e}", exc_info=True
+            )
+            return None
 
     # =========================================================================
     # Assistant CRUD Operations (for routes refactoring)
@@ -2773,13 +3754,45 @@ class Database:
                         """
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
-                            DATEDIFF(NOW(), a.added_at) as experience_days,
+                            GREATEST(
+                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                0
+                            ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
-                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
+                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
+                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ),
+                                4
+                            ) as total_points,
+                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
+                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
+                            COALESCE(a.warnings_units, 0) as warnings_units,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ) - COALESCE(a.penalty_points, 0),
+                                4
+                            ) as display_points,
+                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
+                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            CONCAT(
+                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                '/2 ',
+                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                '/2'
+                            ) as warnings_display,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
+                            ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
+                            ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
                         LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
                             AND act.ended_at IS NULL AND act.deleted_at IS NULL
@@ -2788,6 +3801,12 @@ class Database:
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
+                            FROM spec_session_day_slices
+                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            GROUP BY pr_id
+                        ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
                         LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
                         ORDER BY total_spec_seconds DESC
@@ -2808,13 +3827,45 @@ class Database:
                         """
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
-                            DATEDIFF(NOW(), a.added_at) as experience_days,
+                            GREATEST(
+                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                0
+                            ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
-                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
+                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
+                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ),
+                                4
+                            ) as total_points,
+                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
+                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
+                            COALESCE(a.warnings_units, 0) as warnings_units,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ) - COALESCE(a.penalty_points, 0),
+                                4
+                            ) as display_points,
+                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
+                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            CONCAT(
+                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                '/2 ',
+                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                '/2'
+                            ) as warnings_display,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
+                            ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
+                            ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
                         LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
                             AND act.ended_at IS NULL AND act.deleted_at IS NULL
@@ -2823,6 +3874,12 @@ class Database:
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
+                            FROM spec_session_day_slices
+                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            GROUP BY pr_id
+                        ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
                         LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
                         WHERE a.pr_id = %s
@@ -2936,7 +3993,9 @@ class Database:
                         # Unassignment event appears once session is closed
                         if ended_at is not None:
                             if end_reason and duration:
-                                unassign_action = f"Unassigned ({end_reason}, {duration})"
+                                unassign_action = (
+                                    f"Unassigned ({end_reason}, {duration})"
+                                )
                             elif end_reason:
                                 unassign_action = f"Unassigned ({end_reason})"
                             elif duration:
@@ -2955,7 +4014,9 @@ class Database:
                                 }
                             )
 
-                    logs.sort(key=lambda item: to_epoch(item.get("created_at")), reverse=True)
+                    logs.sort(
+                        key=lambda item: to_epoch(item.get("created_at")), reverse=True
+                    )
                     return logs[:session_limit]
         except Exception as e:
             self.logger.error(
@@ -2974,13 +4035,45 @@ class Database:
                         """
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
-                            DATEDIFF(NOW(), a.added_at) as experience_days,
+                            GREATEST(
+                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                0
+                            ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
-                            COALESCE(stats.sess_count, 0) as session_count, a.added_at,
+                            COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
+                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
+                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ),
+                                4
+                            ) as total_points,
+                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
+                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
+                            COALESCE(a.warnings_units, 0) as warnings_units,
+                            ROUND(
+                                COALESCE(
+                                    a.total_points,
+                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
+                                ) - COALESCE(a.penalty_points, 0),
+                                4
+                            ) as display_points,
+                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
+                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            CONCAT(
+                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                '/2 ',
+                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                '/2'
+                            ) as warnings_display,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
-                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours
+                            ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
+                            ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
+                            ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
                         LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
                             AND act.ended_at IS NULL AND act.deleted_at IS NULL
@@ -2989,6 +4082,12 @@ class Database:
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
+                            FROM spec_session_day_slices
+                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            GROUP BY pr_id
+                        ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
                         LEFT JOIN events e ON act.target_type = 'event' AND act.target_id = e.id
                         WHERE a.pr_id = %s
@@ -3053,28 +4152,109 @@ class Database:
 
     @db_retry()
     async def create_or_update_assistant(
-        self, pr_id: int, nickname: str, role: str, experience_days: int = 0
+        self,
+        pr_id: int,
+        nickname: str,
+        role: str,
+        experience_days: int = 0,
+        appointed_at: Optional[date] = None,
     ) -> bool:
         """Create or update assistant profile."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id, nickname, role, added_at)
-                        VALUES (%s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY))
-                        ON DUPLICATE KEY UPDATE
-                            nickname = VALUES(nickname),
-                            role = VALUES(role),
-                            added_at = DATE_SUB(NOW(), INTERVAL %s DAY)
-                        """,
-                        (pr_id, nickname, role, experience_days, experience_days),
-                    )
+                    if appointed_at is not None:
+                        appointed_at_dt = datetime.combine(
+                            appointed_at, datetime.min.time(), tzinfo=timezone.utc
+                        )
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistants (pr_id, nickname, role, appointed_at)
+                            VALUES (%s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                nickname = VALUES(nickname),
+                                role = VALUES(role),
+                                appointed_at = VALUES(appointed_at)
+                            """,
+                            (pr_id, nickname, role, appointed_at_dt),
+                        )
+                    else:
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistants (pr_id, nickname, role, appointed_at)
+                            VALUES (%s, %s, %s, DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY))
+                            ON DUPLICATE KEY UPDATE
+                                nickname = VALUES(nickname),
+                                role = VALUES(role),
+                                appointed_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)
+                            """,
+                            (pr_id, nickname, role, experience_days, experience_days),
+                        )
                     await conn.commit()
                     return True
         except Exception as e:
             self.logger.error(f"Failed to save assistant {pr_id}: {e}", exc_info=True)
             raise
+
+    @db_retry()
+    async def update_assistant_assignment(
+        self,
+        pr_id: int,
+        assigned_to_type: Optional[str],
+        assigned_to_id: Optional[int],
+        assigned_to_name: Optional[str] = None,
+    ) -> bool:
+        """Compatibility helper: map assistant assignment updates to spec sessions."""
+        try:
+            if assigned_to_type is None:
+                async with self.pool.acquire() as conn:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        await cursor.execute(
+                            """
+                            SELECT id
+                            FROM spec_sessions
+                            WHERE pr_id = %s
+                              AND ended_at IS NULL
+                              AND deleted_at IS NULL
+                            FOR UPDATE
+                            """,
+                            (pr_id,),
+                        )
+                        row = await cursor.fetchone()
+                        if not row:
+                            return True
+                        session_id = int(row["id"])
+                        await cursor.execute(
+                            """
+                            UPDATE spec_sessions
+                            SET ended_at = GREATEST(
+                                    DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                    UTC_TIMESTAMP()
+                                ),
+                                end_reason = 'manual_assignment_clear'
+                            WHERE id = %s
+                            """,
+                            (session_id,),
+                        )
+                        await self._recalc_session_points_delta(
+                            conn, session_id, lock=False
+                        )
+                        await conn.commit()
+                        return True
+
+            if assigned_to_id is None:
+                return False
+            if assigned_to_type == "streamer":
+                return await self.assign_pr_to_streamer(assigned_to_id, pr_id)
+            if assigned_to_type == "event":
+                return await self.join_event(assigned_to_id, pr_id)
+            return False
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update assignment for assistant {pr_id}: {e}",
+                exc_info=True,
+            )
+            return False
 
     @db_retry()
     async def delete_assistant(self, user_id: int) -> bool:
@@ -3252,7 +4432,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT s.streamer_id, s.streamer_name, ss.pr_id as assigned_pr_id, ss.started_at as assigned_at,
-                               TIMESTAMPDIFF(SECOND, ss.started_at, NOW()) as duration_seconds
+                               TIMESTAMPDIFF(SECOND, ss.started_at, UTC_TIMESTAMP()) as duration_seconds
                         FROM spec_sessions ss
                         JOIN streamers s ON s.streamer_id = ss.target_id
                         WHERE ss.target_type = 'streamer'
@@ -3303,6 +4483,69 @@ class Database:
             return []
 
     @db_retry()
+    async def get_assistant_sessions_detailed(
+        self,
+        pr_id: int,
+        limit: int = 50,
+        include_deleted: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Get assistant sessions with full admin-editable fields."""
+        try:
+            limit = max(1, min(int(limit or 50), 200))
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    deleted_clause = "" if include_deleted else "AND ss.deleted_at IS NULL"
+                    await cursor.execute(
+                        f"""
+                        SELECT
+                            ss.id,
+                            ss.pr_id,
+                            ss.target_type,
+                            ss.target_id,
+                            CASE
+                                WHEN ss.target_type = 'streamer' THEN s.streamer_name
+                                WHEN ss.target_type = 'event' THEN e.name
+                                ELSE NULL
+                            END AS target_name,
+                            ss.started_at,
+                            ss.ended_at,
+                            ss.duration_seconds,
+                            ss.end_reason,
+                            ss.is_probation,
+                            ss.priority_auto,
+                            ss.priority_override,
+                            ss.rate_auto,
+                            ss.rate_override,
+                            ss.credited_points,
+                            ss.session_admin_comment,
+                            ss.deleted_at,
+                            ss.delete_reason
+                        FROM spec_sessions ss
+                        LEFT JOIN streamers s
+                            ON ss.target_type = 'streamer' AND ss.target_id = s.streamer_id
+                        LEFT JOIN events e
+                            ON ss.target_type = 'event' AND ss.target_id = e.id
+                        WHERE ss.pr_id = %s
+                          {deleted_clause}
+                        ORDER BY ss.started_at DESC
+                        LIMIT %s
+                        """,
+                        (pr_id, limit),
+                    )
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        row["pr_id"] = str(row["pr_id"])
+                        if row.get("target_id") is not None:
+                            row["target_id"] = str(row["target_id"])
+                    return rows
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get detailed assistant sessions for {pr_id}: {e}",
+                exc_info=True,
+            )
+            return []
+
+    @db_retry()
     async def transfer_streamer(
         self, from_pr_id: int, to_pr_id: int, streamer_id: int
     ) -> Optional[int]:
@@ -3319,14 +4562,16 @@ class Database:
         """
         try:
             # First unassign current PR with 'transfer' reason
-            result = await self.unassign_pr_from_streamer(streamer_id, "transfer")
+            result = await self.unassign_pr_from_streamer(
+                streamer_id, pr_id=from_pr_id, end_reason="transfer"
+            )
             if not result:
                 return None
 
             # Assign new PR
             await self.assign_pr_to_streamer(streamer_id, to_pr_id)
 
-            return result.get("duration_seconds")
+            return result[0].get("duration_seconds")
         except Exception as e:
             self.logger.error(
                 f"Failed to transfer streamer {streamer_id} from {from_pr_id} to {to_pr_id}: {e}",
@@ -3384,9 +4629,7 @@ class Database:
             raise
 
     @db_retry()
-    async def get_user_by_discord_id(
-        self, discord_id: int
-    ) -> Optional[Dict[str, Any]]:
+    async def get_user_by_discord_id(self, discord_id: int) -> Optional[Dict[str, Any]]:
         """Get user by Discord ID (joins assistants for role)."""
         try:
             async with self.pool.acquire() as conn:

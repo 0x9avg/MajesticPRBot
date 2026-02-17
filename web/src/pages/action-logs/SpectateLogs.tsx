@@ -29,6 +29,7 @@ export function SpectateLogs() {
     const [filters, setFilters] = React.useState({
         action: [] as string[],
         adminName: '',
+        kind: '',
         targetType: '',
         startDate: '',
         endDate: ''
@@ -47,6 +48,34 @@ export function SpectateLogs() {
     const canViewAdminLogs = user?.permissions?.can_view_admin_logs === true ||
         user?.role === 'manager' ||
         user?.role === 'developer';
+
+    const resolveKind = React.useCallback((action: string): string => {
+        if (!action || !action.includes('.')) return 'other';
+        return action.split('.', 1)[0];
+    }, []);
+
+    const kindBadgeClass = React.useCallback((kind: string): string => {
+        switch (kind) {
+            case 'user':
+                return 'bg-sky-500/20 text-sky-300 border border-sky-400/30';
+            case 'streamer':
+                return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30';
+            case 'event':
+                return 'bg-amber-500/20 text-amber-300 border border-amber-400/30';
+            case 'assistant':
+                return 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-400/30';
+            case 'system':
+                return 'bg-rose-500/20 text-rose-300 border border-rose-400/30';
+            case 'rbac':
+                return 'bg-indigo-500/20 text-indigo-300 border border-indigo-400/30';
+            case 'spec':
+                return 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/30';
+            case 'guild':
+                return 'bg-lime-500/20 text-lime-300 border border-lime-400/30';
+            default:
+                return 'bg-white/10 text-white/70 border border-white/10';
+        }
+    }, []);
 
     React.useEffect(() => {
         pageConfigRef.current = pageConfig;
@@ -81,7 +110,8 @@ export function SpectateLogs() {
             if (currentFilters.action && currentFilters.action.length > 0) {
                 currentFilters.action.forEach(act => params.append('action', act));
             }
-            if (currentFilters.adminName) params.append('admin_name', currentFilters.adminName);
+            if (currentFilters.adminName) params.append('actor_name', currentFilters.adminName);
+            if (currentFilters.kind) params.append('kind', currentFilters.kind);
             if (currentFilters.targetType) params.append('target_type', currentFilters.targetType);
             if (currentFilters.startDate) params.append('start_date', currentFilters.startDate);
             if (currentFilters.endDate) params.append('end_date', currentFilters.endDate);
@@ -146,6 +176,7 @@ export function SpectateLogs() {
         setFilters({
             action: [],
             adminName: '',
+            kind: '',
             targetType: '',
             startDate: '',
             endDate: ''
@@ -161,8 +192,10 @@ export function SpectateLogs() {
     const handleCopyLog = (log: AdminLogRecord) => {
         const date = new Date(log.created_at).toLocaleString();
         const details = log.details ? JSON.stringify(log.details, null, 2) : 'Нет деталей';
+        const actorName = log.actor_name || log.admin_name || 'unknown';
+        const actorRole = log.actor_role || log.admin_role || 'unknown';
 
-        const textToCopy = `[ ${date} ] [ ${log.admin_name} | ${log.admin_role} ] [ ${log.action} ]\n\`\`\`md\n${details}\n\`\`\``;
+        const textToCopy = `[ ${date} ] [ ${actorName} | ${actorRole} ] [ ${log.action} ]\n\`\`\`md\n${details}\n\`\`\``;
 
         navigator.clipboard.writeText(textToCopy).then(() => {
             setNotification(`Вы успешно скопировали лог #${log.id}`);
@@ -172,10 +205,29 @@ export function SpectateLogs() {
 
     const actionOptions = [
         { value: '', label: 'Все действия' },
-        { value: 'update_streamer', label: 'update_streamer' },
-        { value: 'create_event', label: 'create_event' },
-        { value: 'delete_streamer', label: 'delete_streamer' },
-        { value: 'reg_user', label: 'reg_user' },
+        { value: 'user.create', label: 'user.create' },
+        { value: 'streamer.add', label: 'streamer.add' },
+        { value: 'event.create', label: 'event.create' },
+        { value: 'event.update', label: 'event.update' },
+        { value: 'assistant.spec_points.adjust.permanent', label: 'assistant.spec_points.adjust.permanent' },
+        { value: 'assistant.spec_time.add', label: 'assistant.spec_time.add' },
+        { value: 'assistant.spec_time.subtract', label: 'assistant.spec_time.subtract' },
+        { value: 'system.maintenance.enable', label: 'system.maintenance.enable' },
+        { value: 'system.maintenance.disable', label: 'system.maintenance.disable' },
+        { value: 'rbac.matrix.update', label: 'rbac.matrix.update' },
+    ];
+
+    const kindOptions = [
+        { value: '', label: 'Все категории' },
+        { value: 'user', label: 'user.*' },
+        { value: 'streamer', label: 'streamer.*' },
+        { value: 'event', label: 'event.*' },
+        { value: 'assistant', label: 'assistant.*' },
+        { value: 'system', label: 'system.*' },
+        { value: 'rbac', label: 'rbac.*' },
+        { value: 'spec', label: 'spec.*' },
+        { value: 'guild', label: 'guild.*' },
+        { value: 'other', label: 'other' },
     ];
 
     const tabs = [
@@ -250,6 +302,21 @@ export function SpectateLogs() {
                             />
                         </div>
 
+                        <div className="flex-1 min-w-[180px]">
+                            <label className="text-xs font-medium text-white/40 mb-1 block">Категория</label>
+                            <CustomSelect
+                                value={filters.kind}
+                                onChange={(val) => {
+                                    if (typeof val === 'string') {
+                                        setFilters(prev => ({ ...prev, kind: val }));
+                                    }
+                                }}
+                                options={kindOptions}
+                                icon={<Filter className="w-4 h-4" />}
+                                placeholder="Все категории"
+                            />
+                        </div>
+
                         <div className="flex gap-2">
                             <div>
                                 <label className="text-xs font-medium text-white/40 mb-1 block">С даты</label>
@@ -298,7 +365,7 @@ export function SpectateLogs() {
                                     <tr className="border-b border-white/5 bg-white/5">
                                         {[
                                             { key: 'created_at', label: 'Дата' },
-                                            { key: 'admin_name', label: 'Админ' },
+                                            { key: 'actor_name', label: 'Админ' },
                                             { key: 'action', label: 'Действие' },
                                             { key: 'target_name', label: 'Цель' }
                                         ].map((col) => (
@@ -335,19 +402,35 @@ export function SpectateLogs() {
                                                 </td>
                                                 <td className="p-4">
                                                     <div className="flex items-center gap-2">
-                                                        <span className="font-medium text-white">{log.admin_name}</span>
-                                                        <span className="text-xs px-2 py-0.5 rounded bg-white/10 text-white/40">{log.admin_role}</span>
+                                                        <span className="font-medium text-white">{log.actor_name || log.admin_name || 'unknown'}</span>
+                                                        <span className="text-xs px-2 py-0.5 rounded bg-white/10 text-white/40">
+                                                            {log.actor_role || log.admin_role || 'unknown'}
+                                                        </span>
                                                     </div>
                                                 </td>
                                                 <td className="p-4 text-sm font-medium text-white/80">
-                                                    {log.action}
+                                                    <div className="flex flex-col gap-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-mono text-xs text-white/60">{log.action}</span>
+                                                            <span
+                                                                className={`text-[10px] px-2 py-0.5 rounded ${kindBadgeClass(log.kind || resolveKind(log.action))}`}
+                                                            >
+                                                                {log.kind || resolveKind(log.action)}
+                                                            </span>
+                                                        </div>
+                                                        {log.details?.summary && (
+                                                            <span className="text-xs text-white/70">{log.details.summary}</span>
+                                                        )}
+                                                    </div>
                                                 </td>
                                                 <td className="p-4 text-sm text-white/60">
                                                     <div className="flex flex-col gap-1">
                                                         <span className="font-medium text-white">{log.target_name || log.target_id}</span>
-                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/40 w-fit font-mono">
-                                                            {log.target_type} #{log.target_id}
-                                                        </span>
+                                                        {log.target_type && (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/40 w-fit font-mono">
+                                                                {log.target_type} #{log.target_id}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 </td>
                                                 <td className="p-4 text-right">

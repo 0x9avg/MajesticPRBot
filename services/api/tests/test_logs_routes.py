@@ -34,24 +34,27 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
     fake_db.admin_logs_entries = [
         {
             "id": 1,
+            "actor_name": "Zed",
             "admin_name": "Zed",
-            "action": "reg_user",
+            "action": "user.create",
             "target_name": "user1",
             "target_type": "user",
             "created_at": "2026-02-10T10:00:00",
         },
         {
             "id": 2,
+            "actor_name": "Alice",
             "admin_name": "Alice",
-            "action": "update_streamer",
+            "action": "streamer.update",
             "target_name": "streamer1",
             "target_type": "streamer",
             "created_at": "2026-02-11T10:00:00",
         },
         {
             "id": 3,
+            "actor_name": "Bob",
             "admin_name": "Bob",
-            "action": "reg_user",
+            "action": "user.create",
             "target_name": "user2",
             "target_type": "user",
             "created_at": "2026-02-12T10:00:00",
@@ -74,8 +77,8 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
             params={
                 "limit": 2,
                 "offset": 0,
-                "action": ["reg_user"],
-                "sort_by": "admin_name",
+                "action": ["user.create"],
+                "sort_by": "actor_name",
                 "sort_order": "asc",
             },
         )
@@ -83,4 +86,4 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 2
-    assert data[0]["admin_name"] == "Alice"
+    assert data[0]["actor_name"] == "Bob"

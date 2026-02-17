@@ -97,6 +97,72 @@ async def test_get_active_and_scheduled_events(build_api_app, fake_db) -> None:
     assert "Scheduled" in names
 
 
+async def test_get_all_events_returns_sorted_with_participants(
+    build_api_app, fake_db
+) -> None:
+    now = datetime.now(timezone.utc)
+    fake_db.events_by_id = {
+        1: {
+            "id": 1,
+            "name": "Inactive old",
+            "description": "x",
+            "required_pr_count": 1,
+            "pr_slots": 1,
+            "priority": 0,
+            "is_pinned": False,
+            "start_time": None,
+            "channel_id": 100,
+            "created_by": 1,
+            "is_active": False,
+            "created_at": now - timedelta(days=2),
+            "notification_sent": True,
+            "message_id": 0,
+        },
+        2: {
+            "id": 2,
+            "name": "Active pinned",
+            "description": "x",
+            "required_pr_count": 1,
+            "pr_slots": 1,
+            "priority": 0,
+            "is_pinned": True,
+            "start_time": None,
+            "channel_id": 100,
+            "created_by": 1,
+            "is_active": True,
+            "created_at": now - timedelta(days=1),
+            "notification_sent": True,
+            "message_id": 0,
+        },
+        3: {
+            "id": 3,
+            "name": "Active recent",
+            "description": "x",
+            "required_pr_count": 1,
+            "pr_slots": 1,
+            "priority": 0,
+            "is_pinned": False,
+            "start_time": None,
+            "channel_id": 100,
+            "created_by": 1,
+            "is_active": True,
+            "created_at": now,
+            "notification_sent": True,
+            "message_id": 0,
+        },
+    }
+    fake_db.event_participants = {1: {}, 2: {9001: now}, 3: {}}
+
+    async with await _client(build_api_app) as client:
+        response = await client.get("/api/events")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert [item["id"] for item in payload] == [2, 3, 1]
+    assert payload[0]["current_participants"] == 1
+    assert payload[0]["participants"][0]["pr_id"] == "9001"
+
+
 async def test_get_event_and_participants(build_api_app, fake_db) -> None:
     await _create_sample_event(build_api_app, name="Lookup")
     fake_db.event_participants[1][42] = datetime.now(timezone.utc)

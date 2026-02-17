@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
-import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar, type LucideIcon } from 'lucide-react';
+import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar, Coins, BadgePercent, type LucideIcon } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Assistant, AssistantLog } from '../types/domain';
-import type { UserContext } from '../types/auth';
 import { unwrapApiData } from '../types/api';
 
 export default function UserProfile() {
@@ -12,6 +11,25 @@ export default function UserProfile() {
     const [logs, setLogs] = useState<AssistantLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+
+    const fetchAssistantData = async (targetId: string | number) => {
+        const assistantRes = await fetch(`/api/assistants/${targetId}`);
+        if (!assistantRes.ok) {
+            return null;
+        }
+        const json = await assistantRes.json() as unknown;
+        return unwrapApiData<Assistant>(json);
+    };
+
+    const fetchAssistantLogs = async (prId: number) => {
+        const logsRes = await fetch(`/api/assistants/${prId}/logs`);
+        if (!logsRes.ok) {
+            return [];
+        }
+        const logsJson = await logsRes.json() as unknown;
+        const logsData = unwrapApiData<AssistantLog[]>(logsJson);
+        return Array.isArray(logsData) ? logsData : [];
+    };
 
     useEffect(() => {
         const fetchData = async () => {
@@ -36,7 +54,7 @@ export default function UserProfile() {
                 }
 
                 if (!authRes.ok) throw new Error('Failed to load user info');
-                const authUser = await authRes.json() as UserContext;
+                const authUser = await authRes.json() as { discord_id: string; nickname: string };
 
                 // 2. Determine Target User (Me or route param)
                 // If id is present, we are viewing someone else. If not, we view ourselves.
@@ -45,11 +63,8 @@ export default function UserProfile() {
 
                 try {
                     // Try fetch by Target ID
-                    const assistantRes = await fetch(`/api/assistants/${targetId}`);
-                    if (assistantRes.ok) {
-                        const json = await assistantRes.json() as unknown;
-                        assistantData = unwrapApiData<Assistant>(json);
-                    } else if (!id) {
+                    assistantData = await fetchAssistantData(targetId);
+                    if (!assistantData && !id) {
                         // Only fall back to nickname search if we are viewing "Me" and ID fetch failed
                         // (Logic preserved from original code for self-profile robustness)
                         const allRes = await fetch('/api/assistants');
@@ -69,12 +84,8 @@ export default function UserProfile() {
                 if (assistantData) {
                     setUser(assistantData);
                     // 3. Fetch Logs
-                    const logsRes = await fetch(`/api/assistants/${assistantData.pr_id}/logs`);
-                    if (logsRes.ok) {
-                        const logsJson = await logsRes.json() as unknown;
-                        const logsData = unwrapApiData<AssistantLog[]>(logsJson);
-                        setLogs(Array.isArray(logsData) ? logsData : []);
-                    }
+                    const assistantLogs = await fetchAssistantLogs(assistantData.pr_id);
+                    setLogs(assistantLogs);
                 } else {
                     setError('PR-профиль не найден. Возможно, ваш Discord ID не привязан к базе ассистентов.');
                 }
@@ -114,26 +125,23 @@ export default function UserProfile() {
     const StatusBadge = () => {
         const isFree = user.status === 'free';
         const color = isFree ? 'text-[#4ade80]' : 'text-[#facc15]';
-        const bg = isFree ? 'bg-[#4ade80]/10' : 'bg-[#facc15]/10';
+        const bg = isFree ? 'bg-[#4ade80]/15 border-[#4ade80]/30' : 'bg-[#facc15]/15 border-[#facc15]/30';
         const StatusIcon = isFree ? Shield : (user.assigned_to_type === 'streamer' ? Wifi : Calendar);
+        const assignedLabel = !isFree
+            ? `${user.assigned_to_type === 'streamer' ? 'Стример' : 'Событие'}: ${user.assigned_to_name || 'Не указано'}`
+            : 'Без закрепления';
 
         return (
-            <div className={`flex flex-col gap-1 p-4 rounded-2xl border border-white/5 bg-[#242424]/40 h-full`}>
-                <div className="flex items-center gap-2 mb-2">
-                    <div className={`p-1.5 rounded-lg ${bg} ${color}`}>
-                        <StatusIcon className="w-4 h-4" />
-                    </div>
+            <div className="flex flex-col gap-3 p-4 rounded-2xl border border-white/5 bg-[#242424]/40 h-full">
+                <div className="flex items-center justify-between gap-2">
                     <span className="text-white/40 text-xs font-medium uppercase tracking-wider">Текущий статус</span>
-                </div>
-                <div>
-                    <div className={`text-xl font-bold ${color}`}>
-                        {isFree ? 'Свободен' : 'В работе'}
+                    <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-semibold ${bg} ${color}`}>
+                        <StatusIcon className="w-3.5 h-3.5" />
+                        <span>{isFree ? 'Свободен' : 'Закреплен'}</span>
                     </div>
-                    {!isFree && (
-                        <div className="text-sm text-white/50 mt-1 truncate">
-                            {user.assigned_to_name}
-                        </div>
-                    )}
+                </div>
+                <div className="text-sm text-white/60 truncate">
+                    {assignedLabel}
                 </div>
             </div>
         );
@@ -145,9 +153,19 @@ export default function UserProfile() {
         sub?: string;
         icon: LucideIcon;
         color: string;
+        valueClassName?: string;
+        subClassName?: string;
     }
 
-    const StatCard = ({ label, value, sub, icon: Icon, color }: StatCardProps) => (
+    const StatCard = ({
+        label,
+        value,
+        sub,
+        icon: Icon,
+        color,
+        valueClassName = 'text-white',
+        subClassName = 'text-white/50',
+    }: StatCardProps) => (
         <div className="flex flex-col gap-1 p-4 rounded-2xl border border-white/5 bg-[#242424]/40 h-full">
             <div className="flex items-center gap-2 mb-2">
                 <div className={`p-1.5 rounded-lg bg-white/5 ${color}`}>
@@ -156,8 +174,8 @@ export default function UserProfile() {
                 <span className="text-white/40 text-xs font-medium uppercase tracking-wider">{label}</span>
             </div>
             <div>
-                <div className={`text-xl font-bold text-white`}>{value}</div>
-                {sub && <div className="text-sm text-white/50 mt-1">{sub}</div>}
+                <div className={`text-xl font-bold ${valueClassName}`}>{value}</div>
+                {sub && <div className={`text-sm mt-1 ${subClassName}`}>{sub}</div>}
             </div>
         </div>
     );
@@ -196,11 +214,18 @@ export default function UserProfile() {
                                     <User className="w-4 h-4" />
                                     <span>{user.experience_days} дней стажа</span>
                                 </div>
+                                {user.appointed_at && (
+                                    <div className="flex items-center gap-1.5 text-white/40 text-sm">
+                                        <span className="w-1 h-1 rounded-full bg-white/40"></span>
+                                        <Calendar className="w-4 h-4" />
+                                        <span>Назначен: {new Date(user.appointed_at).toLocaleDateString('ru-RU')}</span>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
                         {/* Stats Grid integrated into Header */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-3xl">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 max-w-5xl">
                             <StatusBadge />
 
                             <StatCard
@@ -211,10 +236,34 @@ export default function UserProfile() {
                             />
 
                             <StatCard
-                                label="Сессий"
-                                value={user.session_count ?? 0}
-                                color="text-purple-400"
-                                icon={History}
+                                label="Баллы"
+                                value={user.display_points ?? user.total_points ?? 0}
+                                color="text-green-400"
+                                icon={Coins}
+                                valueClassName="text-green-400"
+                            />
+
+                            <StatCard
+                                label="Выговоры"
+                                value={user.warnings_display ?? '0/2 0/2'}
+                                color="text-rose-400"
+                                icon={Shield}
+                            />
+
+                            <StatCard
+                                label="Штрафные баллы"
+                                value={user.penalty_points ?? 0}
+                                color="text-amber-400"
+                                icon={Coins}
+                                valueClassName="text-amber-300"
+                            />
+
+                            <StatCard
+                                label="Штраф, %"
+                                value={`${user.penalty_percent ?? 0}%`}
+                                color="text-amber-400"
+                                icon={BadgePercent}
+                                valueClassName="text-amber-300"
                             />
                         </div>
                     </div>

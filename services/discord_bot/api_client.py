@@ -516,28 +516,28 @@ class APIClient:
     async def create_manual_session(
         self,
         pr_id: int,
-        admin_id: int,
         target_type: str,
-        target_id: int,
-        target_name: str,
-        duration_seconds: int,
-        date: str,
+        target_id: Optional[int],
+        target_name: Optional[str],
+        started_at: str,
+        ended_at: str,
         is_probation: bool = False,
         priority: int = 0,
+        session_admin_comment: Optional[str] = None,
     ) -> bool:
         """Create a manual spec session."""
         result = await self._request(
             "POST",
             f"/assistants/{pr_id}/session",
             data={
-                "admin_id": admin_id,
                 "target_type": target_type,
                 "target_id": target_id,
                 "target_name": target_name,
-                "duration_seconds": duration_seconds,
-                "date": date,
+                "started_at": started_at,
+                "ended_at": ended_at,
                 "is_probation": is_probation,
                 "priority": priority,
+                "session_admin_comment": session_admin_comment,
             },
         )
         return result is not None and "detail" not in result

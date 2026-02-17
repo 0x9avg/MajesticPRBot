@@ -9,8 +9,12 @@ type SortKey =
     | 'role'
     | 'experience_days'
     | 'status'
-    | 'total_spec_seconds'
-    | 'session_count';
+    | 'total_spec_hours'
+    | 'avg_spec_hours_per_day_30d'
+    | 'display_points'
+    | 'warnings'
+    | 'penalty_points'
+    | 'penalty_percent';
 
 export function PRStats() {
     const navigate = useNavigate();
@@ -58,11 +62,19 @@ export function PRStats() {
             case 'experience_days':
                 return assistant.experience_days || 0;
             case 'status':
-                return assistant.status || '';
-            case 'total_spec_seconds':
-                return assistant.total_spec_seconds || 0;
-            case 'session_count':
-                return assistant.session_count || 0;
+                return assistant.status === 'assigned' ? 1 : 0;
+            case 'total_spec_hours':
+                return assistant.total_spec_hours || 0;
+            case 'avg_spec_hours_per_day_30d':
+                return assistant.avg_spec_hours_per_day_30d || 0;
+            case 'display_points':
+                return assistant.display_points ?? assistant.total_points ?? 0;
+            case 'penalty_points':
+                return assistant.penalty_points || 0;
+            case 'penalty_percent':
+                return assistant.penalty_percent || 0;
+            case 'warnings':
+                return (assistant.strict_warnings || 0) * 10 + (assistant.oral_warnings || 0);
             default:
                 return 0;
         }
@@ -84,6 +96,19 @@ export function PRStats() {
                 return sortConfig.direction === 'asc' ? weightA - weightB : weightB - weightA;
             }
 
+            if (sortConfig.key === 'status') {
+                const statusA = getSortValue(a, sortConfig.key) as number;
+                const statusB = getSortValue(b, sortConfig.key) as number;
+                if (statusA !== statusB) {
+                    return sortConfig.direction === 'asc' ? statusA - statusB : statusB - statusA;
+                }
+                const nameA = a.assigned_to_name || '';
+                const nameB = b.assigned_to_name || '';
+                return sortConfig.direction === 'asc'
+                    ? nameA.localeCompare(nameB)
+                    : nameB.localeCompare(nameA);
+            }
+
             const aValue = getSortValue(a, sortConfig.key);
             const bValue = getSortValue(b, sortConfig.key);
             if (aValue < bValue) {
@@ -96,6 +121,78 @@ export function PRStats() {
         });
         return sorted;
     };
+
+    const penaltyPointsSortedPositive = React.useMemo(
+        () =>
+            assistants
+                .map((assistant) => Number(assistant.penalty_points || 0))
+                .filter((value) => value > 0)
+                .sort((a, b) => a - b),
+        [assistants]
+    );
+
+    const penaltyPercentSortedPositive = React.useMemo(
+        () =>
+            assistants
+                .map((assistant) => Number(assistant.penalty_percent || 0))
+                .filter((value) => value > 0)
+                .sort((a, b) => a - b),
+        [assistants]
+    );
+
+    const getRelativePenaltyClass = (
+        value: number,
+        sortedPositiveValues: number[]
+    ): string => {
+        if (value <= 0) {
+            return 'bg-white/5 text-white/60 border-white/10';
+        }
+
+        if (sortedPositiveValues.length < 3) {
+            return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
+        }
+
+        const firstIndex = sortedPositiveValues.findIndex((current) => current === value);
+        let lastIndex = -1;
+        for (let i = sortedPositiveValues.length - 1; i >= 0; i -= 1) {
+            if (sortedPositiveValues[i] === value) {
+                lastIndex = i;
+                break;
+            }
+        }
+
+        if (firstIndex === -1 || lastIndex === -1) {
+            return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
+        }
+
+        const midRank = (firstIndex + lastIndex) / 2;
+        const percentile = ((midRank + 1) / sortedPositiveValues.length) * 100;
+
+        if (percentile <= 50) {
+            return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
+        }
+        if (percentile <= 85) {
+            return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
+        }
+        return 'bg-red-500/15 text-red-300 border-red-500/30';
+    };
+
+    const getWarningsBadgeClass = (assistant: Assistant): string => {
+        const strictWarnings = assistant.strict_warnings || 0;
+        if (strictWarnings <= 0) {
+            return 'bg-white/5 text-white/70 border-white/10';
+        }
+        if (strictWarnings === 1) {
+            return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
+        }
+        if (strictWarnings === 2) {
+            return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
+        }
+        return 'bg-red-500/15 text-red-300 border-red-500/30';
+    };
+
+    const formatHours = (value: number | undefined) =>
+        Number(value || 0).toFixed(2);
 
     const getRoleBadge = (role: string) => {
         const styles: Record<string, string> = {
@@ -118,7 +215,10 @@ export function PRStats() {
         const label = labels[role] || role;
 
         return (
-            <span className={`px-3 py-1 rounded-full text-xs font-medium border ${style}`}>
+            <span
+                className={`inline-flex max-w-full items-center px-2.5 py-1 rounded-full text-xs font-medium border whitespace-nowrap truncate ${style}`}
+                title={label}
+            >
                 {label}
             </span>
         );
@@ -126,16 +226,23 @@ export function PRStats() {
 
     const getStatusBadge = (assistant: Assistant) => {
         if (assistant.status === 'free') {
-            return <span className="px-3 py-1 rounded-full text-xs font-medium bg-green-500/20 text-green-400 border border-green-500/30">Свободен</span>;
+            return (
+                <span className="inline-flex px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap bg-green-500/20 text-green-400 border border-green-500/30">
+                    Свободен
+                </span>
+            );
         }
 
         const typeLabel = assistant.assigned_to_type === 'streamer' ? '🎥 Стример' : '🎉 Ивент';
         return (
             <div className="flex flex-col gap-1">
-                <span className="px-3 py-1 rounded-full text-xs font-medium bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                <span className="inline-flex w-fit px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap bg-purple-500/20 text-purple-400 border border-purple-500/30">
                     В закрепе
                 </span>
-                <span className="text-xs text-white/50">
+                <span
+                    className="text-xs text-white/50 truncate"
+                    title={`${typeLabel}: ${assistant.assigned_to_name ?? ''}`}
+                >
                     {typeLabel}: {assistant.assigned_to_name}
                 </span>
             </div>
@@ -149,7 +256,7 @@ export function PRStats() {
 
     const renderHeader = (label: string, sortKey: SortKey) => (
         <th
-            className="text-left p-4 text-sm font-semibold text-white/60 select-none cursor-pointer hover:text-white transition-colors group"
+            className="text-left p-3 text-xs font-semibold text-white/60 select-none cursor-pointer hover:text-white transition-colors group whitespace-nowrap"
             onClick={() => handleSort(sortKey)}
         >
             <div className="flex items-center gap-2">
@@ -180,22 +287,38 @@ export function PRStats() {
             </div>
 
             <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full">
-                        <thead>
+                <div className="max-h-[70vh] overflow-y-auto">
+                    <table className="w-full table-fixed text-sm">
+                        <colgroup>
+                            <col className="w-[14%]" />
+                            <col className="w-[11%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[17%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[8%]" />
+                        </colgroup>
+                        <thead className="sticky top-0 z-10 bg-[#242424]">
                             <tr className="border-b border-white/5">
                                 {renderHeader('Ник', 'nickname')}
                                 {renderHeader('Должность', 'role')}
                                 {renderHeader('Стаж', 'experience_days')}
                                 {renderHeader('Статус', 'status')}
-                                {renderHeader('Время спека', 'total_spec_seconds')}
-                                {renderHeader('Сессий', 'session_count')}
+                                {renderHeader('Общее время', 'total_spec_hours')}
+                                {renderHeader('Среднее ч/день', 'avg_spec_hours_per_day_30d')}
+                                {renderHeader('Баллы', 'display_points')}
+                                {renderHeader('Выговоры', 'warnings')}
+                                {renderHeader('Штраф. баллы', 'penalty_points')}
+                                {renderHeader('Штраф, %', 'penalty_percent')}
                             </tr>
                         </thead>
                         <tbody>
                             {assistants.length === 0 ? (
                                 <tr>
-                                    <td colSpan={6} className="text-center py-12 text-white/40 select-none">
+                                    <td colSpan={10} className="text-center py-12 text-white/40 select-none">
                                         Нет данных
                                     </td>
                                 </tr>
@@ -205,7 +328,7 @@ export function PRStats() {
                                         key={assistant.pr_id}
                                         className="border-b border-white/5 hover:bg-white/5 transition-colors"
                                     >
-                                        <td className="p-4">
+                                        <td className="p-3">
                                             <div
                                                 className="flex items-center gap-2 cursor-pointer group"
                                                 onClick={() => navigate(`/profile/${assistant.pr_id}`)}
@@ -214,19 +337,54 @@ export function PRStats() {
                                                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#3b82f6] to-[#e81c5a] flex items-center justify-center text-white font-bold text-sm">
                                                     {(assistant.nickname?.charAt(0) || '?').toUpperCase()}
                                                 </div>
-                                                <span className="font-medium text-white group-hover:text-[#3b82f6] transition-colors">{assistant.nickname}</span>
+                                                <span className="font-medium text-white group-hover:text-[#3b82f6] transition-colors truncate" title={assistant.nickname}>
+                                                    {assistant.nickname}
+                                                </span>
                                             </div>
                                         </td>
-                                        <td className="p-4">{getRoleBadge(assistant.role)}</td>
-                                        <td className="p-4 text-white/80">
+                                        <td className="p-3">{getRoleBadge(assistant.role)}</td>
+                                        <td className="p-3 text-white/80 whitespace-nowrap">
                                             {assistant.experience_days} {assistant.experience_days === 1 ? 'день' : 'дней'}
                                         </td>
-                                        <td className="p-4">{getStatusBadge(assistant)}</td>
-                                        <td className="p-4 text-white/80 font-mono">
-                                            {assistant.total_spec_hours}ч
+                                        <td className="p-3">{getStatusBadge(assistant)}</td>
+                                        <td className="p-3 text-white/80 font-mono whitespace-nowrap">
+                                            {formatHours(assistant.total_spec_hours)}ч
                                         </td>
-                                        <td className="p-4 text-white/80">
-                                            {assistant.session_count}
+                                        <td className="p-3 text-white/80 font-mono whitespace-nowrap">
+                                            {formatHours(
+                                                assistant.avg_spec_hours_per_day_30d ??
+                                                ((assistant.total_spec_hours || 0) / 30)
+                                            )}ч
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
+                                            <span className="inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap bg-green-500/15 text-green-300 border-green-500/30">
+                                                {(assistant.display_points ?? assistant.total_points ?? 0).toFixed(2)}
+                                            </span>
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
+                                            <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getWarningsBadgeClass(assistant)}`}>
+                                                {assistant.warnings_display || '0/2 0/2'}
+                                            </span>
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
+                                            <span
+                                                className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getRelativePenaltyClass(
+                                                    Number(assistant.penalty_points || 0),
+                                                    penaltyPointsSortedPositive
+                                                )}`}
+                                            >
+                                                {Number(assistant.penalty_points || 0).toFixed(2)}
+                                            </span>
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
+                                            <span
+                                                className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getRelativePenaltyClass(
+                                                    Number(assistant.penalty_percent || 0),
+                                                    penaltyPercentSortedPositive
+                                                )}`}
+                                            >
+                                                {Number(assistant.penalty_percent || 0).toFixed(2)}%
+                                            </span>
                                         </td>
                                     </tr>
                                 ))

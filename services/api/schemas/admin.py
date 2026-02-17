@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel
 
 
@@ -6,3 +8,4 @@ class UserCreate(BaseModel):
     nickname: str
     role: str
     discord_id: int
+    appointed_at: date | None = None

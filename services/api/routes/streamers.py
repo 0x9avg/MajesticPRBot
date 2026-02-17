@@ -245,14 +245,33 @@ async def update_streamer(
 
         # Log to admin_logs
         if changes:
-            await db.log_admin_action(
-                admin_name=user.get("nickname", user.get("username", "Unknown")),
-                action="update_streamer",
-                admin_role=user.get("role"),
+            await db.log_admin_action_v2(
+                actor_name=user.get("nickname", user.get("username", "Unknown")),
+                actor_role=user.get("role"),
+                action="streamer.update",
                 target_type="streamer",
                 target_id=str(twitch_id),
-                details=changes,
-                ip_address=request.client.host,
+                details={
+                    "summary": f"Updated streamer {streamer.get('streamer_name', twitch_id)}",
+                    "changes": {
+                        "before": {
+                            key: value.get("old")
+                            for key, value in changes.items()
+                        },
+                        "after": {
+                            key: value.get("new")
+                            for key, value in changes.items()
+                        },
+                        "delta": changes,
+                        "source": "manual_update",
+                    },
+                    "meta": {
+                        "ip": request.client.host if request.client else None,
+                        "request_path": str(request.url.path),
+                        "method": request.method,
+                        "actor_id": user.get("id"),
+                    },
+                },
             )
 
     # Get updated streamer

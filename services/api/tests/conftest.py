@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +235,7 @@ class FakeDB:
         # Assistants/permissions
         self.assistants_by_id: dict[int, dict[str, Any]] = {}
         self.assistant_logs_by_id: dict[int, list[dict[str, Any]]] = {}
+        self.assistant_sessions_by_id: dict[int, list[dict[str, Any]]] = {}
         self.manual_sessions: list[dict[str, Any]] = []
         self.role_permissions: dict[str, dict[str, bool]] = {
             "junior_employee": {"can_spec_probation": True},
@@ -380,6 +381,9 @@ class FakeDB:
     async def log_admin_action(self, **kwargs: Any) -> None:
         self.logged_actions.append(kwargs)
 
+    async def log_admin_action_v2(self, **kwargs: Any) -> None:
+        self.logged_actions.append(kwargs)
+
     async def get_admin_logs(
         self,
         limit: int = 100,
@@ -389,9 +393,48 @@ class FakeDB:
         sort_order: str = "desc",
     ) -> list[dict[str, Any]]:
         logs = list(self.admin_logs_entries)
-        if sort_by in {"created_at", "admin_name", "action", "target_name"}:
+        filters = filters or {}
+
+        action_filter = filters.get("action")
+        if action_filter:
+            action_set = (
+                set(action_filter)
+                if isinstance(action_filter, list)
+                else {str(action_filter)}
+            )
+            logs = [row for row in logs if row.get("action") in action_set]
+
+        actor_filter = filters.get("actor_name") or filters.get("admin_name")
+        if actor_filter:
+            actor_filter_l = str(actor_filter).lower()
+            logs = [
+                row
+                for row in logs
+                if actor_filter_l in str(
+                    row.get("actor_name") or row.get("admin_name") or ""
+                ).lower()
+            ]
+
+        target_type = filters.get("target_type")
+        if target_type:
+            logs = [row for row in logs if row.get("target_type") == target_type]
+
+        kind = filters.get("kind")
+        if kind:
+            if kind == "other":
+                logs = [row for row in logs if "." not in str(row.get("action", ""))]
+            else:
+                prefix = f"{kind}."
+                logs = [
+                    row for row in logs if str(row.get("action", "")).startswith(prefix)
+                ]
+
+        if sort_by in {"created_at", "admin_name", "actor_name", "action", "target_name"}:
             logs.sort(
-                key=lambda x: x.get(sort_by) or "",
+                key=lambda x: x.get(sort_by)
+                or x.get("actor_name")
+                or x.get("admin_name")
+                or "",
                 reverse=(sort_order.lower() == "desc"),
             )
         return logs[offset : offset + limit]
@@ -407,14 +450,24 @@ class FakeDB:
         return deepcopy(assistant) if assistant else None
 
     async def create_or_update_assistant(
-        self, pr_id: int, nickname: str, role: str, experience_days: int = 0
+        self,
+        pr_id: int,
+        nickname: str,
+        role: str,
+        experience_days: int = 0,
+        appointed_at: date | None = None,
     ) -> bool:
         existing = self.assistants_by_id.get(pr_id, {})
+        appointed_at_dt = (
+            datetime.combine(appointed_at, datetime.min.time(), tzinfo=timezone.utc)
+            if appointed_at
+            else _now() - timedelta(days=max(int(experience_days or 0), 0))
+        )
         self.assistants_by_id[pr_id] = {
             "pr_id": pr_id,
             "nickname": nickname,
             "role": role,
-            "experience_days": experience_days,
+            "experience_days": max(int(experience_days or 0), 0),
             "status": existing.get("status", "free"),
             "assigned_to_type": existing.get("assigned_to_type"),
             "assigned_to_id": existing.get("assigned_to_id"),
@@ -422,6 +475,18 @@ class FakeDB:
             "total_spec_seconds": existing.get("total_spec_seconds", 0),
             "session_count": existing.get("session_count", 0),
             "added_at": existing.get("added_at", _now()),
+            "appointed_at": appointed_at_dt,
+            "updated_at": _now(),
+            "auto_points_total": existing.get("auto_points_total", 0.0),
+            "manual_points_adjustment": existing.get("manual_points_adjustment", 0.0),
+            "total_points": existing.get("total_points", 0.0),
+            "penalty_points": existing.get("penalty_points", 0.0),
+            "penalty_percent": existing.get("penalty_percent", 0.0),
+            "display_points": existing.get("display_points", 0.0),
+            "warnings_units": existing.get("warnings_units", 0),
+            "strict_warnings": existing.get("strict_warnings", 0),
+            "oral_warnings": existing.get("oral_warnings", 0),
+            "warnings_display": existing.get("warnings_display", "0/2 0/2"),
             "total_spec_hours": round(existing.get("total_spec_seconds", 0) / 3600, 2),
         }
         return True
@@ -448,6 +513,18 @@ class FakeDB:
     async def get_assistant_logs(self, pr_id: int) -> list[dict[str, Any]]:
         return deepcopy(self.assistant_logs_by_id.get(pr_id, []))
 
+    async def get_assistant_sessions_detailed(
+        self,
+        pr_id: int,
+        limit: int = 50,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        sessions = deepcopy(self.assistant_sessions_by_id.get(pr_id, []))
+        if not include_deleted:
+            sessions = [s for s in sessions if not s.get("deleted_at")]
+        sessions.sort(key=lambda x: x.get("started_at") or "", reverse=True)
+        return sessions[: max(1, min(int(limit or 50), 200))]
+
     async def get_role_permissions(self, role: str) -> dict[str, bool]:
         return deepcopy(self.role_permissions.get(role, {}))
 
@@ -457,29 +534,214 @@ class FakeDB:
             assistant["total_spec_seconds"] = 0
             assistant["session_count"] = 0
             assistant["total_spec_hours"] = 0.0
+            assistant["auto_points_total"] = 0.0
+            assistant["total_points"] = round(
+                float(assistant.get("manual_points_adjustment", 0.0)), 4
+            )
+            assistant["display_points"] = round(
+                float(assistant.get("total_points", 0.0))
+                - float(assistant.get("penalty_points", 0.0)),
+                4,
+            )
 
     async def create_manual_spec_session(
         self,
         pr_id: int,
         target_type: str,
         target_id: int | None,
-        duration_seconds: int,
-        date_str: str,
+        started_at: datetime,
+        ended_at: datetime,
         is_probation: bool,
         priority: int,
+        session_admin_comment: str | None = None,
     ) -> bool:
+        if ended_at <= started_at:
+            return False
+        if target_type == "manual":
+            if target_id is not None:
+                return False
+            if not (session_admin_comment or "").strip():
+                return False
+        elif target_type in {"streamer", "event"}:
+            if target_id is None:
+                return False
+        else:
+            return False
+
+        duration_seconds = max(int((ended_at - started_at).total_seconds()), 1)
         self.manual_sessions.append(
             {
                 "pr_id": pr_id,
                 "target_type": target_type,
                 "target_id": target_id,
+                "started_at": started_at,
+                "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
-                "date": date_str,
                 "is_probation": is_probation,
                 "priority": priority,
+                "session_admin_comment": session_admin_comment,
             }
         )
+        assistant = self.assistants_by_id.setdefault(
+            pr_id,
+            {
+                "pr_id": pr_id,
+                "nickname": None,
+                "role": "employee",
+                "status": "free",
+                "total_spec_seconds": 0,
+                "session_count": 0,
+                "added_at": _now(),
+            },
+        )
+        points = round((duration_seconds / 3600) * (priority if priority else 0.5), 4)
+        assistant["auto_points_total"] = round(
+            float(assistant.get("auto_points_total", 0.0)) + points, 4
+        )
+        assistant["total_points"] = round(
+            float(assistant.get("auto_points_total", 0.0))
+            + float(assistant.get("manual_points_adjustment", 0.0)),
+            4,
+        )
+        assistant["display_points"] = round(
+            float(assistant.get("total_points", 0.0))
+            - float(assistant.get("penalty_points", 0.0)),
+            4,
+        )
         return True
+
+    async def adjust_assistant_points(
+        self,
+        pr_id: int,
+        delta: float,
+        reason: str | None = None,
+        source: str = "manual_adjust",
+    ) -> dict[str, Any] | None:
+        assistant = self.assistants_by_id.get(pr_id)
+        if not assistant:
+            return None
+        before = deepcopy(assistant)
+        assistant["manual_points_adjustment"] = round(
+            float(assistant.get("manual_points_adjustment", 0.0)) + float(delta), 4
+        )
+        assistant["total_points"] = round(
+            float(assistant.get("auto_points_total", 0.0))
+            + float(assistant.get("manual_points_adjustment", 0.0)),
+            4,
+        )
+        assistant["display_points"] = round(
+            float(assistant.get("total_points", 0.0))
+            - float(assistant.get("penalty_points", 0.0)),
+            4,
+        )
+        return {
+            "pr_id": pr_id,
+            "delta": round(float(delta), 4),
+            "reason": reason,
+            "source": source,
+            "before": before,
+            "after": deepcopy(assistant),
+        }
+
+    async def update_assistant_sanctions(
+        self,
+        pr_id: int,
+        penalty_points: float | None = None,
+        penalty_percent: float | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        assistant = self.assistants_by_id.get(pr_id)
+        if not assistant:
+            return None
+        before = deepcopy(assistant)
+        if penalty_points is not None:
+            assistant["penalty_points"] = max(round(float(penalty_points), 4), 0.0)
+        if penalty_percent is not None:
+            assistant["penalty_percent"] = max(round(float(penalty_percent), 4), 0.0)
+        assistant["display_points"] = round(
+            float(assistant.get("total_points", 0.0))
+            - float(assistant.get("penalty_points", 0.0)),
+            4,
+        )
+        return {
+            "pr_id": pr_id,
+            "reason": reason,
+            "before": before,
+            "after": deepcopy(assistant),
+        }
+
+    async def update_assistant_warnings(
+        self,
+        pr_id: int,
+        oral_delta: int = 0,
+        strict_delta: int = 0,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        assistant = self.assistants_by_id.get(pr_id)
+        if not assistant:
+            return None
+        units_delta = int(oral_delta) + int(strict_delta) * 2
+        if units_delta == 0:
+            return None
+        before = deepcopy(assistant)
+        next_units = max(int(assistant.get("warnings_units", 0)) + units_delta, 0)
+        assistant["warnings_units"] = next_units
+        assistant["strict_warnings"] = next_units // 2
+        assistant["oral_warnings"] = next_units % 2
+        assistant["warnings_display"] = (
+            f"{assistant['strict_warnings']}/2 {assistant['oral_warnings']}/2"
+        )
+        return {
+            "pr_id": pr_id,
+            "units_delta": units_delta,
+            "oral_delta": int(oral_delta),
+            "strict_delta": int(strict_delta),
+            "reason": reason,
+            "before": before,
+            "after": deepcopy(assistant),
+        }
+
+    async def update_assistant_session(
+        self, pr_id: int, session_id: int, patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        sessions = self.assistant_sessions_by_id.setdefault(pr_id, [])
+        session = next((s for s in sessions if int(s.get("id", 0)) == int(session_id)), None)
+        if session is None:
+            session = {
+                "id": session_id,
+                "pr_id": pr_id,
+                "target_type": "streamer",
+                "target_id": "1",
+                "started_at": _now().isoformat(),
+                "ended_at": (_now() + timedelta(hours=1)).isoformat(),
+                "session_admin_comment": None,
+            }
+            sessions.append(session)
+
+        before = deepcopy(session)
+        for key, value in patch.items():
+            session[key] = value
+
+        if session.get("target_type") == "manual":
+            session["target_id"] = None
+
+        after = deepcopy(session)
+        return {"session_id": session_id, "before": before, "after": after}
+
+    async def soft_delete_assistant_session(
+        self,
+        pr_id: int,
+        session_id: int,
+        deleted_by_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        session = {
+            "id": session_id,
+            "pr_id": pr_id,
+            "deleted_by_id": deleted_by_id,
+            "reason": reason,
+        }
+        return {"session_id": session_id, "before": deepcopy(session), "after": deepcopy(session)}
 
     # ---------------------------------------------------------------------
     # Streamers / Spec
@@ -755,6 +1017,18 @@ class FakeDB:
             for e in self.events_by_id.values()
             if e.get("is_active")
         ]
+
+    async def get_all_events(self) -> list[dict[str, Any]]:
+        events = [self._event_view(e) for e in self.events_by_id.values()]
+        events.sort(
+            key=lambda e: (
+                1 if e.get("is_active") else 0,
+                1 if e.get("is_pinned") else 0,
+                e.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+        return events
 
     async def get_scheduled_events(self) -> list[dict[str, Any]]:
         return [

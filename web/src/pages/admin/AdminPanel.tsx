@@ -1,18 +1,20 @@
 import React from 'react';
-import { UserPlus, Radio, CalendarPlus, Settings, Activity } from 'lucide-react';
+import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench } from 'lucide-react';
 import UserRegistration from './components/UserRegistration';
 import MediaRegistration from './components/MediaRegistration';
 import CreateEvent from './components/CreateEvent';
 import SiteManagement from './components/SiteManagement';
 import SystemInfo from './components/SystemInfo';
+import AssistantsManagement from './components/AssistantsManagement';
 
 export function AdminPanel() {
-    const [activeTab, setActiveTab] = React.useState('users');
+    const [activeTab, setActiveTab] = React.useState('assistants');
 
     const menuItems = [
         { id: 'users', label: 'Пользователи', icon: UserPlus },
         { id: 'media', label: 'Медиа', icon: Radio },
         { id: 'events', label: 'Мероприятия', icon: CalendarPlus },
+        { id: 'assistants', label: 'Ассистенты', icon: Wrench },
         { id: 'site', label: 'Управление', icon: Settings },
         { id: 'system', label: 'Система', icon: Activity },
     ];
@@ -55,6 +57,7 @@ export function AdminPanel() {
                     {activeTab === 'users' && <UserRegistration />}
                     {activeTab === 'media' && <MediaRegistration />}
                     {activeTab === 'events' && <CreateEvent />}
+                    {activeTab === 'assistants' && <AssistantsManagement />}
                     {activeTab === 'site' && <SiteManagement />}
                     {activeTab === 'system' && <SystemInfo />}
                 </div>

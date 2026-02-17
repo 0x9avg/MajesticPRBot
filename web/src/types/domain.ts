@@ -3,12 +3,27 @@ export interface Assistant {
     nickname: string;
     role: string;
     experience_days: number;
+    appointed_at?: string | null;
+    added_at?: string | null;
+    updated_at?: string | null;
     status?: string;
     assigned_to_type?: 'streamer' | 'event' | null;
     assigned_to_name?: string | null;
     total_spec_seconds?: number;
     total_spec_hours?: number;
+    total_spec_hours_30d?: number;
+    avg_spec_hours_per_day_30d?: number;
     session_count?: number;
+    auto_points_total?: number;
+    manual_points_adjustment?: number;
+    total_points?: number;
+    penalty_points?: number;
+    penalty_percent?: number;
+    display_points?: number;
+    warnings_units?: number;
+    strict_warnings?: number;
+    oral_warnings?: number;
+    warnings_display?: string;
 }
 
 export interface AssistantLog {
@@ -51,6 +66,7 @@ export interface Event {
     description?: string;
     priority?: number;
     is_pinned?: boolean;
+    is_active?: boolean;
     pr_slots?: number;
     required_pr_count?: number;
     current_participants?: number;
@@ -66,12 +82,21 @@ export interface DashboardStats {
 
 export interface AdminLogRecord {
     id: number;
-    admin_name: string;
-    admin_role?: string;
+    actor_name: string;
+    actor_role?: string | null;
+    admin_name?: string;
+    admin_role?: string | null;
     action: string;
+    kind?: string;
     target_name?: string | null;
     target_id?: string | number | null;
     target_type?: string | null;
-    details?: Record<string, unknown> | null;
+    details?: {
+        summary?: string;
+        changes?: Record<string, unknown>;
+        payload?: Record<string, unknown>;
+        meta?: Record<string, unknown>;
+        [key: string]: unknown;
+    } | null;
     created_at: string;
 }

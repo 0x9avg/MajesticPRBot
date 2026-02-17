@@ -31,7 +31,9 @@ function App() {
             <Route path="/logs" element={<SpectateLogs />} />
             <Route path="/events/new" element={<CreateEvent />} />
 
-            <Route path="/admin" element={<AdminPanel />} />
+            <Route element={<ProtectedRoute allowedRoles={['manager', 'developer']} />}>
+              <Route path="/admin" element={<AdminPanel />} />
+            </Route>
 
             <Route path="/bot" element={<BotDashboard />} />
           </Route>

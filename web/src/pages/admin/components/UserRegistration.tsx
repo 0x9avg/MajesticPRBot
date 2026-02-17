@@ -40,11 +40,13 @@ const getAllowedRoles = (userRole?: Role, canRegisterUsers?: boolean): Role[] =>
 
 const UserRegistration = () => {
     const { user } = useOutletContext<OutletUserContext>();
+    const getTodayUtcDate = () => new Date().toISOString().slice(0, 10);
     const [formData, setFormData] = useState({
         username: '',
         nickname: '',
         role: '',
-        discord_id: ''
+        discord_id: '',
+        appointed_at: getTodayUtcDate(),
     });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -84,7 +86,7 @@ const UserRegistration = () => {
             }
 
             // Validate
-            if (!formData.username || !formData.nickname || !formData.role || !formData.discord_id) {
+            if (!formData.username || !formData.nickname || !formData.role || !formData.discord_id || !formData.appointed_at) {
                 setError("Заполните все поля");
                 return;
             }
@@ -101,7 +103,8 @@ const UserRegistration = () => {
                     username: formData.username,
                     nickname: formData.nickname,
                     role: formData.role,
-                    discord_id: parseInt(formData.discord_id)
+                    discord_id: parseInt(formData.discord_id),
+                    appointed_at: formData.appointed_at,
                 })
             });
 
@@ -117,7 +120,13 @@ const UserRegistration = () => {
             } else {
                 throw new Error("Некорректный ответ сервера при создании пользователя");
             }
-            setFormData({ username: '', nickname: '', role: '', discord_id: '' });
+            setFormData({
+                username: '',
+                nickname: '',
+                role: '',
+                discord_id: '',
+                appointed_at: getTodayUtcDate(),
+            });
 
         } catch (err: unknown) {
             if (err instanceof Error) {
@@ -248,6 +257,18 @@ const UserRegistration = () => {
                             value={formData.discord_id}
                             onChange={(e) => setFormData({ ...formData, discord_id: e.target.value.replace(/\D/g, '') })}
                             disabled={!canRegisterUsers}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="text-sm font-medium text-white/60 mb-2 block">Дата назначения</label>
+                        <input
+                            type="date"
+                            className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                            value={formData.appointed_at}
+                            onChange={(e) => setFormData({ ...formData, appointed_at: e.target.value })}
+                            disabled={!canRegisterUsers}
+                            required
                         />
                     </div>
 

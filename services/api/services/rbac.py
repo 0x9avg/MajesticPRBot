@@ -19,6 +19,11 @@ def is_valid_role(role: str) -> bool:
     return role in ROLE_RANK
 
 
+def is_admin_role(role: str | None) -> bool:
+    """Check whether role has admin panel access."""
+    return role in {"manager", "developer"}
+
+
 def can_register_users(current_user: dict[str, Any]) -> bool:
     """Check can_register_users permission on current user."""
     permissions = current_user.get("permissions") or {}
@@ -40,4 +45,3 @@ def can_create_role(creator_role: str, target_role: str) -> bool:
         return True
 
     return ROLE_RANK[target_role] < ROLE_RANK[creator_role]
-

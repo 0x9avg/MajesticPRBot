@@ -24,6 +24,17 @@ def _seed_assistant(
         "total_spec_seconds": 7200,
         "session_count": 5,
         "added_at": datetime.now(timezone.utc),
+        "appointed_at": datetime.now(timezone.utc),
+        "auto_points_total": 10.0,
+        "manual_points_adjustment": 0.0,
+        "total_points": 10.0,
+        "penalty_points": 0.0,
+        "penalty_percent": 0.0,
+        "display_points": 10.0,
+        "warnings_units": 0,
+        "strict_warnings": 0,
+        "oral_warnings": 0,
+        "warnings_display": "0/2 0/2",
     }
 
 
@@ -148,6 +159,42 @@ async def test_get_logs_for_assistant(build_api_app, fake_db) -> None:
     }
 
 
+async def test_get_assistant_sessions_admin_only_endpoint(
+    build_api_app, fake_db
+) -> None:
+    _seed_assistant(fake_db, 1002, "SessionAdmin")
+    fake_db.assistant_sessions_by_id[1002] = [
+        {
+            "id": 9001,
+            "pr_id": 1002,
+            "target_type": "streamer",
+            "target_id": "5001",
+            "target_name": "StreamerOne",
+            "started_at": "2026-02-14T10:00:00",
+            "ended_at": "2026-02-14T11:00:00",
+            "duration_seconds": 3600,
+            "credited_points": 1.0,
+            "session_admin_comment": "manual",
+            "is_probation": False,
+            "priority_auto": 1,
+            "priority_override": None,
+            "rate_auto": 0.5,
+            "rate_override": None,
+            "deleted_at": None,
+            "delete_reason": None,
+        }
+    ]
+
+    async with await _client(build_api_app) as assistants_client:
+        response = await assistants_client.get("/api/assistants/1002/sessions")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == 9001
+    assert data[0]["target_name"] == "StreamerOne"
+
+
 async def test_get_capabilities_for_unknown_and_known_assistant(
     build_api_app, fake_db
 ) -> None:
@@ -176,11 +223,10 @@ async def test_reset_and_manual_session(build_api_app, fake_db) -> None:
                 "target_type": "streamer",
                 "target_id": 5001,
                 "target_name": "StreamerY",
-                "duration_seconds": 3600,
-                "date": "2026-02-14",
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T11:00:00Z",
                 "is_probation": False,
                 "priority": 2,
-                "admin_id": 9999,
             },
         )
 
@@ -198,12 +244,129 @@ async def test_manual_session_not_found_returns_404(build_api_app) -> None:
                 "target_type": "streamer",
                 "target_id": 1,
                 "target_name": "Nope",
-                "duration_seconds": 600,
-                "date": "2026-02-14",
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T10:10:00Z",
                 "is_probation": False,
                 "priority": 0,
-                "admin_id": 1,
             },
         )
 
     assert response.status_code == 404
+
+
+async def test_adjust_points_sanctions_and_warnings_endpoints(
+    build_api_app, fake_db
+) -> None:
+    _seed_assistant(fake_db, 1700, "PenaltyUser")
+
+    async with await _client(build_api_app) as assistants_client:
+        adjust = await assistants_client.post(
+            "/api/assistants/1700/points/adjust",
+            json={"delta": 3.25, "reason": "bonus"},
+        )
+        sanctions = await assistants_client.patch(
+            "/api/assistants/1700/sanctions",
+            json={"penalty_points": 1.5, "penalty_percent": 10},
+        )
+        warnings = await assistants_client.post(
+            "/api/assistants/1700/warnings",
+            json={"oral_delta": 2, "strict_delta": 0},
+        )
+
+    assert adjust.status_code == 200
+    assert sanctions.status_code == 200
+    assert warnings.status_code == 200
+    assert fake_db.assistants_by_id[1700]["manual_points_adjustment"] == 3.25
+    assert fake_db.assistants_by_id[1700]["penalty_points"] == 1.5
+    assert fake_db.assistants_by_id[1700]["warnings_units"] == 2
+    assert len(fake_db.logged_actions) >= 3
+
+
+async def test_admin_session_patch_and_delete_routes(build_api_app, fake_db) -> None:
+    _seed_assistant(fake_db, 1800, "SessionUser")
+
+    async with await _client(build_api_app) as assistants_client:
+        patch_resp = await assistants_client.patch(
+            "/api/assistants/1800/sessions/9001",
+            json={
+                "target_type": "manual",
+                "target_id": None,
+                "started_at": "2026-02-14T12:00:00Z",
+                "ended_at": "2026-02-14T13:00:00Z",
+                "session_admin_comment": "updated by admin",
+                "priority_override": 2,
+            },
+        )
+        delete_resp = await assistants_client.delete(
+            "/api/assistants/1800/sessions/9001",
+            params={"reason": "mistake"},
+        )
+
+    assert patch_resp.status_code == 200
+    assert delete_resp.status_code == 200
+
+
+async def test_non_admin_cannot_use_sensitive_assistant_endpoints(
+    build_api_app, fake_db
+) -> None:
+    _seed_assistant(fake_db, 1900, "NoAdmin")
+    app = build_api_app(
+        assistants_router,
+        current_user={
+            "id": 2,
+            "username": "employee",
+            "nickname": "Employee",
+            "role": "employee",
+            "discord_id": 1900,
+            "require_password_change": False,
+            "permissions": {},
+        },
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as assistants_client:
+        adjust = await assistants_client.post(
+            "/api/assistants/1900/points/adjust",
+            json={"delta": 1.0},
+        )
+        sessions = await assistants_client.get("/api/assistants/1900/sessions")
+        reset = await assistants_client.post("/api/assistants/1900/reset")
+
+    assert adjust.status_code == 403
+    assert sessions.status_code == 403
+    assert reset.status_code == 403
+
+
+async def test_manual_session_validation_rules(build_api_app, fake_db) -> None:
+    _seed_assistant(fake_db, 1910, "ValidationUser")
+    async with await _client(build_api_app) as assistants_client:
+        manual_without_comment = await assistants_client.post(
+            "/api/assistants/1910/session",
+            json={
+                "target_type": "manual",
+                "target_id": None,
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T11:00:00Z",
+            },
+        )
+        manual_with_target = await assistants_client.post(
+            "/api/assistants/1910/session",
+            json={
+                "target_type": "manual",
+                "target_id": 5001,
+                "session_admin_comment": "manual fix",
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T11:00:00Z",
+            },
+        )
+        streamer_without_target = await assistants_client.post(
+            "/api/assistants/1910/session",
+            json={
+                "target_type": "streamer",
+                "target_id": None,
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T11:00:00Z",
+            },
+        )
+
+    assert manual_without_comment.status_code in {400, 422}
+    assert manual_with_target.status_code in {400, 422}
+    assert streamer_without_target.status_code in {400, 422}

@@ -79,6 +79,24 @@ async def create_event(
     )
 
 
+@router.get("")
+async def get_all_events(
+    request: Request,
+    db: "Database" = Depends(get_db),
+):
+    """Get all events (active and inactive)."""
+    trace_id = get_trace_id(request)
+    events = await db.get_all_events()
+
+    return JSONResponse(
+        content=success_envelope(
+            data=[EventResponse(**e).model_dump(mode="json") for e in events],
+            message=f"Found {len(events)} events",
+            trace_id=trace_id,
+        )
+    )
+
+
 @router.get("/active")
 async def get_active_events(
     request: Request,

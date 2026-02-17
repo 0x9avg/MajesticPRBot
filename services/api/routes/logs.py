@@ -19,12 +19,14 @@ async def get_admin_logs(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     action: Optional[List[str]] = Query(None),
+    actor_name: Optional[str] = Query(None),
     admin_name: Optional[str] = Query(None),
     target_type: Optional[str] = Query(None),
+    kind: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sort_by: str = Query(
-        "created_at", pattern="^(created_at|admin_name|action|target_name)$"
+        "created_at", pattern="^(created_at|admin_name|actor_name|action|target_name)$"
     ),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     user: Dict[str, Any] = Depends(get_current_user),
@@ -43,8 +45,10 @@ async def get_admin_logs(
 
     filters = {
         "action": action,
+        "actor_name": actor_name or admin_name,
         "admin_name": admin_name,
         "target_type": target_type,
+        "kind": kind,
         "start_date": start_date,
         "end_date": end_date,
     }

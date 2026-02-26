@@ -38,12 +38,18 @@ async def list_streamers(
     request: Request,
     db: "Database" = Depends(get_db),
     online_only: bool = Query(False, description="Filter only online streamers"),
+    gta_only: bool = Query(False, description="Filter only GTA 5 streamers (used with online_only)"),
 ):
     """Get all streamers."""
     trace_id = get_trace_id(request)
 
     if online_only:
         streamers = await db.list_online_streamers()
+        if gta_only:
+            streamers = [
+                s for s in streamers
+                if str(s.get("game_id")) == Config.gta5_game_id
+            ]
     else:
         streamers = await db.list_all_streamers()
 
@@ -117,6 +123,7 @@ async def create_streamer(
             started_at=data.started_at,
             priority=data.priority,
             pr_slots=data.pr_slots,
+            allow_juniors=data.allow_juniors,
             added_by_id=data.added_by_id,
             game_id=data.game_id,
             game_name=data.game_name,
@@ -223,15 +230,30 @@ async def update_streamer(
             }
             update_data["is_pinned"] = data.is_pinned
 
-    if data.stream_points_override is not None:
-        # Handle cases where value might be None/float
-        old_val = streamer.get("stream_points_override")
-        if data.stream_points_override != old_val:
-            changes["stream_points_override"] = {
-                "old": old_val,
-                "new": data.stream_points_override,
+
+    if data.allow_juniors is not None:
+        if data.allow_juniors != streamer.get("allow_juniors", True):
+            changes["allow_juniors"] = {
+                "old": streamer.get("allow_juniors", True),
+                "new": data.allow_juniors,
             }
-            update_data["stream_points_override"] = data.stream_points_override
+            update_data["allow_juniors"] = data.allow_juniors
+
+    if data.priority_override is not None:
+        if data.priority_override != streamer.get("priority_override"):
+            changes["priority_override"] = {
+                "old": streamer.get("priority_override"),
+                "new": data.priority_override,
+            }
+            update_data["priority_override"] = data.priority_override
+
+    if data.pr_slots_override is not None:
+        if data.pr_slots_override != streamer.get("pr_slots_override"):
+            changes["pr_slots_override"] = {
+                "old": streamer.get("pr_slots_override"),
+                "new": data.pr_slots_override,
+            }
+            update_data["pr_slots_override"] = data.pr_slots_override
 
     if update_data:
         # Update via database method
@@ -240,8 +262,18 @@ async def update_streamer(
             priority=update_data.get("priority"),
             pr_slots=update_data.get("pr_slots"),
             is_pinned=update_data.get("is_pinned"),
-            stream_points_override=update_data.get("stream_points_override"),
+            allow_juniors=update_data.get("allow_juniors"),
+            priority_override=update_data.get("priority_override"),
+            pr_slots_override=update_data.get("pr_slots_override"),
         )
+
+        # Retroactive update: propagate priority_override to active sessions
+        if "priority_override" in update_data:
+            new_priority_override = update_data["priority_override"]
+            await db.retroactive_update_active_sessions(
+                streamer_id=twitch_id,
+                new_priority_override=new_priority_override,
+            )
 
         # Log to admin_logs
         if changes:

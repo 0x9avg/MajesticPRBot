@@ -1,5 +1,5 @@
 export interface Assistant {
-    pr_id: number;
+    pr_id: string;
     nickname: string;
     role: string;
     experience_days: number;
@@ -27,7 +27,7 @@ export interface Assistant {
 }
 
 export interface AssistantLog {
-    id: number | string;
+    id: string;
     action: string;
     target?: string | null;
     created_at: string;
@@ -36,32 +36,36 @@ export interface AssistantLog {
 }
 
 export interface StreamerAssignment {
-    pr_id: number | string;
+    pr_id: string;
     nickname?: string;
+    is_probation?: boolean;
 }
 
 export interface Streamer {
-    streamer_id: number;
+    streamer_id: string;
     streamer_name: string;
     priority: number;
     pr_slots: number;
+    priority_override?: number | null;
+    pr_slots_override?: number | null;
     is_pinned?: boolean;
     is_online?: boolean;
+    allow_juniors?: boolean;
     profile_image_url?: string | null;
     stream_thumbnail_url?: string | null;
-    stream_points_override?: number | null;
+    game_id?: string | null;
     game_name?: string | null;
     assignments?: StreamerAssignment[];
-    assigned_pr_id?: number | null;
+    assigned_pr_id?: string | null;
 }
 
 export interface EventParticipant {
-    pr_id: number | string;
+    pr_id: string;
     nickname: string;
 }
 
 export interface Event {
-    id: number;
+    id: string;
     name: string;
     description?: string;
     priority?: number;
@@ -81,7 +85,7 @@ export interface DashboardStats {
 }
 
 export interface AdminLogRecord {
-    id: number;
+    id: string;
     actor_name: string;
     actor_role?: string | null;
     admin_name?: string;
@@ -89,7 +93,7 @@ export interface AdminLogRecord {
     action: string;
     kind?: string;
     target_name?: string | null;
-    target_id?: string | number | null;
+    target_id?: string | null;
     target_type?: string | null;
     details?: {
         summary?: string;

@@ -29,7 +29,7 @@ class StreamerCreate(BaseModel):
     twitch_url: Optional[str] = Field(
         None, description="Twitch channel URL or username"
     )
-    streamer_id: Optional[int] = Field(
+    streamer_id: Optional[Snowflake] = Field(
         None, description="Twitch user ID (for direct creation)"
     )
     streamer_name: Optional[str] = Field(
@@ -37,14 +37,15 @@ class StreamerCreate(BaseModel):
     )
     is_online: bool = Field(default=False)
     started_at: Optional[str] = None
-    game_id: Optional[int] = None
+    game_id: Optional[Snowflake] = None
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
     profile_image_url: Optional[str] = None
     priority: int = Field(default=0, ge=0, le=3)
-    pr_slots: int = Field(default=1, ge=1, le=10, description="Number of PR assistant slots")
-    added_by_id: int = Field(default=0)
+    pr_slots: int = Field(default=1, ge=1, description="Number of PR assistant slots")
+    allow_juniors: bool = Field(default=True, description="Allow junior employees to claim this streamer")
+    added_by_id: Snowflake = Field(default=0)
 
     @field_validator("twitch_url", mode="before")
     @classmethod
@@ -100,9 +101,11 @@ class StreamerCreate(BaseModel):
 
 class StreamerUpdate(BaseModel):
     priority: Optional[int] = Field(None, ge=0, le=3)
-    pr_slots: Optional[int] = Field(None, ge=1, le=10)
+    pr_slots: Optional[int] = Field(None, ge=1)
     is_pinned: Optional[bool] = None
-    stream_points_override: Optional[float] = None
+    allow_juniors: Optional[bool] = None
+    priority_override: Optional[int] = Field(None, ge=0, le=3)
+    pr_slots_override: Optional[int] = Field(None, ge=1)
 
 
 class StreamerResponse(BaseModel):
@@ -110,10 +113,12 @@ class StreamerResponse(BaseModel):
     streamer_name: str
     is_online: bool
     is_pinned: bool = False
-    stream_points_override: Optional[float] = None
+    allow_juniors: bool = True
     started_at: Optional[datetime] = None
     priority: int
     pr_slots: int = 1
+    priority_override: Optional[int] = None
+    pr_slots_override: Optional[int] = None
     game_id: Optional[Snowflake] = None
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
@@ -144,7 +149,7 @@ class StreamerStatusUpdate(BaseModel):
 
     is_online: bool
     started_at: Optional[str] = None
-    game_id: Optional[int] = None
+    game_id: Optional[Snowflake] = None
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None

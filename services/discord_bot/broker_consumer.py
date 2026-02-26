@@ -95,6 +95,7 @@ class BrokerConsumer:
                 "streamer.*",
                 "stream.state.*",
                 "spec.*",
+                "event.*",
                 "guild.*",
                 "monitoring.*",
             ]

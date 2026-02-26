@@ -154,7 +154,7 @@ class SessionCreatedResponse(BaseModel):
 
 
 class AssistantSessionRecord(BaseModel):
-    id: int
+    id: Snowflake
     pr_id: Snowflake
     target_type: Optional[str] = None
     target_id: Optional[Snowflake] = None
@@ -198,7 +198,6 @@ class AssistantSessionPatchRequest(BaseModel):
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     priority_override: Optional[int] = Field(None, ge=0, le=3)
-    rate_override: Optional[float] = Field(None, ge=0)
     session_admin_comment: Optional[str] = None
     reason: Optional[str] = None
 

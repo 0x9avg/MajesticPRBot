@@ -360,6 +360,46 @@ class BrokerService:
             },
         )
 
+    async def emit_event_joined(
+        self,
+        event_id: int,
+        event_name: str,
+        pr_id: int,
+        trace_id: str = None,
+    ) -> bool:
+        """Emit event.joined event."""
+        return await self.publish(
+            "event.joined",
+            {
+                "event": "event.joined",
+                "event_id": event_id,
+                "event_name": event_name,
+                "pr_id": pr_id,
+                "trace_id": trace_id,
+            },
+        )
+
+    async def emit_event_left(
+        self,
+        event_id: int,
+        event_name: str,
+        pr_id: int,
+        duration_seconds: int = 0,
+        trace_id: str = None,
+    ) -> bool:
+        """Emit event.left event."""
+        return await self.publish(
+            "event.left",
+            {
+                "event": "event.left",
+                "event_id": event_id,
+                "event_name": event_name,
+                "pr_id": pr_id,
+                "duration_seconds": duration_seconds,
+                "trace_id": trace_id,
+            },
+        )
+
     async def emit_monitoring_refresh(self, trace_id: str = None) -> bool:
         """Request monitoring refresh."""
         return await self.publish(

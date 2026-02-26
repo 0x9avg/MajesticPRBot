@@ -146,7 +146,7 @@ class Database:
                             streamer_name VARCHAR(25) NOT NULL,
                             is_online BOOLEAN DEFAULT FALSE,
                             is_pinned BOOLEAN DEFAULT FALSE,
-                            stream_points_override FLOAT DEFAULT NULL,
+                            allow_juniors BOOLEAN DEFAULT TRUE,
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
                             profile_image_url VARCHAR(512),
@@ -155,6 +155,8 @@ class Database:
                             stream_started_at TIMESTAMP NULL,
                             priority INT DEFAULT 0,
                             pr_slots INT DEFAULT 1,
+                            priority_override INT DEFAULT NULL,
+                            pr_slots_override INT DEFAULT NULL,
                             added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             added_by_id BIGINT UNSIGNED,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -171,14 +173,35 @@ class Database:
 
                     try:
                         await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN stream_points_override FLOAT DEFAULT NULL"
+                            "ALTER TABLE streamers DROP COLUMN IF EXISTS stream_points_override"
+                        )
+                    except Exception:
+                        pass  # Column may not exist
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN pr_slots INT DEFAULT 1"
                         )
                     except Exception:
                         pass  # Column likely exists
 
                     try:
                         await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN pr_slots INT DEFAULT 1"
+                            "ALTER TABLE streamers ADD COLUMN allow_juniors BOOLEAN DEFAULT TRUE"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN priority_override INT DEFAULT NULL"
+                        )
+                    except Exception:
+                        pass  # Column likely exists
+
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE streamers ADD COLUMN pr_slots_override INT DEFAULT NULL"
                         )
                     except Exception:
                         pass  # Column likely exists
@@ -1148,6 +1171,67 @@ class Database:
             self.logger.error(f"Failed to fetch admin logs: {e}", exc_info=True)
             return []
 
+    @db_retry()
+    async def count_admin_logs(self, filters: dict = None) -> int:
+        """Count admin logs matching the given filters."""
+        try:
+            filters = filters or {}
+            where_clauses = []
+            params = []
+
+            if filters.get("action"):
+                actions = filters["action"]
+                if isinstance(actions, list) and len(actions) > 0:
+                    placeholders = ", ".join(["%s"] * len(actions))
+                    where_clauses.append(f"al.action IN ({placeholders})")
+                    params.extend(actions)
+                elif isinstance(actions, str) and actions != "all":
+                    where_clauses.append("al.action = %s")
+                    params.append(actions)
+
+            actor_name = filters.get("actor_name") or filters.get("admin_name")
+            if actor_name:
+                where_clauses.append("al.actor_name LIKE %s")
+                params.append(f"%{actor_name}%")
+
+            if filters.get("target_type") and filters["target_type"] != "all":
+                where_clauses.append("al.target_type = %s")
+                params.append(filters["target_type"])
+
+            if filters.get("start_date"):
+                where_clauses.append("al.created_at >= %s")
+                params.append(filters["start_date"])
+
+            if filters.get("end_date"):
+                where_clauses.append("al.created_at <= %s")
+                params.append(filters["end_date"])
+
+            kind = filters.get("kind")
+            if kind:
+                if kind == "other":
+                    where_clauses.append("al.action NOT LIKE %s")
+                    params.append("%.%")
+                else:
+                    prefix = self._kind_to_action_prefix(kind)
+                    if not prefix:
+                        return 0
+                    where_clauses.append("al.action LIKE %s")
+                    params.append(f"{prefix}%")
+
+            where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        f"SELECT COUNT(*) as total FROM admin_logs al {where_sql}",
+                        tuple(params),
+                    )
+                    row = await cursor.fetchone()
+                    return row["total"] if row else 0
+        except Exception as e:
+            self.logger.error(f"Failed to count admin logs: {e}", exc_info=True)
+            return 0
+
     # =========================================================================
     # Streamer Operations
     # =========================================================================
@@ -1161,6 +1245,7 @@ class Database:
         started_at: Optional[str] = None,
         priority: int = 0,
         pr_slots: int = 1,
+        allow_juniors: bool = True,
         added_by_id: int = 0,
         game_id: Optional[int] = None,
         game_name: Optional[str] = None,
@@ -1218,16 +1303,17 @@ class Database:
                         """
                         INSERT INTO streamers (
                             streamer_id, streamer_name, is_online, stream_started_at, priority, pr_slots,
-                            added_at, added_by_id, stream_game_id, stream_game_name, stream_title, 
+                            allow_juniors, added_at, added_by_id, stream_game_id, stream_game_name, stream_title, 
                             stream_thumbnail_url, profile_image_url
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
                         ON DUPLICATE KEY UPDATE 
                             streamer_name = new_data.streamer_name,
                             is_online = new_data.is_online,
                             stream_started_at = new_data.stream_started_at,
                             priority = new_data.priority,
                             pr_slots = new_data.pr_slots,
+                            allow_juniors = new_data.allow_juniors,
                             added_by_id = new_data.added_by_id,
                             stream_game_id = new_data.stream_game_id,
                             stream_game_name = new_data.stream_game_name,
@@ -1242,6 +1328,7 @@ class Database:
                             started_at,
                             priority,
                             pr_slots,
+                            allow_juniors,
                             added_by_id,
                             game_id,
                             game_name,
@@ -1271,11 +1358,13 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT 
-                            streamer_id, streamer_name, is_online, is_pinned, stream_points_override,
+                            streamer_id, streamer_name, is_online, is_pinned,
+                            allow_juniors,
                             stream_title, stream_thumbnail_url,
                             profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
-                            priority, pr_slots, added_at, added_by_id, updated_at
+                            priority, pr_slots, priority_override, pr_slots_override,
+                            added_at, added_by_id, updated_at
                         FROM streamers
                         WHERE streamer_id = %s
                         """,
@@ -1402,10 +1491,10 @@ class Database:
                         set_parts.append("profile_image_url = %s")
                         params.append(profile_image_url)
 
-                    # Reset pin and overrides if stream goes offline
                     if is_online is False:
                         set_parts.append("is_pinned = FALSE")
-                        set_parts.append("stream_points_override = NULL")
+                        set_parts.append("priority_override = NULL")
+                        set_parts.append("pr_slots_override = NULL")
 
                     params.append(streamer_id)
 
@@ -1513,7 +1602,9 @@ class Database:
         priority: Optional[int] = None,
         pr_slots: Optional[int] = None,
         is_pinned: Optional[bool] = None,
-        stream_points_override: Optional[float] = None,
+        allow_juniors: Optional[bool] = None,
+        priority_override: Optional[int] = None,
+        pr_slots_override: Optional[int] = None,
     ) -> bool:
         """Обновление настроек стримера."""
         try:
@@ -1532,17 +1623,17 @@ class Database:
                 set_parts.append("is_pinned = %s")
                 params.append(is_pinned)
 
-            if stream_points_override is not None:
-                # Handle clearing the override (if passed as specific value to clear, or handle None carefully)
-                # But here passing None usually means 'no change'.
-                # To clear it, we might need a specific sentinel or just assume the frontend passes -1 or something,
-                # but better to assume standard update logic: if passed, update it.
-                # If we want to clear it, we pass None? No, None means no change here.
-                # Let's assume frontend passes a value. If value is -1, set to NULL?
-                # Or simply: optional float.
-                # Wait, Pydantic will pass None if not provided.
-                set_parts.append("stream_points_override = %s")
-                params.append(stream_points_override)
+            if allow_juniors is not None:
+                set_parts.append("allow_juniors = %s")
+                params.append(allow_juniors)
+
+            if priority_override is not None:
+                set_parts.append("priority_override = %s")
+                params.append(priority_override)
+
+            if pr_slots_override is not None:
+                set_parts.append("pr_slots_override = %s")
+                params.append(pr_slots_override)
 
             if not set_parts:
                 return False
@@ -1562,6 +1653,87 @@ class Database:
                 f"Failed to update streamer {streamer_id}: {e}", exc_info=True
             )
             return False
+
+    @db_retry()
+    async def retroactive_update_active_sessions(
+        self,
+        streamer_id: int,
+        new_priority_override: Optional[int],
+    ) -> int:
+        """Retroactively update active sessions on a streamer when priority_override changes.
+
+        If new_priority_override is set, all active non-probation sessions get
+        priority_override = new value and rate_override = matching rate from settings.
+        If new_priority_override is None/cleared, session overrides are cleared too.
+
+        Returns number of sessions updated.
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Find all active sessions on this streamer
+                    await cursor.execute(
+                        """
+                        SELECT id, is_probation
+                        FROM spec_sessions
+                        WHERE target_type = 'streamer'
+                          AND target_id = %s
+                          AND ended_at IS NULL
+                          AND deleted_at IS NULL
+                        """,
+                        (streamer_id,),
+                    )
+                    active_sessions = await cursor.fetchall()
+
+                    if not active_sessions:
+                        return 0
+
+                    if new_priority_override is not None:
+                        config = await self.get_points_config()
+                        probation_rate = await self._get_probation_rate()
+
+                        for session in active_sessions:
+                            is_probation = session.get("is_probation", False)
+                            if is_probation:
+                                # Probation sessions keep their own rate
+                                continue
+                            new_rate = config.get(new_priority_override, 0.5)
+                            await cursor.execute(
+                                """
+                                UPDATE spec_sessions
+                                SET priority_override = %s, rate_override = %s
+                                WHERE id = %s
+                                """,
+                                (new_priority_override, new_rate, session["id"]),
+                            )
+                    else:
+                        # Clear overrides from all active sessions
+                        session_ids = [s["id"] for s in active_sessions if not s.get("is_probation")]
+                        if session_ids:
+                            placeholders = ", ".join(["%s"] * len(session_ids))
+                            await cursor.execute(
+                                f"""
+                                UPDATE spec_sessions
+                                SET priority_override = NULL, rate_override = NULL
+                                WHERE id IN ({placeholders})
+                                """,
+                                tuple(session_ids),
+                            )
+
+                    await conn.commit()
+
+                    updated = sum(1 for s in active_sessions if not s.get("is_probation"))
+                    self.logger.info(
+                        f"Retroactive update: {updated} sessions on streamer {streamer_id} "
+                        f"updated with priority_override={new_priority_override}"
+                    )
+                    return updated
+        except Exception as e:
+            self.logger.error(
+                f"Failed retroactive update for streamer {streamer_id}: {e}",
+                exc_info=True,
+            )
+            return 0
 
     @db_retry()
     async def update_event(
@@ -1673,7 +1845,7 @@ class Database:
     async def list_all_streamers(self) -> List[Dict[str, Any]]:
         """
         Получение всех стримеров из базы данных.
-        Returns unique streamers without duplicates from multiple assignments.
+        Returns basic streamer data without assignments (for "All Media" tab).
         """
         try:
             async with self.pool.acquire() as conn:
@@ -1682,41 +1854,15 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
-                            s.is_pinned, s.stream_points_override, s.profile_image_url,
+                            s.is_pinned, s.allow_juniors, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.pr_slots, s.added_at, s.added_by_id, s.updated_at,
-                            MIN(a.pr_id) as assigned_pr_id,
-                            COALESCE(
-                                JSON_ARRAYAGG(
-                                    CASE WHEN a.pr_id IS NOT NULL THEN
-                                        JSON_OBJECT(
-                                            'pr_id', CAST(a.pr_id AS CHAR),
-                                            'nickname', a.nickname,
-                                            'is_probation', COALESCE(ss.is_probation, FALSE),
-                                            'assigned_at', ss.started_at
-                                        )
-                                    ELSE NULL END
-                                ),
-                                JSON_ARRAY()
-                            ) as assignments
+                            s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                            s.added_at, s.added_by_id, s.updated_at
                         FROM streamers s
-                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer' 
-                             AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
-                        GROUP BY s.streamer_id
-                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
+                        ORDER BY s.priority DESC, s.streamer_name ASC
                         """
                     )
-                    results = await cursor.fetchall()
-                    for r in results:
-                        if isinstance(r.get("assignments"), str):
-                            r["assignments"] = json.loads(r["assignments"])
-                        if r.get("assignments"):
-                            r["assignments"] = [
-                                x for x in r["assignments"] if x is not None
-                            ]
-                    return results
+                    return await cursor.fetchall()
         except Exception as e:
             self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
             raise
@@ -1733,9 +1879,10 @@ class Database:
                         """
                         SELECT 
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
-                            s.is_pinned, s.stream_points_override, s.profile_image_url,
+                            s.is_pinned, s.allow_juniors, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.pr_slots, s.added_at, s.added_by_id, s.updated_at,
+                            s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                            s.added_at, s.added_by_id, s.updated_at,
                             MIN(ss.pr_id) as assigned_pr_id,
                             COALESCE(
                                 JSON_ARRAYAGG(
@@ -2136,7 +2283,7 @@ class Database:
                     if not is_probation:
                         # Main slot: enforce pr_slots limit
                         await cursor.execute(
-                            "SELECT pr_slots, priority FROM streamers WHERE streamer_id = %s",
+                            "SELECT pr_slots, priority, priority_override FROM streamers WHERE streamer_id = %s",
                             (streamer_id,),
                         )
                         streamer_row = await cursor.fetchone()
@@ -2145,6 +2292,9 @@ class Database:
                         )
                         streamer_priority = (
                             streamer_row.get("priority", 0) if streamer_row else 0
+                        )
+                        streamer_priority_override = (
+                            streamer_row.get("priority_override") if streamer_row else None
                         )
                         main_count = sum(
                             1 for s in existing_sessions if not s.get("is_probation")
@@ -2160,12 +2310,15 @@ class Database:
                                 raise ValueError("Слот Probation уже занят")
                         # Still need streamer priority for snapshot
                         await cursor.execute(
-                            "SELECT priority FROM streamers WHERE streamer_id = %s",
+                            "SELECT priority, priority_override FROM streamers WHERE streamer_id = %s",
                             (streamer_id,),
                         )
                         streamer_row = await cursor.fetchone()
                         streamer_priority = (
                             streamer_row.get("priority", 0) if streamer_row else 0
+                        )
+                        streamer_priority_override = (
+                            streamer_row.get("priority_override") if streamer_row else None
                         )
 
                     # Snapshot the rate from config
@@ -2174,6 +2327,13 @@ class Database:
                         rate_auto = await self._get_probation_rate()
                     else:
                         rate_auto = config.get(streamer_priority, 0.5)
+
+                    # Calculate override rate if streamer has priority_override
+                    session_priority_override = None
+                    session_rate_override = None
+                    if streamer_priority_override is not None and not is_probation:
+                        session_priority_override = streamer_priority_override
+                        session_rate_override = config.get(streamer_priority_override, 0.5)
 
                     # Ensure assistant exists
                     await cursor.execute(
@@ -2190,8 +2350,8 @@ class Database:
                             """
                             INSERT INTO spec_sessions 
                                 (pr_id, target_type, target_id, is_probation, started_at,
-                                 priority_auto, rate_auto)
-                            VALUES (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s)
+                                 priority_auto, rate_auto, priority_override, rate_override)
+                            VALUES (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s)
                             """,
                             (
                                 pr_id,
@@ -2199,6 +2359,8 @@ class Database:
                                 is_probation,
                                 streamer_priority,
                                 rate_auto,
+                                session_priority_override,
+                                session_rate_override,
                             ),
                         )
                     except Exception as e:
@@ -2243,7 +2405,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     # 1. Find active sessions for this streamer
-                    query = """
+                    query_base = """
                         SELECT ss.id, ss.pr_id, ss.started_at, ss.is_probation, st.streamer_name
                         FROM spec_sessions ss
                         JOIN streamers st ON st.streamer_id = ss.target_id
@@ -2251,13 +2413,14 @@ class Database:
                           AND ss.target_id = %s 
                           AND ss.ended_at IS NULL
                           AND ss.deleted_at IS NULL
-                        FOR UPDATE
                     """
                     params = [streamer_id]
 
                     if pr_id is not None:
-                        query += " AND ss.pr_id = %s"
+                        query_base += " AND ss.pr_id = %s"
                         params.append(pr_id)
+
+                    query = query_base + " FOR UPDATE"
 
                     await cursor.execute(query, tuple(params))
                     results = await cursor.fetchall()
@@ -2350,7 +2513,7 @@ class Database:
                     # Get PR1's current active session
                     await cursor.execute(
                         """
-                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, ss.is_probation
+                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, s.priority_override, ss.is_probation
                         FROM spec_sessions ss
                         JOIN streamers s ON s.streamer_id = ss.target_id
                         WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
@@ -2366,7 +2529,7 @@ class Database:
                     # Get PR2's current active session
                     await cursor.execute(
                         """
-                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, ss.is_probation
+                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, s.priority_override, ss.is_probation
                         FROM spec_sessions ss
                         JOIN streamers s ON s.streamer_id = ss.target_id
                         WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
@@ -2421,27 +2584,38 @@ class Database:
                     # PR1 gets streamer2
                     pr1_probation = pr1_assignment.get("is_probation", False)
                     s2_priority = pr2_assignment.get("priority", 0)
+                    s2_priority_override = pr2_assignment.get("priority_override")
                     if pr1_probation:
                         rate1 = await self._get_probation_rate()
+                        s2_po = None
+                        s2_ro = None
                     else:
                         rate1 = config.get(s2_priority, 0.5)
+                        s2_po = s2_priority_override
+                        s2_ro = config.get(s2_priority_override, 0.5) if s2_priority_override is not None else None
 
                     # PR2 gets streamer1
                     pr2_probation = pr2_assignment.get("is_probation", False)
                     s1_priority = pr1_assignment.get("priority", 0)
+                    s1_priority_override = pr1_assignment.get("priority_override")
                     if pr2_probation:
                         rate2 = await self._get_probation_rate()
+                        s1_po = None
+                        s1_ro = None
                     else:
                         rate2 = config.get(s1_priority, 0.5)
+                        s1_po = s1_priority_override
+                        s1_ro = config.get(s1_priority_override, 0.5) if s1_priority_override is not None else None
 
                     # Create new spec sessions with snapshots
                     await cursor.execute(
                         """
                         INSERT INTO spec_sessions 
-                            (pr_id, target_type, target_id, is_probation, started_at, priority_auto, rate_auto)
+                            (pr_id, target_type, target_id, is_probation, started_at,
+                             priority_auto, rate_auto, priority_override, rate_override)
                         VALUES 
-                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s), 
-                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s)
+                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s), 
+                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s)
                         """,
                         (
                             pr1_id,
@@ -2449,11 +2623,15 @@ class Database:
                             pr1_probation,
                             s2_priority,
                             rate1,
+                            s2_po,
+                            s2_ro,
                             pr2_id,
                             streamer1_id,
                             pr2_probation,
                             s1_priority,
                             rate2,
+                            s1_po,
+                            s1_ro,
                         ),
                     )
 
@@ -2674,7 +2852,15 @@ class Database:
     ) -> int:
         """Создание нового события."""
         try:
-            if start_time is None:
+            if start_time is not None:
+                # Validate that start_time is not in the past
+                if isinstance(start_time, str):
+                    start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=timezone.utc)
+                if start_time < datetime.now(timezone.utc):
+                    raise ValueError("Время начала события не может быть в прошлом")
+            else:
                 start_time = datetime.now(timezone.utc)
 
             async with self.pool.acquire() as conn:
@@ -3204,7 +3390,7 @@ class Database:
                                 DATE_ADD(started_at, INTERVAL 1 SECOND),
                                 UTC_TIMESTAMP()
                             ),
-                            end_reason = 'manual_leave'
+                            end_reason = 'manual'
                         WHERE id = %s
                         """,
                         (session_id,),
@@ -3612,6 +3798,10 @@ class Database:
                         params.append(next_started)
                         updates.append("ended_at = %s")
                         params.append(next_ended)
+                        # If session was open and admin is closing it, set end_reason
+                        if current_ended is None:
+                            updates.append("end_reason = %s")
+                            params.append("admin")
 
                     if next_target_type == "manual":
                         next_target_id = None
@@ -3642,12 +3832,24 @@ class Database:
                         params.append(next_target_id)
 
                     if "priority_override" in patch:
+                        new_priority = patch.get("priority_override")
                         updates.append("priority_override = %s")
-                        params.append(patch.get("priority_override"))
+                        params.append(new_priority)
 
-                    if "rate_override" in patch:
-                        updates.append("rate_override = %s")
-                        params.append(patch.get("rate_override"))
+                        # Auto-calculate rate_override from priority
+                        if new_priority is not None:
+                            config = await self.get_points_config()
+                            is_probation = before.get("is_probation", False)
+                            if is_probation:
+                                auto_rate = await self._get_probation_rate()
+                            else:
+                                auto_rate = config.get(new_priority, 0.5)
+                            updates.append("rate_override = %s")
+                            params.append(auto_rate)
+                        else:
+                            # Clearing priority_override => clear rate_override too
+                            updates.append("rate_override = NULL")
+
 
                     if "session_admin_comment" in patch:
                         updates.append("session_admin_comment = %s")
@@ -4877,3 +5079,184 @@ class Database:
                 "unassigned_media_count": 0,
                 "events_today_count": 0,
             }
+
+    # =========================================================================
+    # PR Action Logs (хронологическая лента закреплений/откреплений)
+    # =========================================================================
+
+    def _build_pr_action_filters(self, filters: dict):
+        """Build WHERE clauses and params from filters dict for PR action logs."""
+        where_parts = []
+        params = []
+
+        if filters.get("pr_id"):
+            where_parts.append("ss.pr_id = %s")
+            params.append(int(filters["pr_id"]))
+
+        if filters.get("priority") is not None:
+            where_parts.append("ss.applied_priority_level = %s")
+            params.append(int(filters["priority"]))
+
+        if filters.get("target_type") and filters["target_type"] != "all":
+            where_parts.append("ss.target_type = %s")
+            params.append(filters["target_type"])
+
+        return where_parts, params
+
+    def _build_date_filter_join(self, filters: dict, time_col: str):
+        """Build date range filter for a specific time column."""
+        parts = []
+        params = []
+        if filters.get("date_from"):
+            parts.append(f"{time_col} >= %s")
+            params.append(filters["date_from"])
+        if filters.get("date_to"):
+            parts.append(f"{time_col} <= %s")
+            params.append(filters["date_to"])
+        return parts, params
+
+    @db_retry()
+    async def get_pr_action_logs(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        filters: dict = None,
+    ) -> dict:
+        """
+        Get PR action logs (joins/leaves) with pagination and filtering.
+
+        Uses UNION ALL to split spec_sessions into individual join/leave events.
+        Returns dict with 'items' and 'total'.
+        """
+        try:
+            filters = filters or {}
+
+            # Build shared WHERE clauses (applied to both halves of UNION)
+            base_where, base_params = self._build_pr_action_filters(filters)
+
+            # Date filters applied specifically to each half's time column
+            join_date_parts, join_date_params = self._build_date_filter_join(filters, "ss.started_at")
+            leave_date_parts, leave_date_params = self._build_date_filter_join(filters, "ss.ended_at")
+
+            # Action type filter
+            action_type_filter = filters.get("action_type")  # 'join' | 'leave' | None
+
+            # === Build JOIN half ===
+            join_where_parts = list(base_where) + join_date_parts
+            join_where_parts.append("ss.deleted_at IS NULL")
+            join_params = list(base_params) + join_date_params
+            join_where_sql = "WHERE " + " AND ".join(join_where_parts) if join_where_parts else ""
+
+            join_sql = f"""
+                SELECT
+                    ss.id as session_id,
+                    ss.pr_id,
+                    ss.target_type,
+                    ss.target_id,
+                    ss.started_at as action_time,
+                    'join' as action_type,
+                    NULL as duration_seconds,
+                    ss.applied_priority_level as priority,
+                    ss.is_probation,
+                    ss.end_reason
+                FROM spec_sessions ss
+                {join_where_sql}
+            """
+
+            # === Build LEAVE half ===
+            leave_where_parts = list(base_where) + leave_date_parts
+            leave_where_parts.append("ss.ended_at IS NOT NULL")
+            leave_where_parts.append("ss.deleted_at IS NULL")
+            leave_params = list(base_params) + leave_date_params
+            leave_where_sql = "WHERE " + " AND ".join(leave_where_parts) if leave_where_parts else ""
+
+            leave_sql = f"""
+                SELECT
+                    ss.id as session_id,
+                    ss.pr_id,
+                    ss.target_type,
+                    ss.target_id,
+                    ss.ended_at as action_time,
+                    'leave' as action_type,
+                    ss.duration_seconds,
+                    ss.applied_priority_level as priority,
+                    ss.is_probation,
+                    ss.end_reason
+                FROM spec_sessions ss
+                {leave_where_sql}
+            """
+
+            # Combine based on action_type filter
+            if action_type_filter == "join":
+                union_sql = join_sql
+                union_params = join_params
+            elif action_type_filter == "leave":
+                union_sql = leave_sql
+                union_params = leave_params
+            else:
+                union_sql = f"({join_sql}) UNION ALL ({leave_sql})"
+                union_params = join_params + leave_params
+
+            # Wrap in subquery for ordering and pagination, join names
+            full_sql = f"""
+                SELECT
+                    u.session_id,
+                    u.pr_id,
+                    a.nickname as pr_nickname,
+                    a.role as pr_role,
+                    u.target_type,
+                    u.target_id,
+                    CASE
+                        WHEN u.target_type = 'streamer' THEN s.streamer_name
+                        WHEN u.target_type = 'event' THEN e.name
+                        ELSE CAST(u.target_id AS CHAR)
+                    END as target_name,
+                    s.profile_image_url as target_avatar,
+                    s.is_online as target_is_online,
+                    u.action_time,
+                    u.action_type,
+                    u.duration_seconds,
+                    u.priority,
+                    u.is_probation,
+                    u.end_reason
+                FROM ({union_sql}) u
+                LEFT JOIN assistants a ON u.pr_id = a.pr_id
+                LEFT JOIN streamers s ON u.target_type = 'streamer' AND u.target_id = s.streamer_id
+                LEFT JOIN events e ON u.target_type = 'event' AND u.target_id = e.id
+                ORDER BY u.action_time DESC
+                LIMIT %s OFFSET %s
+            """
+            full_params = tuple(union_params) + (limit, offset)
+
+            # Count query
+            count_sql = f"""
+                SELECT COUNT(*) as total FROM ({union_sql}) u
+            """
+            count_params = tuple(union_params)
+
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Get total count
+                    await cursor.execute(count_sql, count_params)
+                    count_result = await cursor.fetchone()
+                    total = count_result["total"] if count_result else 0
+
+                    # Get items
+                    await cursor.execute(full_sql, full_params)
+                    rows = await cursor.fetchall()
+
+                    items = []
+                    for row in rows:
+                        item = dict(row)
+                        item["pr_id"] = str(item["pr_id"]) if item.get("pr_id") else None
+                        item["target_id"] = str(item["target_id"]) if item.get("target_id") else None
+                        items.append(item)
+
+                    return {
+                        "items": items,
+                        "total": total,
+                    }
+        except Exception as e:
+            self.logger.error(f"Failed to get PR action logs: {e}", exc_info=True)
+            return {"items": [], "total": 0}
+

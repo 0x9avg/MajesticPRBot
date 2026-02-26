@@ -32,6 +32,13 @@ const CreateEvent = () => {
             let startTime = null;
             if (date && time) {
                 startTime = `${date}T${time}:00`;
+                // Validate not in the past
+                const startDate = new Date(startTime);
+                if (startDate < new Date()) {
+                    setMessage({ type: 'error', text: 'Дата и время начала не могут быть в прошлом' });
+                    setLoading(false);
+                    return;
+                }
             }
 
             const response = await fetch('/api/events', {
@@ -158,11 +165,10 @@ const CreateEvent = () => {
                     <input
                         type="number"
                         min="1"
-                        max="10"
                         className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-purple-500/50 transition-colors"
-                        placeholder="1-10"
+                        placeholder="1"
                         value={prSlots}
-                        onChange={(e) => setPrSlots(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                        onChange={(e) => setPrSlots(Math.max(1, parseInt(e.target.value) || 1))}
                     />
                 </div>
 

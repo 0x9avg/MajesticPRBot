@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Check, Coins, RefreshCw, Shield, Timer, Wrench } from 'lucide-react';
+import { AlertCircle, Check, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
 import { CustomSelect } from '../../../components/CustomInputs';
 import type { Assistant, Event, Streamer } from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
@@ -18,7 +18,6 @@ interface AssistantSessionRecord {
     priority_auto?: number | null;
     priority_override?: number | null;
     rate_auto?: number | null;
-    rate_override?: number | null;
     credited_points?: number | null;
     session_admin_comment?: string | null;
     deleted_at?: string | null;
@@ -121,13 +120,12 @@ const AssistantsManagement = () => {
         ended_at: '',
         session_admin_comment: '',
         priority_override: '',
-        rate_override: '',
         reason: '',
     });
 
     const [pointsForm, setPointsForm] = useState({ delta: '', reason: '' });
     const [sanctionsForm, setSanctionsForm] = useState({ penalty_points: '', penalty_percent: '', reason: '' });
-    const [warningsForm, setWarningsForm] = useState({ oral_delta: '0', strict_delta: '0', reason: '' });
+    const [warningsForm, setWarningsForm] = useState({ target_state: '', reason: '' });
     const manualWindow = getDefaultManualWindow();
     const [manualSessionForm, setManualSessionForm] = useState({
         target_type: 'streamer',
@@ -413,18 +411,33 @@ const AssistantsManagement = () => {
     };
 
     const handleWarningsUpdate = async () => {
-        if (!selectedPrId) return;
-        const oralDelta = Number(warningsForm.oral_delta || '0');
-        const strictDelta = Number(warningsForm.strict_delta || '0');
-        if (!Number.isInteger(oralDelta) || !Number.isInteger(strictDelta) || (oralDelta === 0 && strictDelta === 0)) {
-            setMessage({ type: 'error', text: 'Укажите изменение выговоров (не 0)' });
+        if (!selectedPrId || !selectedAssistant) return;
+        if (!warningsForm.target_state) {
+            setMessage({ type: 'error', text: 'Выберите итоговое состояние выговоров' });
             return;
         }
+
+        const currentStrict = selectedAssistant.strict_warnings ?? 0;
+        const currentOral = selectedAssistant.oral_warnings ?? 0;
+
+        const [strictStr, oralStr] = warningsForm.target_state.split('-');
+        const targetStrict = parseInt(strictStr, 10);
+        const targetOral = parseInt(oralStr, 10);
+
+        const strictDelta = targetStrict - currentStrict;
+        const oralDelta = targetOral - currentOral;
+
+        if (strictDelta === 0 && oralDelta === 0) {
+            setMessage({ type: 'error', text: 'Состояние не изменилось (дельта 0)' });
+            return;
+        }
+
         await runMutation(`/api/assistants/${selectedPrId}/warnings`, 'POST', {
             oral_delta: oralDelta,
             strict_delta: strictDelta,
             reason: warningsForm.reason || null,
         });
+        setWarningsForm({ target_state: '', reason: '' });
     };
 
     const handleManualSessionCreate = async () => {
@@ -528,7 +541,6 @@ const AssistantsManagement = () => {
         };
         if (sessionEdit.session_admin_comment.trim() !== '') payload.session_admin_comment = sessionEdit.session_admin_comment;
         if (sessionEdit.priority_override.trim() !== '') payload.priority_override = Number(sessionEdit.priority_override);
-        if (sessionEdit.rate_override.trim() !== '') payload.rate_override = Number(sessionEdit.rate_override);
         if (sessionEdit.reason.trim() !== '') payload.reason = sessionEdit.reason;
         await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'PATCH', payload);
         setEditingSessionId(null);
@@ -540,11 +552,66 @@ const AssistantsManagement = () => {
         await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}?reason=${encodeURIComponent(reason)}`, 'DELETE');
     };
 
-    const handleResetStats = async () => {
-        if (!selectedPrId) return;
-        const confirmed = window.confirm('Сбросить статистику ассистента? Это удалит активные данные по сессиям.');
+    const handleRoleChange = async (newRole: string) => {
+        if (!selectedPrId || !selectedAssistant) return;
+        setBusy(true);
+        setMessage(null);
+        try {
+            const token = getAccessToken();
+            if (!token) throw new Error('Требуется авторизация');
+            const response = await fetch('/api/assistants', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    pr_id: selectedPrId,
+                    nickname: selectedAssistant.nickname,
+                    role: newRole,
+                    experience_days: selectedAssistant.experience_days ?? 0,
+                }),
+            });
+            const json = await response.json().catch(() => ({} as unknown));
+            if (!response.ok) {
+                throw new Error((json as { detail?: string }).detail || 'Не удалось сменить роль');
+            }
+            await refreshSelectedAssistant(selectedPrId);
+            setMessage({ type: 'success', text: `Роль изменена на ${newRole}` });
+        } catch (error: unknown) {
+            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка смены роли' });
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const handleDeleteAssistant = async () => {
+        if (!selectedPrId || !selectedAssistant) return;
+        const confirmed = window.confirm(`Удалить ассистента ${selectedAssistant.nickname}? Это действие нельзя отменить.`);
         if (!confirmed) return;
-        await runMutation(`/api/assistants/${selectedPrId}/reset`, 'POST');
+        setBusy(true);
+        setMessage(null);
+        try {
+            const token = getAccessToken();
+            if (!token) throw new Error('Требуется авторизация');
+            const response = await fetch(`/api/assistants/${selectedPrId}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!response.ok) {
+                const json = await response.json().catch(() => ({} as unknown));
+                throw new Error((json as { detail?: string }).detail || 'Не удалось удалить ассистента');
+            }
+            setSelectedPrId(null);
+            setSelectedAssistant(null);
+            setSessions([]);
+            await fetchAssistants();
+            setMessage({ type: 'success', text: `Ассистент удален` });
+        } catch (error: unknown) {
+            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка удаления ассистента' });
+        } finally {
+            setBusy(false);
+        }
     };
 
     return (
@@ -634,21 +701,30 @@ const AssistantsManagement = () => {
 
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                 <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
-                                    <div className="text-white font-semibold flex items-center gap-2"><Coins className="w-4 h-4 text-green-400" />Баллы</div>
-                                    <input
-                                        type="number"
-                                        step="0.0001"
-                                        value={pointsForm.delta}
-                                        onChange={(e) => setPointsForm((prev) => ({ ...prev, delta: e.target.value }))}
-                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Изменение баллов"
-                                    />
+                                    <div className="text-white font-semibold flex items-center gap-2">
+                                        <Coins className="w-4 h-4 text-green-400" />Баллы
+                                    </div>
+                                    <div className="relative">
+                                        <input
+                                            type="number"
+                                            step="0.0001"
+                                            value={pointsForm.delta}
+                                            onChange={(e) => setPointsForm((prev) => ({ ...prev, delta: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                            placeholder="Изменение баллов (дельта)"
+                                        />
+                                        {pointsForm.delta && !isNaN(Number(pointsForm.delta)) && (
+                                            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold px-2 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
+                                                Итог: {(Number(selectedAssistant.display_points ?? 0) + Number(pointsForm.delta)).toFixed(2).replace(/\.00$/, '')}
+                                            </div>
+                                        )}
+                                    </div>
                                     <input
                                         type="text"
                                         value={pointsForm.reason}
                                         onChange={(e) => setPointsForm((prev) => ({ ...prev, reason: e.target.value }))}
                                         className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Причина"
+                                        placeholder="Причина (опционально)"
                                     />
                                     <button
                                         onClick={() => void handlePointsAdjust()}
@@ -662,24 +738,38 @@ const AssistantsManagement = () => {
                                 <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
                                     <div className="text-white font-semibold flex items-center gap-2"><Shield className="w-4 h-4 text-amber-400" />Санкции и выговоры</div>
                                     <div className="grid grid-cols-2 gap-2">
-                                        <input
-                                            type="number"
-                                            step="0.0001"
-                                            min="0"
-                                            value={sanctionsForm.penalty_points}
-                                            onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_points: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                            placeholder="Штрафные баллы"
-                                        />
-                                        <input
-                                            type="number"
-                                            step="0.01"
-                                            min="0"
-                                            value={sanctionsForm.penalty_percent}
-                                            onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_percent: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                            placeholder="Штраф, %"
-                                        />
+                                        <div className="relative">
+                                            <input
+                                                type="number"
+                                                step="0.0001"
+                                                min="0"
+                                                value={sanctionsForm.penalty_points}
+                                                onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_points: e.target.value }))}
+                                                className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
+                                                placeholder="± Баллы"
+                                            />
+                                            {sanctionsForm.penalty_points && !isNaN(Number(sanctionsForm.penalty_points)) && (
+                                                <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
+                                                    Итог: {(Number(selectedAssistant.penalty_points ?? 0) + Number(sanctionsForm.penalty_points)).toFixed(2).replace(/\.00$/, '')}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="relative">
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                min="0"
+                                                value={sanctionsForm.penalty_percent}
+                                                onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_percent: e.target.value }))}
+                                                className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
+                                                placeholder="± Проценты"
+                                            />
+                                            {sanctionsForm.penalty_percent && !isNaN(Number(sanctionsForm.penalty_percent)) && (
+                                                <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
+                                                    Итог: {(Number(selectedAssistant.penalty_percent ?? 0) + Number(sanctionsForm.penalty_percent)).toFixed(2).replace(/\.00$/, '')}%
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                     <input
                                         type="text"
@@ -691,55 +781,80 @@ const AssistantsManagement = () => {
                                     <button
                                         onClick={() => void handleSanctionsUpdate()}
                                         disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50"
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 mb-2"
                                     >
                                         Обновить штрафы
                                     </button>
-                                    <div className="grid grid-cols-2 gap-2">
+
+                                    <div className="pt-2 border-t border-white/10">
+                                        <select
+                                            value={warningsForm.target_state}
+                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, target_state: e.target.value }))}
+                                            className={`w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm font-semibold outline-none focus:border-white/30 mb-2 cursor-pointer transition-colors ${warningsForm.target_state === '0-0' ? 'text-green-400' :
+                                                warningsForm.target_state === '0-1' ? 'text-yellow-400' :
+                                                    warningsForm.target_state === '1-0' ? 'text-orange-400' :
+                                                        warningsForm.target_state === '1-1' ? 'text-red-400' :
+                                                            'text-white/60'
+                                                }`}
+                                        >
+                                            <option value="" disabled className="text-white/60 font-normal">Выберите состояние выговоров</option>
+                                            <option value="0-0" className="text-green-400 font-semibold bg-[#2a2a2a]">🟢 [0/2][0/2] — Нет выговоров</option>
+                                            <option value="0-1" className="text-yellow-400 font-semibold bg-[#2a2a2a]">🟡 [0/2][1/2] — 1 Устный</option>
+                                            <option value="1-0" className="text-orange-400 font-semibold bg-[#2a2a2a]">🟠 [1/2][0/2] — 1 Строгий</option>
+                                            <option value="1-1" className="text-red-400 font-semibold bg-[#2a2a2a]">🔴 [1/2][1/2] — 1 Строгий, 1 Устный</option>
+                                        </select>
+
                                         <input
-                                            type="number"
-                                            step="1"
-                                            value={warningsForm.oral_delta}
-                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, oral_delta: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                            placeholder="Устные +/-"
+                                            type="text"
+                                            value={warningsForm.reason}
+                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, reason: e.target.value }))}
+                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white mb-2"
+                                            placeholder="Причина выговоров"
                                         />
-                                        <input
-                                            type="number"
-                                            step="1"
-                                            value={warningsForm.strict_delta}
-                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, strict_delta: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                            placeholder="Строгие +/-"
-                                        />
+                                        <button
+                                            onClick={() => void handleWarningsUpdate()}
+                                            disabled={busy || !warningsForm.target_state}
+                                            className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/30 disabled:opacity-50"
+                                        >
+                                            Обновить выговоры
+                                        </button>
                                     </div>
-                                    <input
-                                        type="text"
-                                        value={warningsForm.reason}
-                                        onChange={(e) => setWarningsForm((prev) => ({ ...prev, reason: e.target.value }))}
-                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Причина выговоров"
-                                    />
-                                    <button
-                                        onClick={() => void handleWarningsUpdate()}
-                                        disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/30 disabled:opacity-50"
-                                    >
-                                        Обновить выговоры
-                                    </button>
                                 </div>
                             </div>
+
+
+                            {/* Role & Delete */}
+                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 flex items-center gap-4">
+                                <div className="flex-1">
+                                    <label className="text-xs text-white/50 mb-1 block">Роль</label>
+                                    <select
+                                        value={selectedAssistant.role || 'employee'}
+                                        onChange={(e) => void handleRoleChange(e.target.value)}
+                                        disabled={busy}
+                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
+                                    >
+                                        <option value="junior_employee">Стажер</option>
+                                        <option value="employee">Сотрудник</option>
+                                        <option value="senior_employee">Старший сотрудник</option>
+                                        <option value="manager">Менеджер</option>
+                                        <option value="developer">Разработчик</option>
+                                    </select>
+                                </div>
+                                <button
+                                    onClick={() => void handleDeleteAssistant()}
+                                    disabled={busy}
+                                    className="mt-5 flex items-center gap-2 px-4 py-2 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50 text-sm font-medium transition-colors"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                    Удалить
+                                </button>
+                            </div>
+
 
                             <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div className="text-white font-semibold flex items-center gap-2"><Timer className="w-4 h-4 text-indigo-400" />Ручная сессия</div>
-                                    <button
-                                        onClick={() => void handleResetStats()}
-                                        disabled={busy}
-                                        className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
-                                    >
-                                        Сбросить статистику
-                                    </button>
+
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
                                     <select
@@ -916,15 +1031,6 @@ const AssistantsManagement = () => {
                                                         placeholder="Priority override"
                                                     />
                                                     <input
-                                                        type="number"
-                                                        step="0.0001"
-                                                        min="0"
-                                                        value={sessionEdit.rate_override}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, rate_override: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Rate override"
-                                                    />
-                                                    <input
                                                         type="text"
                                                         value={sessionEdit.reason}
                                                         onChange={(e) => setSessionEdit((prev) => ({ ...prev, reason: e.target.value }))}
@@ -962,7 +1068,6 @@ const AssistantsManagement = () => {
                                                                 ended_at: toLocalDateTimeInput(session.ended_at),
                                                                 session_admin_comment: session.session_admin_comment || '',
                                                                 priority_override: session.priority_override != null ? String(session.priority_override) : '',
-                                                                rate_override: session.rate_override != null ? String(session.rate_override) : '',
                                                                 reason: '',
                                                             });
                                                         }}

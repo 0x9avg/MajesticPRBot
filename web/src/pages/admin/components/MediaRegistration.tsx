@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Radio, Check, AlertCircle } from 'lucide-react';
+import { Radio, Check, AlertCircle, Users } from 'lucide-react';
 import { getApiErrorMessage } from '../../../types/api';
 
 
@@ -7,6 +7,7 @@ const MediaRegistration = () => {
     const [priority, setPriority] = useState(0);
     const [prSlots, setPrSlots] = useState(1);
     const [urlInput, setUrlInput] = useState('');
+    const [allowJuniors, setAllowJuniors] = useState(true);
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
@@ -40,7 +41,8 @@ const MediaRegistration = () => {
                 body: JSON.stringify({
                     twitch_url: fullUrl,
                     priority: priority,
-                    pr_slots: prSlots
+                    pr_slots: prSlots,
+                    allow_juniors: allowJuniors
                 })
             });
 
@@ -125,12 +127,31 @@ const MediaRegistration = () => {
                         <input
                             type="number"
                             min="1"
-                            max="10"
                             className="w-full bg-[#2a2a2a] border border-white/5 rounded-xl p-3 text-white focus:outline-none focus:border-orange-500/50 transition-colors"
-                            placeholder="1-10"
+                            placeholder="1"
                             value={prSlots}
-                            onChange={(e) => setPrSlots(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                            onChange={(e) => setPrSlots(Math.max(1, parseInt(e.target.value) || 1))}
                         />
+                    </div>
+
+                    {/* Allow Juniors Toggle */}
+                    <div
+                        onClick={() => setAllowJuniors(!allowJuniors)}
+                        className={`flex items-center gap-4 p-4 rounded-xl border cursor-pointer transition-all ${allowJuniors
+                            ? 'bg-green-500/10 border-green-500/50'
+                            : 'bg-white/5 border-white/5 hover:border-white/20'
+                            }`}
+                    >
+                        <div className={`p-2 rounded-lg ${allowJuniors ? 'bg-green-500 text-white' : 'bg-white/10 text-white/40'}`}>
+                            <Users className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1">
+                            <div className={`font-medium ${allowJuniors ? 'text-green-400' : 'text-white/80'}`}>Разрешить стажерам</div>
+                            <div className="text-xs text-white/40">Стажеры смогут закрепляться за этим стримером</div>
+                        </div>
+                        <div className={`w-12 h-6 rounded-full p-1 transition-colors ${allowJuniors ? 'bg-green-500' : 'bg-white/10'}`}>
+                            <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${allowJuniors ? 'translate-x-6' : 'translate-x-0'}`} />
+                        </div>
                     </div>
 
                     <div className="pt-4 flex justify-end">

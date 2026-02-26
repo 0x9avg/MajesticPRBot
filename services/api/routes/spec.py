@@ -59,12 +59,31 @@ async def claim_streamer(
     if not streamer.get("is_online"):
         raise HTTPException(status_code=400, detail="Стример в оффлайне")
 
-    # Check if PR is already watching someone
+    # Check if streamer is in GTA 5 category
+    if str(streamer.get("game_id")) != Config.gta5_game_id:
+        raise HTTPException(status_code=400, detail="Стример не в категории GTA 5")
+
+    # Check if junior is allowed to claim this streamer
+    if data.is_probation and not streamer.get("allow_juniors", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Стажерам запрещено закрепляться за этим стримером",
+        )
+
+    # Check if PR already has an active spec session (streamer or event)
     current = await db.get_pr_current_streamer(data.pr_id)
     if current:
         raise HTTPException(
             status_code=409,
             detail=f"Вы уже закреплены за стримером {current['streamer_name']}",
+        )
+
+    # Also check active event participation
+    active_event = await db.get_user_active_event_participation(data.pr_id)
+    if active_event:
+        raise HTTPException(
+            status_code=409,
+            detail=f"У вас уже есть активный спек на событие «{active_event['name']}»",
         )
 
     assignments = streamer.get("assignments", [])
@@ -87,6 +106,7 @@ async def claim_streamer(
             data.streamer_id,
             streamer["streamer_name"],
             data.pr_id,
+            data={"is_probation": data.is_probation},
             trace_id=trace_id,
         )
 
@@ -408,6 +428,10 @@ async def get_claimable_streamers(
                 main_free = False
 
         # Filter logic:
+        # If streamer doesn't allow juniors, override probation_free to false
+        if not s.get("allow_juniors", True):
+            probation_free = False
+
         # - Regular user: only show if main_free
         # - Junior (can_spec_probation): show if main_free OR probation_free
         if can_spec_probation:

@@ -139,7 +139,7 @@ async def test_get_logs_for_assistant(build_api_app, fake_db) -> None:
         },
         {
             "id": 2,
-            "action": "Unassigned (manual_unclaim)",
+            "action": "Unassigned (manual)",
             "target": "StreamerAlpha",
             "created_at": "2026-02-14T11:30:00",
         },

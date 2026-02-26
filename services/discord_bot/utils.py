@@ -102,13 +102,14 @@ def format_spec_duration(seconds: int) -> str:
     return f"{minutes}м"
 
 
-async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
+async def send_pr_action_log(bot: commands.Bot, message: str = None, components: list = None) -> bool:
     """
-    Send message to the PR actions log channel.
+    Send message or components to the PR actions log channel.
 
     Args:
         bot: The Discord bot instance (must have api_client)
-        message: The formatted message to send
+        message: The formatted message to send (optional)
+        components: The components to send (optional, e.g. list of disnake.ui.Container)
 
     Returns:
         True if message was sent successfully, False otherwise
@@ -126,7 +127,10 @@ async def send_pr_action_log(bot: commands.Bot, message: str) -> bool:
         if not channel:
             return False
 
-        await channel.send(message)
+        if components:
+            await channel.send(content=message, components=components)
+        else:
+            await channel.send(content=message)
         return True
 
     except Exception as e:

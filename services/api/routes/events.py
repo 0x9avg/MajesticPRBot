@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
+    from services.broker import BrokerService
 
 from typing import Optional
 
@@ -27,6 +28,11 @@ def get_db(request: Request):
     return request.app.state.database
 
 
+def get_broker(request: Request):
+    """Get broker from app state."""
+    return request.app.state.broker
+
+
 @router.post("")
 async def create_event(
     request: Request,
@@ -36,18 +42,32 @@ async def create_event(
     """Create a new event."""
     trace_id = get_trace_id(request)
 
-    event_id = await db.create_event(
-        name=data.name,
-        description=data.description,
-        channel_id=data.channel_id,
-        message_id=0,
-        created_by=data.created_by,
-        required_pr_count=data.required_pr_count,
-        start_time=data.start_time,
-        notification_sent=(data.start_time is None),
-        pr_slots=data.pr_slots,
-        priority=data.priority,
-    )
+    # Validate start_time is not in the past
+    if data.start_time is not None:
+        st = data.start_time
+        if st.tzinfo is None:
+            st = st.replace(tzinfo=timezone.utc)
+        if st < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=400,
+                detail="Время начала события не может быть в прошлом",
+            )
+
+    try:
+        event_id = await db.create_event(
+            name=data.name,
+            description=data.description,
+            channel_id=data.channel_id,
+            message_id=0,
+            created_by=data.created_by,
+            required_pr_count=data.required_pr_count,
+            start_time=data.start_time,
+            notification_sent=(data.start_time is None),
+            pr_slots=data.pr_slots,
+            priority=data.priority,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not event_id:
         raise HTTPException(status_code=500, detail="Failed to create event")
@@ -180,6 +200,7 @@ async def join_event(
     event_id: int,
     data: EventJoinRequest,
     db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Join an event."""
     trace_id = get_trace_id(request)
@@ -188,6 +209,17 @@ async def join_event(
     if not success:
         raise HTTPException(
             status_code=400, detail="Could not join event (already joined or invalid)"
+        )
+
+    # Send broker notification
+    if broker:
+        event = await db.get_event(event_id)
+        event_name = event.get("name", "Unknown") if event else "Unknown"
+        await broker.emit_event_joined(
+            event_id=event_id,
+            event_name=event_name,
+            pr_id=data.user_id,
+            trace_id=trace_id,
         )
 
     return JSONResponse(
@@ -206,10 +238,23 @@ async def leave_event(
     event_id: int,
     data: EventJoinRequest,
     db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """Leave an event."""
     trace_id = get_trace_id(request)
     duration = await db.leave_event(event_id, data.user_id)
+
+    # Send broker notification
+    if broker:
+        event = await db.get_event(event_id)
+        event_name = event.get("name", "Unknown") if event else "Unknown"
+        await broker.emit_event_left(
+            event_id=event_id,
+            event_name=event_name,
+            pr_id=data.user_id,
+            duration_seconds=duration or 0,
+            trace_id=trace_id,
+        )
 
     return JSONResponse(
         content=success_envelope(
@@ -226,10 +271,25 @@ async def end_event(
     request: Request,
     event_id: int,
     db: "Database" = Depends(get_db),
+    broker: "BrokerService" = Depends(get_broker),
 ):
     """End an event."""
     trace_id = get_trace_id(request)
+    
+    event = await db.get_event(event_id)
+    event_name = event.get("name", "Unknown") if event else "Unknown"
+    
     results = await db.end_event(event_id)
+
+    if broker:
+        for p in results:
+            await broker.emit_event_left(
+                event_id=event_id,
+                event_name=event_name,
+                pr_id=p["user_id"],
+                duration_seconds=p.get("duration", 0),
+                trace_id=trace_id,
+            )
 
     return JSONResponse(
         content=success_envelope(

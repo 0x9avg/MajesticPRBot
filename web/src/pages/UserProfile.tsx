@@ -236,8 +236,16 @@ export default function UserProfile() {
                             />
 
                             <StatCard
-                                label="Баллы"
-                                value={user.display_points ?? user.total_points ?? 0}
+                                label="Общие баллы"
+                                value={(user.total_points ?? 0).toFixed(2)}
+                                color="text-blue-400"
+                                icon={Coins}
+                                valueClassName="text-blue-400"
+                            />
+
+                            <StatCard
+                                label="После санкций"
+                                value={(user.display_points ?? user.total_points ?? 0).toFixed(2)}
                                 color="text-green-400"
                                 icon={Coins}
                                 valueClassName="text-green-400"

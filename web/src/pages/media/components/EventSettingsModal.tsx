@@ -143,7 +143,6 @@ const EventSettingsModal = ({ event, isOpen, onClose, onSave }: EventSettingsMod
                         <input
                             type="number"
                             min="1"
-                            max="50"
                             value={prSlots}
                             onChange={(e) => setPrSlots(Math.max(1, parseInt(e.target.value) || 1))}
                             className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-purple-500 transition-colors"

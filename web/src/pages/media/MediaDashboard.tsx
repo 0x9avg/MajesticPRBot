@@ -37,7 +37,9 @@ export function MediaDashboard() {
         priority?: number;
         pr_slots?: number;
         is_pinned?: boolean;
-        stream_points_override?: number | null;
+        allow_juniors?: boolean;
+        priority_override?: number;
+        pr_slots_override?: number;
     }) => {
         if (!selectedStreamer) return;
         try {
@@ -109,6 +111,7 @@ export function MediaDashboard() {
                 isOpen={!!selectedStreamer}
                 onClose={() => setSelectedStreamer(null)}
                 onSave={handleUpdateStreamer}
+                mode="global"
             />
         </div>
     );

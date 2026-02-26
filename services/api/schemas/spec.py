@@ -40,7 +40,7 @@ class SpecSwapRequest(BaseModel):
 
 
 class SpecSessionResponse(BaseModel):
-    id: int
+    id: Snowflake
     pr_id: Snowflake
     streamer_id: Snowflake
     started_at: datetime

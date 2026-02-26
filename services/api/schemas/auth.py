@@ -19,7 +19,7 @@ class TokenResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: int
+    id: Snowflake
     discord_id: Snowflake
     username: str
     nickname: str

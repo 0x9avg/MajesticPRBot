@@ -14,7 +14,7 @@ export interface Permissions {
 }
 
 export interface UserContext {
-    id: number;
+    id: string;
     discord_id: string;
     username: string;
     nickname: string;

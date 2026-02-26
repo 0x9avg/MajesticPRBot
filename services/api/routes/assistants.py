@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from database import Database
 
 from dependencies import get_current_user
+from services.rbac import can_create_role
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -109,6 +110,7 @@ async def get_assistant(
 async def create_or_update_assistant(
     request: Request,
     assistant: AssistantCreate,
+    user: dict = Depends(get_current_user),
     db: "Database" = Depends(get_db),
 ):
     """Create or update a PR staff member."""
@@ -125,7 +127,15 @@ async def create_or_update_assistant(
     if assistant.role not in valid_roles:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}",
+            detail=f"Невалидная роль '{assistant.role}'"
+        )
+
+    user_role = user.get("role", "")
+    
+    if not can_create_role(user_role, assistant.role):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Недостаточно прав для назначения роли '{assistant.role}'"
         )
 
     await db.create_or_update_assistant(
@@ -318,36 +328,6 @@ async def get_assistant_capabilities(
         content=success_envelope(
             data=permissions,
             message=f"Permissions for role: {role}",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.post("/{pr_id}/reset")
-async def reset_assistant_stats(
-    request: Request,
-    pr_id: int,
-    user: dict = Depends(get_current_user),
-    db: "Database" = Depends(get_db),
-):
-    """Reset all stats for an assistant (Manager/Admin feature)."""
-    ensure_admin_role(user)
-    trace_id = get_trace_id(request)
-    assistant = await db.get_assistant(pr_id)
-
-    if not assistant:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-
-    # Reset stats in assistants table
-    await db.reset_assistant_stats(pr_id)
-
-    response_data = StatsResetResponse(pr_id=pr_id, nickname=assistant.get("nickname"))
-
-    return JSONResponse(
-        content=success_envelope(
-            data=response_data.model_dump(mode="json"),
-            message=f"Stats for {assistant['nickname']} reset successfully",
-            code="STATS_RESET",
             trace_id=trace_id,
         )
     )

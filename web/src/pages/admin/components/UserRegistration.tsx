@@ -103,7 +103,7 @@ const UserRegistration = () => {
                     username: formData.username,
                     nickname: formData.nickname,
                     role: formData.role,
-                    discord_id: parseInt(formData.discord_id),
+                    discord_id: formData.discord_id,
                     appointed_at: formData.appointed_at,
                 })
             });

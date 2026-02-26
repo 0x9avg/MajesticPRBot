@@ -11,6 +11,7 @@ type SortKey =
     | 'status'
     | 'total_spec_hours'
     | 'avg_spec_hours_per_day_30d'
+    | 'total_points'
     | 'display_points'
     | 'warnings'
     | 'penalty_points'
@@ -67,6 +68,8 @@ export function PRStats() {
                 return assistant.total_spec_hours || 0;
             case 'avg_spec_hours_per_day_30d':
                 return assistant.avg_spec_hours_per_day_30d || 0;
+            case 'total_points':
+                return assistant.total_points ?? 0;
             case 'display_points':
                 return assistant.display_points ?? assistant.total_points ?? 0;
             case 'penalty_points':
@@ -178,17 +181,13 @@ export function PRStats() {
     };
 
     const getWarningsBadgeClass = (assistant: Assistant): string => {
-        const strictWarnings = assistant.strict_warnings || 0;
-        if (strictWarnings <= 0) {
-            return 'bg-white/5 text-white/70 border-white/10';
-        }
-        if (strictWarnings === 1) {
-            return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
-        }
-        if (strictWarnings === 2) {
-            return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
-        }
-        return 'bg-red-500/15 text-red-300 border-red-500/30';
+        const strict = assistant.strict_warnings || 0;
+        const oral = assistant.oral_warnings || 0;
+
+        if (strict >= 1 && oral >= 1) return 'bg-red-500/15 text-red-300 border-red-500/30';
+        if (strict >= 1) return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
+        if (oral >= 1) return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
+        return 'bg-green-500/15 text-green-300 border-green-500/30';
     };
 
     const formatHours = (value: number | undefined) =>
@@ -290,13 +289,14 @@ export function PRStats() {
                 <div className="max-h-[70vh] overflow-y-auto">
                     <table className="w-full table-fixed text-sm">
                         <colgroup>
-                            <col className="w-[14%]" />
-                            <col className="w-[11%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[7%]" />
+                            <col className="w-[15%]" />
                             <col className="w-[8%]" />
-                            <col className="w-[17%]" />
                             <col className="w-[9%]" />
-                            <col className="w-[9%]" />
-                            <col className="w-[8%]" />
+                            <col className="w-[7%]" />
+                            <col className="w-[7%]" />
                             <col className="w-[8%]" />
                             <col className="w-[8%]" />
                             <col className="w-[8%]" />
@@ -308,8 +308,9 @@ export function PRStats() {
                                 {renderHeader('Стаж', 'experience_days')}
                                 {renderHeader('Статус', 'status')}
                                 {renderHeader('Общее время', 'total_spec_hours')}
-                                {renderHeader('Среднее ч/день', 'avg_spec_hours_per_day_30d')}
-                                {renderHeader('Баллы', 'display_points')}
+                                {renderHeader('Ср. ч/день', 'avg_spec_hours_per_day_30d')}
+                                {renderHeader('Общие баллы', 'total_points')}
+                                {renderHeader('После санк.', 'display_points')}
                                 {renderHeader('Выговоры', 'warnings')}
                                 {renderHeader('Штраф. баллы', 'penalty_points')}
                                 {renderHeader('Штраф, %', 'penalty_percent')}
@@ -318,7 +319,7 @@ export function PRStats() {
                         <tbody>
                             {assistants.length === 0 ? (
                                 <tr>
-                                    <td colSpan={10} className="text-center py-12 text-white/40 select-none">
+                                    <td colSpan={11} className="text-center py-12 text-white/40 select-none">
                                         Нет данных
                                     </td>
                                 </tr>
@@ -357,6 +358,11 @@ export function PRStats() {
                                             )}ч
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
+                                            <span className="inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap bg-blue-500/15 text-blue-300 border-blue-500/30">
+                                                {(assistant.total_points ?? 0).toFixed(2)}
+                                            </span>
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
                                             <span className="inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap bg-green-500/15 text-green-300 border-green-500/30">
                                                 {(assistant.display_points ?? assistant.total_points ?? 0).toFixed(2)}
                                             </span>
@@ -373,7 +379,7 @@ export function PRStats() {
                                                     penaltyPointsSortedPositive
                                                 )}`}
                                             >
-                                                {Number(assistant.penalty_points || 0).toFixed(2)}
+                                                {Number(assistant.penalty_points || 0)}
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
@@ -383,7 +389,7 @@ export function PRStats() {
                                                     penaltyPercentSortedPositive
                                                 )}`}
                                             >
-                                                {Number(assistant.penalty_percent || 0).toFixed(2)}%
+                                                {Number(assistant.penalty_percent || 0)}%
                                             </span>
                                         </td>
                                     </tr>

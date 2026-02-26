@@ -174,7 +174,7 @@ export default function MainLayout() {
                 </div>
             </header>
 
-            <main className="flex-1 pt-24 px-6 lg:px-12 pb-12 relative overflow-hidden">
+            <main className="flex-1 pt-24 px-6 lg:px-12 pb-12 relative">
                 <div className="fixed top-0 left-0 w-full h-full pointer-events-none z-0 overflow-hidden">
                     <div className="absolute top-[-10%] left-[-10%] w-[40vw] h-[40vw] bg-[#3b82f6]/5 rounded-full blur-[120px]" />
                     <div className="absolute bottom-[-10%] right-[-10%] w-[30vw] h-[30vw] bg-[#e81c5a]/5 rounded-full blur-[120px]" />

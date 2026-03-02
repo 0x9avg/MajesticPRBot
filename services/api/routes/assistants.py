@@ -359,7 +359,7 @@ async def create_manual_session(
         ended_at=data.ended_at,
         is_probation=data.is_probation,
         priority=data.priority,
-        session_admin_comment=data.session_admin_comment,
+        target_name=data.target_name,
     )
     if not created:
         raise HTTPException(status_code=500, detail="Не удалось создать ручную сессию")
@@ -384,7 +384,6 @@ async def create_manual_session(
             "meta": {
                 "request_path": str(request.url.path),
                 "method": request.method,
-                "session_admin_comment": data.session_admin_comment,
                 "actor_id": user.get("id"),
                 "ip": request.client.host if request.client else None,
             },
@@ -425,7 +424,6 @@ async def adjust_assistant_points(
     result = await db.adjust_assistant_points(
         pr_id=pr_id,
         delta=data.delta,
-        reason=data.reason,
         source=data.source or "manual_adjust",
     )
     if not result:
@@ -443,7 +441,6 @@ async def adjust_assistant_points(
                 "before": result.get("before"),
                 "after": result.get("after"),
                 "delta": result.get("delta"),
-                "reason": data.reason,
                 "source": data.source or "manual_adjust",
             },
             "meta": {
@@ -487,7 +484,6 @@ async def patch_assistant_sanctions(
         pr_id=pr_id,
         penalty_points=data.penalty_points,
         penalty_percent=data.penalty_percent,
-        reason=data.reason,
     )
     if not result:
         raise HTTPException(status_code=500, detail="Не удалось обновить санкции")
@@ -503,7 +499,6 @@ async def patch_assistant_sanctions(
             "changes": {
                 "before": result.get("before"),
                 "after": result.get("after"),
-                "reason": data.reason,
                 "source": "sanction_update",
             },
             "meta": {
@@ -545,7 +540,6 @@ async def update_assistant_warnings(
         pr_id=pr_id,
         oral_delta=data.oral_delta,
         strict_delta=data.strict_delta,
-        reason=data.reason,
     )
     if not result:
         raise HTTPException(
@@ -568,7 +562,6 @@ async def update_assistant_warnings(
                     "strict_delta": data.strict_delta,
                     "units_delta": result.get("units_delta"),
                 },
-                "reason": data.reason,
                 "source": "warning_update",
             },
             "meta": {
@@ -604,7 +597,6 @@ async def patch_assistant_session(
     ensure_admin_role(user)
     trace_id = get_trace_id(request)
     patch = data.model_dump(exclude_unset=True)
-    reason = patch.pop("reason", None)
     if not patch:
         raise HTTPException(status_code=400, detail="Нет полей для обновления сессии")
 
@@ -617,6 +609,38 @@ async def patch_assistant_session(
     if not result:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
 
+    # Emit broker event if session was closed manually by admin
+    before = result.get("before") or {}
+    after = result.get("after") or {}
+    if before.get("ended_at") is None and after.get("ended_at") is not None:
+        broker = getattr(request.app.state, "broker", None)
+        if broker:
+            target_type = after.get("target_type")
+            target_id = after.get("target_id")
+            target_name = after.get("target_name")
+            duration = after.get("duration_seconds") or 0
+            
+            if target_type == "streamer" and target_id is not None:
+                await broker.emit_spec_unclaimed(
+                    streamer_id=int(target_id),
+                    streamer_name=target_name or "Unknown",
+                    pr_id=pr_id,
+                    duration_seconds=duration,
+                    reason="admin_closed",
+                    trace_id=trace_id,
+                )
+            elif target_type == "event" and target_id is not None:
+                ended_dt = after.get("ended_at")
+                ended_str = ended_dt.isoformat() if hasattr(ended_dt, "isoformat") else str(ended_dt)
+                await broker.emit_event_left(
+                    event_id=int(target_id),
+                    event_name=target_name or "Unknown",
+                    pr_id=pr_id,
+                    duration_seconds=duration,
+                    ended_at=ended_str,
+                    trace_id=trace_id,
+                )
+
     await db.log_admin_action_v2(
         actor_name=user.get("nickname", user.get("username", "unknown")),
         actor_role=user.get("role"),
@@ -628,7 +652,6 @@ async def patch_assistant_session(
             "changes": {
                 "before": result.get("before"),
                 "after": result.get("after"),
-                "reason": reason,
                 "source": "session_edit",
             },
             "meta": {
@@ -657,7 +680,6 @@ async def delete_assistant_session(
     request: Request,
     pr_id: int,
     session_id: int,
-    reason: str = "admin_delete",
     user: dict = Depends(get_current_user),
     db: "Database" = Depends(get_db),
 ):
@@ -668,7 +690,7 @@ async def delete_assistant_session(
         pr_id=pr_id,
         session_id=session_id,
         deleted_by_id=user.get("discord_id") or user.get("id"),
-        reason=reason,
+        reason="admin_delete",
     )
     if not result:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
@@ -684,7 +706,6 @@ async def delete_assistant_session(
             "changes": {
                 "before": result.get("before"),
                 "after": result.get("after"),
-                "reason": reason,
                 "source": "session_soft_delete",
             },
             "meta": {

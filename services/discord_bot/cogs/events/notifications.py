@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 
-from disnake.ext import commands
+from disnake.ext import commands, tasks
 
 from utils import create_notification_component
 
@@ -30,6 +30,72 @@ class Notifications(commands.Cog):
         self.bot: DiscordBot = bot
         self.api: APIClient = bot.api_client
         self.logger: Logger = bot.logger
+        self.check_event_starts.start()
+
+    def cog_unload(self):
+        self.check_event_starts.cancel()
+
+    @tasks.loop(seconds=60)
+    async def check_event_starts(self):
+        """Check for scheduled events that need to start."""
+        try:
+            events = await self.api.get_scheduled_events()
+            if not events:
+                return
+
+            settings = await self.api.get_guild_settings()
+            if not settings:
+                return
+
+            notification_channel_id = settings.get("notification_channel_id")
+            if not notification_channel_id:
+                self.logger.warning("Notification skipped: No channel configured")
+                return
+
+            channel = self.bot.get_channel(int(notification_channel_id))
+
+            for event in events:
+                if channel:
+                    participants = event.get("participants", [])
+                    if participants:
+                        mentions = [f"<@{p['user_id']}>" for p in participants]
+                        mention_str = ", ".join(mentions)
+                        try:
+                            await channel.send(
+                                f"{mention_str} Событие **{event['name']}** началось!",
+                                delete_after=300,
+                            )
+                        except Exception as e:
+                            self.bot.logger.error(
+                                f"Event start notification error: {e}"
+                            )
+                    else:
+                        try:
+                            await channel.send(
+                                f"Событие **{event['name']}** началось!",
+                                delete_after=300,
+                            )
+                        except Exception as e:
+                            self.bot.logger.error(
+                                f"Event start notification error: {e}"
+                            )
+
+
+                # Start event (migrate reserved participants to active, triggering PR logs)
+                try:
+                    await self.api.start_event(event["id"])
+                except Exception as e:
+                    self.bot.logger.error(f"Failed to start event {event['id']}: {e}")
+
+                # Mark as notified
+                await self.api.mark_event_notification_sent(event["id"])
+
+        except Exception as e:
+            self.bot.logger.error(f"check_event_starts error: {e}", exc_info=True)
+
+    @check_event_starts.before_loop
+    async def before_check_event_starts(self):
+        await self.bot.wait_until_ready()
 
     async def handle_stream_event(self, event_type: str, data: dict):
         """

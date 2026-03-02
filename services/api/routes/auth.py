@@ -12,8 +12,10 @@ if TYPE_CHECKING:
     from fastapi.security import HTTPAuthorizationCredentials
     from services.auth import AuthService
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
 from config import Config
 from dependencies import get_current_user as get_authenticated_user
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -54,10 +56,10 @@ async def login(
             last_failed = user["last_failed_login"]
             if last_failed:
                 if getattr(last_failed, "tzinfo", None) is None:
-                    last_failed = last_failed.replace(tzinfo=timezone.utc)
+                    last_failed = last_failed.replace(tzinfo=MSK)
                 else:
-                    last_failed = last_failed.astimezone(timezone.utc)
-                time_passed = (datetime.now(timezone.utc) - last_failed).total_seconds()
+                    last_failed = last_failed.astimezone(MSK)
+                time_passed = (datetime.now(MSK) - last_failed).total_seconds()
 
                 if time_passed > Config.login_attempt_window:
                     await db.reset_failed_login(user["id"])

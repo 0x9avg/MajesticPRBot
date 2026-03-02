@@ -3,14 +3,19 @@ import { useState } from 'react';
 import { CalendarPlus, Check, AlertCircle } from 'lucide-react';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import { getApiErrorMessage } from '../../../types/api';
+import { getMskNow, getMskTodayStr } from '../../../utils/datetime';
 
 const CreateEvent = () => {
     const [priority, setPriority] = useState(0);
     const [prSlots, setPrSlots] = useState(1);
     const [eventName, setEventName] = useState('');
     const [description, setDescription] = useState('');
-    const [date, setDate] = useState('');
-    const [time, setTime] = useState('');
+    const [date, setDate] = useState(getMskTodayStr());
+    const [time, setTime] = useState(() => {
+        const now = getMskNow();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    });
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
@@ -33,8 +38,9 @@ const CreateEvent = () => {
             if (date && time) {
                 startTime = `${date}T${time}:00`;
                 // Validate not in the past
-                const startDate = new Date(startTime);
-                if (startDate < new Date()) {
+                const startDate = new Date(startTime + '+03:00');
+                const mskNow = getMskNow();
+                if (startDate.getTime() < mskNow.getTime() - 60000) { // 1 min buffer
                     setMessage({ type: 'error', text: 'Дата и время начала не могут быть в прошлом' });
                     setLoading(false);
                     return;

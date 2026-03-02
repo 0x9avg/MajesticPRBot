@@ -32,8 +32,6 @@ Base URL: `/api`
 |---|---|---|
 | POST | `/spec/claim` | Claim a streamer (Start spec) |
 | POST | `/spec/unclaim` | Unclaim a streamer (End spec) |
-| POST | `/spec/transfer` | Transfer a streamer to another PR |
-| POST | `/spec/swap` | Swap streamers between two PRs |
 | GET | `/spec/sessions/{pr_id}` | Get recent spec sessions for a PR |
 | GET | `/spec/by-pr/{pr_id}` | Get current streamer assigned to a PR |
 

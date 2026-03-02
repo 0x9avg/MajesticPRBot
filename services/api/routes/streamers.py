@@ -267,12 +267,11 @@ async def update_streamer(
             pr_slots_override=update_data.get("pr_slots_override"),
         )
 
-        # Retroactive update: propagate priority_override to active sessions
-        if "priority_override" in update_data:
-            new_priority_override = update_data["priority_override"]
-            await db.retroactive_update_active_sessions(
-                streamer_id=twitch_id,
-                new_priority_override=new_priority_override,
+        # Retroactive update: propagate priority changes to active sessions
+        if "priority" in update_data or "priority_override" in update_data:
+            await db.recalc_target_active_sessions(
+                target_type="streamer",
+                target_id=twitch_id,
             )
 
         # Log to admin_logs

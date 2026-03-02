@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Check, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
-import { CustomSelect } from '../../../components/CustomInputs';
+import { CustomSelect, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import type { Assistant, Event, Streamer } from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
+import { parseMskDate, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
+
+export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
 
 interface AssistantSessionRecord {
     id: number;
@@ -13,13 +16,12 @@ interface AssistantSessionRecord {
     started_at: string;
     ended_at?: string | null;
     duration_seconds?: number | null;
-    end_reason?: string | null;
+    end_reason?: SpecSessionEndReason | null;
     is_probation?: boolean;
     priority_auto?: number | null;
     priority_override?: number | null;
     rate_auto?: number | null;
     credited_points?: number | null;
-    session_admin_comment?: string | null;
     deleted_at?: string | null;
     delete_reason?: string | null;
 }
@@ -30,14 +32,7 @@ interface SelectOption {
 }
 
 const formatDateTime = (value?: string | null) => {
-    if (!value) return '—';
-    return new Date(value).toLocaleString('ru-RU', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    });
+    return formatMskToLocal(value);
 };
 
 const toNumberOrUndefined = (value: string) => {
@@ -48,26 +43,36 @@ const toNumberOrUndefined = (value: string) => {
 };
 
 const toLocalDateTimeInput = (isoValue?: string | null) => {
-    if (!isoValue) return '';
-    const dt = new Date(isoValue);
-    if (Number.isNaN(dt.getTime())) return '';
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+    const dt = parseMskDate(isoValue);
+    if (!dt) return '';
+    return formatToMskIso(dt).substring(0, 16);
+};
+
+/** Split 'YYYY-MM-DDTHH:mm' into { date: 'YYYY-MM-DD', time: 'HH:mm' } */
+const splitDateTime = (combined: string) => {
+    const [date = '', time = ''] = combined.split('T');
+    return { date, time };
+};
+
+/** Merge date and time parts back into 'YYYY-MM-DDTHH:mm' */
+const mergeDateTimePart = (current: string, part: 'date' | 'time', value: string) => {
+    const { date, time } = splitDateTime(current);
+    if (part === 'date') return value ? `${value}T${time || '00:00'}` : '';
+    return date ? `${date}T${value || '00:00'}` : '';
 };
 
 const parseLocalDateTimeToIso = (localValue: string) => {
-    const dt = new Date(localValue);
-    if (Number.isNaN(dt.getTime())) return null;
-    return dt.toISOString();
+    if (!localValue) return null;
+    return localValue.length === 16 ? localValue + ':00' : localValue;
 };
 
 const getDefaultManualWindow = () => {
-    const end = new Date();
+    const end = getMskNow();
     end.setSeconds(0, 0);
     const start = new Date(end.getTime() - 60 * 60 * 1000);
     return {
-        started_at: toLocalDateTimeInput(start.toISOString()),
-        ended_at: toLocalDateTimeInput(end.toISOString()),
+        started_at: formatToMskIso(start).substring(0, 16),
+        ended_at: formatToMskIso(end).substring(0, 16),
     };
 };
 
@@ -106,6 +111,8 @@ const AssistantsManagement = () => {
     const [eventOptions, setEventOptions] = useState<SelectOption[]>([]);
     const [streamerNameById, setStreamerNameById] = useState<Record<string, string>>({});
     const [eventNameById, setEventNameById] = useState<Record<string, string>>({});
+    const [streamerPriorityById, setStreamerPriorityById] = useState<Record<string, number>>({});
+    const [eventPriorityById, setEventPriorityById] = useState<Record<string, number>>({});
     const [optionsLoading, setOptionsLoading] = useState(false);
     const [optionsError, setOptionsError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
@@ -116,25 +123,25 @@ const AssistantsManagement = () => {
     const [sessionEdit, setSessionEdit] = useState({
         target_type: 'streamer',
         target_id: '',
+        target_name: '',
         started_at: '',
         ended_at: '',
-        session_admin_comment: '',
         priority_override: '',
-        reason: '',
+        is_probation: false,
     });
 
-    const [pointsForm, setPointsForm] = useState({ delta: '', reason: '' });
-    const [sanctionsForm, setSanctionsForm] = useState({ penalty_points: '', penalty_percent: '', reason: '' });
-    const [warningsForm, setWarningsForm] = useState({ target_state: '', reason: '' });
+    const [pointsForm, setPointsForm] = useState({ delta: '' });
+    const [sanctionsForm, setSanctionsForm] = useState({ penalty_points: '', penalty_percent: '' });
+    const [warningsForm, setWarningsForm] = useState({ target_state: '' });
     const manualWindow = getDefaultManualWindow();
     const [manualSessionForm, setManualSessionForm] = useState({
         target_type: 'streamer',
         target_id: '',
+        target_name: '',
         started_at: manualWindow.started_at,
         ended_at: manualWindow.ended_at,
         is_probation: false,
         priority: '0',
-        session_admin_comment: '',
     });
 
     const getAccessToken = () => localStorage.getItem('access_token');
@@ -214,15 +221,21 @@ const AssistantsManagement = () => {
 
             const nextStreamerNameById: Record<string, string> = {};
             const nextEventNameById: Record<string, string> = {};
+            const nextStreamerPriorityById: Record<string, number> = {};
+            const nextEventPriorityById: Record<string, number> = {};
             sortedStreamers.forEach((streamer) => {
                 nextStreamerNameById[String(streamer.streamer_id)] = streamer.streamer_name;
+                nextStreamerPriorityById[String(streamer.streamer_id)] = streamer.priority ?? 0;
             });
             sortedEvents.forEach((event) => {
                 nextEventNameById[String(event.id)] = event.name;
+                nextEventPriorityById[String(event.id)] = event.priority ?? 0;
             });
 
             setStreamerNameById(nextStreamerNameById);
             setEventNameById(nextEventNameById);
+            setStreamerPriorityById(nextStreamerPriorityById);
+            setEventPriorityById(nextEventPriorityById);
             setStreamerOptions(sortedStreamers.map(makeStreamerOption));
             setEventOptions(sortedEvents.map(makeEventOption));
         } catch (error: unknown) {
@@ -268,7 +281,7 @@ const AssistantsManagement = () => {
                     started_at: string;
                     ended_at?: string | null;
                     duration_seconds?: number | null;
-                    end_reason?: string | null;
+                    end_reason?: SpecSessionEndReason | null;
                 }>>(fallbackJson);
                 const normalized = Array.isArray(fallbackData)
                     ? fallbackData.map((item) => ({
@@ -281,7 +294,6 @@ const AssistantsManagement = () => {
                         ended_at: item.ended_at ?? null,
                         duration_seconds: item.duration_seconds ?? null,
                         end_reason: item.end_reason ?? null,
-                        session_admin_comment: null,
                         credited_points: null,
                     } satisfies AssistantSessionRecord))
                     : [];
@@ -389,10 +401,9 @@ const AssistantsManagement = () => {
         }
         await runMutation(`/api/assistants/${selectedPrId}/points/adjust`, 'POST', {
             delta,
-            reason: pointsForm.reason || null,
             source: 'manual_adjust',
         });
-        setPointsForm({ delta: '', reason: '' });
+        setPointsForm({ delta: '' });
     };
 
     const handleSanctionsUpdate = async () => {
@@ -406,7 +417,6 @@ const AssistantsManagement = () => {
         await runMutation(`/api/assistants/${selectedPrId}/sanctions`, 'PATCH', {
             penalty_points: penaltyPoints,
             penalty_percent: penaltyPercent,
-            reason: sanctionsForm.reason || null,
         });
     };
 
@@ -435,9 +445,8 @@ const AssistantsManagement = () => {
         await runMutation(`/api/assistants/${selectedPrId}/warnings`, 'POST', {
             oral_delta: oralDelta,
             strict_delta: strictDelta,
-            reason: warningsForm.reason || null,
         });
-        setWarningsForm({ target_state: '', reason: '' });
+        setWarningsForm({ target_state: '' });
     };
 
     const handleManualSessionCreate = async () => {
@@ -471,9 +480,8 @@ const AssistantsManagement = () => {
             setMessage({ type: 'error', text: 'Некорректная цель спека' });
             return;
         }
-        if (manualSessionForm.target_type === 'manual' && !manualSessionForm.session_admin_comment.trim()) {
-            setMessage({ type: 'error', text: 'Для manual-сессии обязателен комментарий' });
-            return;
+        if (manualSessionForm.target_type === 'manual') {
+            // manual sessions no longer require a comment
         }
         const targetName = parsedTargetId !== undefined
             ? (
@@ -488,13 +496,12 @@ const AssistantsManagement = () => {
                 ? null
                 : parsedTargetId,
             target_name: manualSessionForm.target_type === 'manual'
-                ? null
+                ? (manualSessionForm.target_name.trim() || null)
                 : targetName,
             started_at: startedAtIso,
             ended_at: endedAtIso,
             is_probation: manualSessionForm.is_probation,
             priority: Number(manualSessionForm.priority || '0'),
-            session_admin_comment: manualSessionForm.session_admin_comment || null,
         });
     };
 
@@ -529,27 +536,43 @@ const AssistantsManagement = () => {
             setMessage({ type: 'error', text: 'Некорректная цель спека' });
             return;
         }
-        if (sessionEdit.target_type === 'manual' && !sessionEdit.session_admin_comment.trim()) {
-            setMessage({ type: 'error', text: 'Для manual-сессии обязателен комментарий' });
-            return;
+        if (sessionEdit.target_type === 'manual') {
+            // manual sessions no longer require a comment
         }
         const payload: Record<string, unknown> = {
             target_type: sessionEdit.target_type,
             target_id: sessionEdit.target_type === 'manual' ? null : parsedTargetId,
+            target_name: sessionEdit.target_type === 'manual'
+                ? (sessionEdit.target_name.trim() || null)
+                : null,
             started_at: startedAtIso,
             ended_at: endedAtIso,
+            is_probation: sessionEdit.is_probation,
         };
-        if (sessionEdit.session_admin_comment.trim() !== '') payload.session_admin_comment = sessionEdit.session_admin_comment;
-        if (sessionEdit.priority_override.trim() !== '') payload.priority_override = Number(sessionEdit.priority_override);
-        if (sessionEdit.reason.trim() !== '') payload.reason = sessionEdit.reason;
+        const defaultPriority = sessionEdit.target_type === 'event'
+            ? eventPriorityById[String(parsedTargetId)] ?? 0
+            : sessionEdit.target_type === 'streamer'
+                ? streamerPriorityById[String(parsedTargetId)] ?? 0
+                : 0;
+
+        if (sessionEdit.priority_override.trim() !== '') {
+            const parsedOverride = Number(sessionEdit.priority_override);
+            if (parsedOverride === defaultPriority) {
+                payload.priority_override = null;
+            } else {
+                payload.priority_override = parsedOverride;
+            }
+        } else {
+            payload.priority_override = null;
+        }
+
         await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'PATCH', payload);
         setEditingSessionId(null);
     };
 
     const handleSessionDelete = async (sessionId: number) => {
         if (!selectedPrId) return;
-        const reason = window.prompt('Причина удаления сессии', 'admin_delete') || 'admin_delete';
-        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}?reason=${encodeURIComponent(reason)}`, 'DELETE');
+        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'DELETE');
     };
 
     const handleRoleChange = async (newRole: string) => {
@@ -683,7 +706,7 @@ const AssistantsManagement = () => {
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
                                     <div className="text-xs text-white/50">Баллы</div>
-                                    <div className="text-green-300 font-semibold">{selectedAssistant.display_points ?? 0}</div>
+                                    <div className="text-green-300 font-semibold">{selectedAssistant.total_points ?? 0}</div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
                                     <div className="text-xs text-white/50">Штрафные баллы</div>
@@ -715,17 +738,10 @@ const AssistantsManagement = () => {
                                         />
                                         {pointsForm.delta && !isNaN(Number(pointsForm.delta)) && (
                                             <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold px-2 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                Итог: {(Number(selectedAssistant.display_points ?? 0) + Number(pointsForm.delta)).toFixed(2).replace(/\.00$/, '')}
+                                                Итог: {(Number(selectedAssistant.total_points ?? 0) + Number(pointsForm.delta)).toFixed(2).replace(/\.00$/, '')}
                                             </div>
                                         )}
                                     </div>
-                                    <input
-                                        type="text"
-                                        value={pointsForm.reason}
-                                        onChange={(e) => setPointsForm((prev) => ({ ...prev, reason: e.target.value }))}
-                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Причина (опционально)"
-                                    />
                                     <button
                                         onClick={() => void handlePointsAdjust()}
                                         disabled={busy}
@@ -750,7 +766,7 @@ const AssistantsManagement = () => {
                                             />
                                             {sanctionsForm.penalty_points && !isNaN(Number(sanctionsForm.penalty_points)) && (
                                                 <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                    Итог: {(Number(selectedAssistant.penalty_points ?? 0) + Number(sanctionsForm.penalty_points)).toFixed(2).replace(/\.00$/, '')}
+                                                    Итог: {Math.max(0, Number(selectedAssistant.penalty_points ?? 0) + Number(sanctionsForm.penalty_points)).toFixed(2).replace(/\.00$/, '')}
                                                 </div>
                                             )}
                                         </div>
@@ -766,18 +782,11 @@ const AssistantsManagement = () => {
                                             />
                                             {sanctionsForm.penalty_percent && !isNaN(Number(sanctionsForm.penalty_percent)) && (
                                                 <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                    Итог: {(Number(selectedAssistant.penalty_percent ?? 0) + Number(sanctionsForm.penalty_percent)).toFixed(2).replace(/\.00$/, '')}%
+                                                    Итог: {Math.max(0, Number(selectedAssistant.penalty_percent ?? 0) + Number(sanctionsForm.penalty_percent)).toFixed(2).replace(/\.00$/, '')}%
                                                 </div>
                                             )}
                                         </div>
                                     </div>
-                                    <input
-                                        type="text"
-                                        value={sanctionsForm.reason}
-                                        onChange={(e) => setSanctionsForm((prev) => ({ ...prev, reason: e.target.value }))}
-                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Причина штрафов"
-                                    />
                                     <button
                                         onClick={() => void handleSanctionsUpdate()}
                                         disabled={busy}
@@ -804,13 +813,6 @@ const AssistantsManagement = () => {
                                             <option value="1-1" className="text-red-400 font-semibold bg-[#2a2a2a]">🔴 [1/2][1/2] — 1 Строгий, 1 Устный</option>
                                         </select>
 
-                                        <input
-                                            type="text"
-                                            value={warningsForm.reason}
-                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, reason: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white mb-2"
-                                            placeholder="Причина выговоров"
-                                        />
                                         <button
                                             onClick={() => void handleWarningsUpdate()}
                                             disabled={busy || !warningsForm.target_state}
@@ -856,78 +858,122 @@ const AssistantsManagement = () => {
                                     <div className="text-white font-semibold flex items-center gap-2"><Timer className="w-4 h-4 text-indigo-400" />Ручная сессия</div>
 
                                 </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
-                                    <select
-                                        value={manualSessionForm.target_type}
-                                        onChange={(e) => setManualSessionForm((prev) => ({
-                                            ...prev,
-                                            target_type: e.target.value,
-                                            target_id: '',
-                                        }))}
-                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                    >
-                                        <option value="streamer">Стример</option>
-                                        <option value="event">Событие</option>
-                                        <option value="manual">Manual</option>
-                                    </select>
-                                    {manualSessionForm.target_type !== 'manual' && (
-                                        <div className="md:col-span-2 lg:col-span-2">
-                                            <CustomSelect
-                                                options={manualTargetOptions}
-                                                value={manualSessionForm.target_id}
-                                                onChange={(value) => setManualSessionForm((prev) => ({ ...prev, target_id: String(value) }))}
-                                                placeholder={
-                                                    optionsLoading
-                                                        ? 'Loading...'
-                                                        : manualTargetOptions.length > 0
-                                                            ? (manualSessionForm.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
-                                                            : (manualSessionForm.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
-                                                }
+                                <div className="space-y-3">
+                                    {/* Row 1: Target type + selector */}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <select
+                                            value={manualSessionForm.target_type}
+                                            onChange={(e) => setManualSessionForm((prev) => ({
+                                                ...prev,
+                                                target_type: e.target.value,
+                                                target_id: '',
+                                                priority: '0',
+                                            }))}
+                                            className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                        >
+                                            <option value="streamer">Стример</option>
+                                            <option value="event">Событие</option>
+                                            <option value="manual">Manual</option>
+                                        </select>
+                                        {manualSessionForm.target_type !== 'manual' && (
+                                            <div className="flex-1 min-w-[200px]">
+                                                <CustomSelect
+                                                    options={manualTargetOptions}
+                                                    value={manualSessionForm.target_id}
+                                                    onChange={(value) => {
+                                                        const targetId = String(value);
+                                                        const defaultPriority = manualSessionForm.target_type === 'event'
+                                                            ? eventPriorityById[targetId] ?? 0
+                                                            : streamerPriorityById[targetId] ?? 0;
+                                                        setManualSessionForm((prev) => ({
+                                                            ...prev,
+                                                            target_id: targetId,
+                                                            priority: String(defaultPriority),
+                                                        }));
+                                                    }}
+                                                    placeholder={
+                                                        optionsLoading
+                                                            ? 'Loading...'
+                                                            : manualTargetOptions.length > 0
+                                                                ? (manualSessionForm.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                                : (manualSessionForm.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                    }
+                                                />
+                                            </div>
+                                        )}
+                                        {manualSessionForm.target_type === 'manual' && (
+                                            <input
+                                                type="text"
+                                                value={manualSessionForm.target_name}
+                                                onChange={(e) => setManualSessionForm((prev) => ({ ...prev, target_name: e.target.value }))}
+                                                className="flex-1 min-w-[150px] bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                placeholder="Название"
+                                            />
+                                        )}
+                                    </div>
+                                    {/* Row 2: Date/time pickers */}
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Дата начала</label>
+                                            <CustomDatePicker
+                                                value={splitDateTime(manualSessionForm.started_at).date}
+                                                onChange={(d) => setManualSessionForm((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'date', d) }))}
+                                                placeholder="Дата"
                                             />
                                         </div>
-                                    )}
-                                    <input
-                                        type="datetime-local"
-                                        value={manualSessionForm.started_at}
-                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, started_at: e.target.value }))}
-                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Начало"
-                                    />
-                                    <input
-                                        type="datetime-local"
-                                        value={manualSessionForm.ended_at}
-                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, ended_at: e.target.value }))}
-                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Конец"
-                                    />
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max="3"
-                                        value={manualSessionForm.priority}
-                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, priority: e.target.value }))}
-                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder="Приоритет"
-                                    />
-                                    <label className="inline-flex items-center gap-2 text-sm text-white/80 px-2">
-                                        <input
-                                            type="checkbox"
-                                            checked={manualSessionForm.is_probation}
-                                            onChange={(e) => setManualSessionForm((prev) => ({ ...prev, is_probation: e.target.checked }))}
-                                        />
-                                        Испытательный слот
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={manualSessionForm.session_admin_comment}
-                                        onChange={(e) => setManualSessionForm((prev) => ({ ...prev, session_admin_comment: e.target.value }))}
-                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        placeholder={
-                                            manualSessionForm.target_type === 'manual'
-                                                ? 'Комментарий (обязательно для manual)'
-                                                : 'Комментарий'
-                                        }
-                                    />
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Время начала</label>
+                                            <CustomTimePicker
+                                                value={splitDateTime(manualSessionForm.started_at).time}
+                                                onChange={(t) => setManualSessionForm((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'time', t) }))}
+                                                placeholder="--:--"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Дата конца</label>
+                                            <CustomDatePicker
+                                                value={splitDateTime(manualSessionForm.ended_at).date}
+                                                onChange={(d) => setManualSessionForm((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'date', d) }))}
+                                                placeholder="Дата"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Время конца</label>
+                                            <CustomTimePicker
+                                                value={splitDateTime(manualSessionForm.ended_at).time}
+                                                onChange={(t) => setManualSessionForm((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'time', t) }))}
+                                                placeholder="--:--"
+                                            />
+                                        </div>
+                                    </div>
+                                    {/* Row 3: Priority + probation */}
+                                    <div className="flex flex-wrap items-center gap-3">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs text-white/40">Приоритет:</span>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                max="3"
+                                                value={manualSessionForm.priority}
+                                                onChange={(e) => setManualSessionForm((prev) => ({ ...prev, priority: e.target.value }))}
+                                                disabled={manualSessionForm.is_probation}
+                                                className="w-16 bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
+                                            />
+                                        </div>
+                                        <label className="flex items-center gap-2 cursor-pointer group">
+                                            <div className="relative">
+                                                <input
+                                                    type="checkbox"
+                                                    className="sr-only peer"
+                                                    checked={manualSessionForm.is_probation}
+                                                    onChange={(e) => setManualSessionForm((prev) => ({ ...prev, is_probation: e.target.checked }))}
+                                                />
+                                                <div className="w-10 h-5 bg-white/10 rounded-full peer peer-checked:bg-yellow-500/50 transition-colors"></div>
+                                                <div className="absolute left-1 top-1 w-3 h-3 bg-white/40 rounded-full peer-checked:translate-x-5 peer-checked:bg-white transition-transform"></div>
+                                            </div>
+                                            <span className="text-xs text-white/60 group-hover:text-white transition-colors">Стажерский</span>
+                                        </label>
+                                    </div>
                                 </div>
                                 <button
                                     onClick={() => void handleManualSessionCreate()}
@@ -967,76 +1013,128 @@ const AssistantsManagement = () => {
                                                 <span>Конец: {formatDateTime(session.ended_at)}</span>
                                                 <span>Длительность: {session.duration_seconds ?? 0} сек.</span>
                                                 <span>Баллы: {session.credited_points ?? 0}</span>
-                                            </div>
-                                            <div className="text-sm text-white/70">
-                                                Комментарий: {session.session_admin_comment || '—'}
+                                                {session.is_probation ? (
+                                                    <span className="text-yellow-400/80 font-medium">Стажерский</span>
+                                                ) : (
+                                                    <span>Приоритет: {session.priority_override ?? session.priority_auto ?? 0}</span>
+                                                )}
                                             </div>
                                             {editingSessionId === session.id && (
-                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
-                                                    <select
-                                                        value={sessionEdit.target_type}
-                                                        onChange={(e) => setSessionEdit((prev) => ({
-                                                            ...prev,
-                                                            target_type: e.target.value,
-                                                            target_id: '',
-                                                        }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                    >
-                                                        <option value="streamer">Стример</option>
-                                                        <option value="event">Событие</option>
-                                                        <option value="manual">Manual</option>
-                                                    </select>
-                                                    {sessionEdit.target_type !== 'manual' && (
-                                                        <CustomSelect
-                                                            options={editTargetOptions}
-                                                            value={sessionEdit.target_id}
-                                                            onChange={(value) => setSessionEdit((prev) => ({ ...prev, target_id: String(value) }))}
-                                                            placeholder={
-                                                                optionsLoading
-                                                                    ? 'Loading...'
-                                                                    : editTargetOptions.length > 0
-                                                                        ? (sessionEdit.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
-                                                                        : (sessionEdit.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
-                                                            }
-                                                        />
-                                                    )}
-                                                    <input
-                                                        type="datetime-local"
-                                                        value={sessionEdit.started_at}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, started_at: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Начало"
-                                                    />
-                                                    <input
-                                                        type="datetime-local"
-                                                        value={sessionEdit.ended_at}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, ended_at: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Конец"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        value={sessionEdit.session_admin_comment}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, session_admin_comment: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Комментарий"
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        min="0"
-                                                        max="3"
-                                                        value={sessionEdit.priority_override}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, priority_override: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Priority override"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        value={sessionEdit.reason}
-                                                        onChange={(e) => setSessionEdit((prev) => ({ ...prev, reason: e.target.value }))}
-                                                        className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        placeholder="Причина"
-                                                    />
+                                                <div className="space-y-3">
+                                                    {/* Row 1: Target type + selector */}
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select
+                                                            value={sessionEdit.target_type}
+                                                            onChange={(e) => setSessionEdit((prev) => ({
+                                                                ...prev,
+                                                                target_type: e.target.value,
+                                                                target_id: '',
+                                                                priority_override: '0',
+                                                            }))}
+                                                            className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                        >
+                                                            <option value="streamer">Стример</option>
+                                                            <option value="event">Событие</option>
+                                                            <option value="manual">Manual</option>
+                                                        </select>
+                                                        {sessionEdit.target_type !== 'manual' && (
+                                                            <div className="flex-1 min-w-[200px]">
+                                                                <CustomSelect
+                                                                    options={editTargetOptions}
+                                                                    value={sessionEdit.target_id}
+                                                                    onChange={(value) => {
+                                                                        const targetId = String(value);
+                                                                        const defaultPriority = sessionEdit.target_type === 'event'
+                                                                            ? eventPriorityById[targetId] ?? 0
+                                                                            : streamerPriorityById[targetId] ?? 0;
+                                                                        setSessionEdit((prev) => ({
+                                                                            ...prev,
+                                                                            target_id: targetId,
+                                                                            priority_override: String(defaultPriority),
+                                                                        }));
+                                                                    }}
+                                                                    placeholder={
+                                                                        optionsLoading
+                                                                            ? 'Loading...'
+                                                                            : editTargetOptions.length > 0
+                                                                                ? (sessionEdit.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                                                : (sessionEdit.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                                    }
+                                                                />
+                                                            </div>
+                                                        )}
+                                                        {sessionEdit.target_type === 'manual' && (
+                                                            <input
+                                                                type="text"
+                                                                value={sessionEdit.target_name}
+                                                                onChange={(e) => setSessionEdit((prev) => ({ ...prev, target_name: e.target.value }))}
+                                                                className="flex-1 min-w-[150px] bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                                placeholder="Название"
+                                                            />
+                                                        )}
+                                                    </div>
+                                                    {/* Row 2: Date/time pickers */}
+                                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                                        <div>
+                                                            <label className="text-xs text-white/40 mb-1 block">Дата начала</label>
+                                                            <CustomDatePicker
+                                                                value={splitDateTime(sessionEdit.started_at).date}
+                                                                onChange={(d) => setSessionEdit((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'date', d) }))}
+                                                                placeholder="Дата"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/40 mb-1 block">Время начала</label>
+                                                            <CustomTimePicker
+                                                                value={splitDateTime(sessionEdit.started_at).time}
+                                                                onChange={(t) => setSessionEdit((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'time', t) }))}
+                                                                placeholder="--:--"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/40 mb-1 block">Дата конца</label>
+                                                            <CustomDatePicker
+                                                                value={splitDateTime(sessionEdit.ended_at).date}
+                                                                onChange={(d) => setSessionEdit((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'date', d) }))}
+                                                                placeholder="Дата"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/40 mb-1 block">Время конца</label>
+                                                            <CustomTimePicker
+                                                                value={splitDateTime(sessionEdit.ended_at).time}
+                                                                onChange={(t) => setSessionEdit((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'time', t) }))}
+                                                                placeholder="--:--"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs text-white/40">Приоритет:</span>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                max="3"
+                                                                value={sessionEdit.priority_override}
+                                                                onChange={(e) => setSessionEdit((prev) => ({ ...prev, priority_override: e.target.value }))}
+                                                                className="w-16 bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                                disabled={sessionEdit.is_probation}
+                                                            />
+                                                        </div>
+                                                        <label className="flex items-center gap-2 cursor-pointer group">
+                                                            <div className="relative">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="sr-only peer"
+                                                                    checked={sessionEdit.is_probation}
+                                                                    onChange={(e) => setSessionEdit((prev) => ({ ...prev, is_probation: e.target.checked }))}
+                                                                />
+                                                                <div className="w-10 h-5 bg-white/10 rounded-full peer peer-checked:bg-yellow-500/50 transition-colors"></div>
+                                                                <div className="absolute left-1 top-1 w-3 h-3 bg-white/40 rounded-full peer-checked:translate-x-5 peer-checked:bg-white transition-transform"></div>
+                                                            </div>
+                                                            <span className="text-xs text-white/60 group-hover:text-white transition-colors">Стажерский</span>
+                                                        </label>
+                                                    </div>
                                                 </div>
                                             )}
                                             <div className="flex items-center gap-2">
@@ -1064,11 +1162,15 @@ const AssistantsManagement = () => {
                                                             setSessionEdit({
                                                                 target_type: session.target_type || 'streamer',
                                                                 target_id: session.target_id != null ? String(session.target_id) : '',
+                                                                target_name: session.target_name || '',
                                                                 started_at: toLocalDateTimeInput(session.started_at),
                                                                 ended_at: toLocalDateTimeInput(session.ended_at),
-                                                                session_admin_comment: session.session_admin_comment || '',
-                                                                priority_override: session.priority_override != null ? String(session.priority_override) : '',
-                                                                reason: '',
+                                                                priority_override: session.priority_override != null
+                                                                    ? String(session.priority_override)
+                                                                    : session.priority_auto != null
+                                                                        ? String(session.priority_auto)
+                                                                        : '',
+                                                                is_probation: !!session.is_probation,
                                                             });
                                                         }}
                                                         disabled={busy}

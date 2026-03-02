@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.streamers import router as streamers_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -17,7 +18,6 @@ def _seed_streamer(
         "streamer_name": name,
         "is_online": is_online,
         "is_pinned": False,
-        "stream_points_override": None,
         "started_at": None,
         "priority": 1,
         "pr_slots": 2,
@@ -26,7 +26,7 @@ def _seed_streamer(
         "stream_title": "Live",
         "stream_thumbnail_url": "https://img.test/thumb.jpg",
         "profile_image_url": "https://img.test/profile.jpg",
-        "added_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
         "added_by_id": 10,
         "assignments": [],
         "assigned_pr_id": None,
@@ -137,7 +137,6 @@ async def test_update_streamer_success_logs_admin_action(
                 "priority": 3,
                 "pr_slots": 3,
                 "is_pinned": True,
-                "stream_points_override": 4.5,
             },
         )
 
@@ -179,7 +178,7 @@ async def test_update_streamer_status_offline_triggers_auto_unassign(
     fake_db.pr_current_streamer[7001] = {
         "streamer_id": 2400,
         "streamer_name": "status_streamer",
-        "assigned_at": datetime.now(timezone.utc),
+        "assigned_at": datetime.now(MSK),
     }
 
     async with await _client(build_api_app) as streamers_client:

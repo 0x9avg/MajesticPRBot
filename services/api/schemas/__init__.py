@@ -40,7 +40,6 @@ from schemas.spec import (
     ActiveSpecResponse,
     SpecClaimRequest,
     SpecSessionResponse,
-    SpecTransferRequest,
     SpecUnclaimRequest,
 )
 

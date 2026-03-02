@@ -90,8 +90,7 @@ class BrokerHandlers(commands.Cog):
                 await self._log_pr_claim(data)
             elif event == "spec.unclaimed":
                 await self._log_pr_unclaim(data)
-            elif event == "spec.transferred":
-                await self._log_pr_transfer(data)
+
 
         @broker.on("event.*")
         async def on_event_action(data):
@@ -195,45 +194,7 @@ class BrokerHandlers(commands.Cog):
         except Exception as e:
             self.logger.error(f"Failed to log PR unclaim: {e}")
 
-    async def _log_pr_transfer(self, data: dict):
-        """Log PR transfer action to PR actions channel."""
-        try:
-            streamer_name = data.get("streamer_name", "Unknown")
-            from_pr_id = data.get("from_pr_id")
-            to_pr_id = data.get("to_pr_id")
-            duration_seconds = data.get("duration_seconds", 0)
 
-            duration_str = format_spec_duration(duration_seconds)
-
-            # Unclaim Container (Blue)
-            container_unclaim = disnake.ui.Container(
-                disnake.ui.TextDisplay(content="### 📤 Открепление (передача)"),
-                disnake.ui.TextDisplay(
-                    content=f"👤 **Стример:** {streamer_name}\n"
-                            f"🎯 **От:** <@{from_pr_id}>\n"
-                            f"⏱️ **Время спека:** {duration_str}"
-                ),
-                accent_colour=disnake.Colour(3447003) # Blue
-            )
-
-            # Claim Container (Green)
-            container_claim = disnake.ui.Container(
-                disnake.ui.TextDisplay(content="### 📥 Закрепление (передача)"),
-                disnake.ui.TextDisplay(
-                    content=f"👤 **Стример:** {streamer_name}\n"
-                            f"🎯 **К:** <@{to_pr_id}>"
-                ),
-                accent_colour=disnake.Colour(3066993) # Green
-            )
-
-            await send_pr_action_log(self.bot, components=[container_unclaim, container_claim])
-
-            self.logger.debug(
-                f"PR transfer logged: {streamer_name} {from_pr_id} -> {to_pr_id}"
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to log PR transfer: {e}")
 
     async def _log_event_join(self, data: dict):
         """Log event join action to PR actions channel."""

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.events import router as events_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -37,7 +38,7 @@ async def test_create_event_success(build_api_app, fake_db) -> None:
     result = await _create_sample_event(build_api_app)
 
     assert result["status"] == "success"
-    assert result["data"]["id"] == 1
+    assert str(result["data"]["id"]) == "1"
     assert fake_db.events_by_id[1]["name"] == "Raid Night"
 
 
@@ -76,11 +77,11 @@ async def test_get_active_and_scheduled_events(build_api_app, fake_db) -> None:
         "pr_slots": 1,
         "priority": 0,
         "is_pinned": False,
-        "start_time": datetime.now(timezone.utc) + timedelta(hours=1),
+        "start_time": datetime.now(MSK) + timedelta(hours=1),
         "channel_id": 100,
         "created_by": 1,
         "is_active": True,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(MSK),
         "notification_sent": False,
         "message_id": 0,
     }
@@ -100,7 +101,7 @@ async def test_get_active_and_scheduled_events(build_api_app, fake_db) -> None:
 async def test_get_all_events_returns_sorted_with_participants(
     build_api_app, fake_db
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(MSK)
     fake_db.events_by_id = {
         1: {
             "id": 1,
@@ -158,14 +159,14 @@ async def test_get_all_events_returns_sorted_with_participants(
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert [item["id"] for item in payload] == [2, 3, 1]
+    assert [str(item["id"]) for item in payload] == ["2", "3", "1"]
     assert payload[0]["current_participants"] == 1
-    assert payload[0]["participants"][0]["pr_id"] == "9001"
+    assert str(payload[0]["participants"][0]["pr_id"]) == "9001"
 
 
 async def test_get_event_and_participants(build_api_app, fake_db) -> None:
     await _create_sample_event(build_api_app, name="Lookup")
-    fake_db.event_participants[1][42] = datetime.now(timezone.utc)
+    fake_db.event_participants[1][42] = datetime.now(MSK)
 
     async with await _client(build_api_app) as client:
         found = await client.get("/api/events/1")
@@ -176,7 +177,7 @@ async def test_get_event_and_participants(build_api_app, fake_db) -> None:
     assert found.json()["data"]["name"] == "Lookup"
     assert missing.status_code == 404
     assert participants.status_code == 200
-    assert participants.json()["data"][0]["pr_id"] == 42
+    assert str(participants.json()["data"][0]["pr_id"]) == "42"
 
 
 async def test_join_leave_and_end_event(build_api_app, fake_db) -> None:
@@ -226,9 +227,6 @@ async def test_mark_notification_sent_and_update_message(
 
     async with await _client(build_api_app) as client:
         mark = await client.patch("/api/events/1/notification-sent")
-        message = await client.patch("/api/events/1/message?message_id=777")
 
     assert mark.status_code == 200
-    assert message.status_code == 200
     assert fake_db.events_by_id[1]["notification_sent"] is True
-    assert fake_db.events_by_id[1]["message_id"] == 777

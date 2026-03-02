@@ -15,7 +15,11 @@ if TYPE_CHECKING:
 
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
 
 import twitchio
 from config import Config
@@ -52,6 +56,26 @@ class TwitchBot(AutoClient):
             subscriptions=self.subs,
             force_subscribe=True,
         )
+
+    @staticmethod
+    def _convert_twitch_time_to_msk(time_val) -> Optional[str]:
+        """Convert Twitch UTC time (string or datetime) to MSK string."""
+        if not time_val:
+            return None
+        try:
+            if isinstance(time_val, str):
+                dt = datetime.fromisoformat(time_val.replace("Z", "+00:00"))
+            else:
+                dt = time_val
+            
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            # Convert to MSK
+            dt_msk = dt.astimezone(MSK)
+            return dt_msk.isoformat()
+        except Exception:
+            return str(time_val)
 
     async def get_streamer_id(self, username: str) -> Optional[int]:
         """Get Twitch user ID by username."""
@@ -137,6 +161,7 @@ class TwitchBot(AutoClient):
             self.logger.info(f"Fetched {len(user_profiles)} user profiles")
 
             new_subs = []
+            offline_to_unclaim = []
 
             # Update each streamer and prepare subscriptions
             for streamer in streamers:
@@ -176,7 +201,7 @@ class TwitchBot(AutoClient):
                         "streamer_id": streamer_id,
                         "is_online": is_online,
                         "started_at": (
-                            str(stream.started_at)
+                            self._convert_twitch_time_to_msk(stream.started_at)
                             if is_online and stream.started_at
                             else None
                         ),
@@ -196,12 +221,29 @@ class TwitchBot(AutoClient):
                     }
                 )
 
+                # Track offline streamers that still have assignments
+                if not is_online:
+                    assignments = streamer.get("assignments", [])
+                    if assignments:
+                        offline_to_unclaim.append(streamer_id)
+
             # Bulk update all statuses (API handles batching internally if needed)
             if status_updates:
                 updated_count = await self.api.sync_streamers_status_bulk(
                     status_updates
                 )
                 self.logger.info(f"✓ Bulk updated {updated_count} streamer statuses")
+
+            # Unclaim offline streamers with active sessions
+            if offline_to_unclaim:
+                self.logger.info(f"Unclaiming {len(offline_to_unclaim)} offline streamers...")
+                for sid in offline_to_unclaim:
+                    try:
+                        await self.api.unclaim_streamer(sid, "stream_end")
+                        await asyncio.sleep(0.1)  # small delay to prevent rate limits
+                    except Exception as ex:
+                        self.logger.error(f"Failed to unclaim offline streamer {sid}: {ex}")
+                self.logger.info(f"✓ Unclaimed {len(offline_to_unclaim)} offline streamers")
 
             # Perform subscriptions in batches
             if new_subs:
@@ -273,12 +315,16 @@ class TwitchBot(AutoClient):
                     f"Proceeding with is_online=True but empty metadata."
                 )
 
+            self.logger.debug(
+                f"EventStreamOnline for {payload.broadcaster.name}. "
+                f"Sending to API. Thumbnail/Title available: {bool(stream.get('title'))}"
+            )
             # Update via API (API will publish the event)
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
                 True,
                 started_at=(
-                    str(stream["started_at"]) if stream.get("started_at") else None
+                    self._convert_twitch_time_to_msk(stream.get("started_at")) if stream.get("started_at") else None
                 ),
                 game_id=stream.get("game_id"),
                 game_name=stream.get("game_name"),
@@ -302,6 +348,11 @@ class TwitchBot(AutoClient):
             if streamer and streamer.get("assigned_pr_id"):
                 await self.api.unclaim_streamer(payload.broadcaster.id, "stream_end")
 
+            self.logger.debug(
+                f"EventStreamOffline for {payload.broadcaster.name}. "
+                f"Streamer had assignment={bool(streamer and streamer.get('assigned_pr_id'))}. "
+                f"Sending offline status to API."
+            )
             # Update status via API (API will publish the offline event)
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
@@ -378,6 +429,12 @@ class TwitchBot(AutoClient):
             if payload.category_id and str(payload.category_id).isdigit():
                 game_id_int = int(payload.category_id)
 
+            self.logger.debug(
+                f"ChannelUpdate for {payload.broadcaster.name}:\n"
+                f"  BEFORE [DB]: GameID={old_game_id}, Title='{streamer_db.get('stream_title')}'\n"
+                f"  AFTER [Event]: GameID={new_game_id}, Title='{payload.title}'\n"
+                f"  Sending update to API."
+            )
             await self.api.update_streamer_status(
                 payload.broadcaster.id,
                 True,

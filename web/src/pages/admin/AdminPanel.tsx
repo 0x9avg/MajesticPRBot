@@ -1,11 +1,12 @@
 import React from 'react';
-import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench } from 'lucide-react';
+import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench, Clock } from 'lucide-react';
 import UserRegistration from './components/UserRegistration';
 import MediaRegistration from './components/MediaRegistration';
 import CreateEvent from './components/CreateEvent';
 import SiteManagement from './components/SiteManagement';
 import SystemInfo from './components/SystemInfo';
 import AssistantsManagement from './components/AssistantsManagement';
+import PendingRequests from './components/PendingRequests';
 
 export function AdminPanel() {
     const [activeTab, setActiveTab] = React.useState('assistants');
@@ -14,6 +15,7 @@ export function AdminPanel() {
         { id: 'users', label: 'Пользователи', icon: UserPlus },
         { id: 'media', label: 'Медиа', icon: Radio },
         { id: 'events', label: 'Мероприятия', icon: CalendarPlus },
+        { id: 'requests', label: 'Запросы', icon: Clock },
         { id: 'assistants', label: 'Ассистенты', icon: Wrench },
         { id: 'site', label: 'Управление', icon: Settings },
         { id: 'system', label: 'Система', icon: Activity },
@@ -57,6 +59,7 @@ export function AdminPanel() {
                     {activeTab === 'users' && <UserRegistration />}
                     {activeTab === 'media' && <MediaRegistration />}
                     {activeTab === 'events' && <CreateEvent />}
+                    {activeTab === 'requests' && <PendingRequests />}
                     {activeTab === 'assistants' && <AssistantsManagement />}
                     {activeTab === 'site' && <SiteManagement />}
                     {activeTab === 'system' && <SystemInfo />}

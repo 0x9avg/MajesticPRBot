@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
 from datetime import datetime, timedelta, timezone
 
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
+
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands, tasks
@@ -54,19 +57,20 @@ async def get_events_embed(api) -> disnake.Embed:
     return embed
 
 
+
+
+
 # =============================================================================
 # Event Create Modal
 # =============================================================================
-
 
 class EventCreateModal(disnake.ui.Modal):
     """Modal for creating a new event with optional scheduling."""
 
     bot: "DiscordBot"
 
-    def __init__(self, bot: "DiscordBot", channel_id: int):
+    def __init__(self, bot: "DiscordBot"):
         self.bot = bot
-        self.channel_id = channel_id
 
         components = [
             disnake.ui.TextInput(
@@ -131,71 +135,51 @@ class EventCreateModal(disnake.ui.Modal):
             except ValueError:
                 priority = 0
 
-            # Parse start time (MSK -> UTC)
+            # Parse start time (Local -> UTC)
             start_time_str = interaction.text_values.get("start_time", "").strip()
             start_dt = None
 
             if start_time_str:
+                from datetime import datetime, timedelta, timezone
                 try:
                     parts = start_time_str.split()
-                    msk_tz = timezone(timedelta(hours=3))
-                    now_msk = datetime.now(msk_tz)
+                    now_local = datetime.now(MSK)
 
                     if len(parts) == 2:
                         # DD.MM HH:MM format
                         date_str, time_str = parts
                         day, month = map(int, date_str.split("."))
                         hour, minute = map(int, time_str.split(":"))
-                        target_dt_msk = datetime(
-                            now_msk.year, month, day, hour, minute, tzinfo=msk_tz
+                        target_dt_local = datetime(
+                            now_local.year, month, day, hour, minute, tzinfo=now_local.tzinfo
                         )
-                        if target_dt_msk < now_msk:
-                            target_dt_msk = target_dt_msk.replace(year=now_msk.year + 1)
+                        if target_dt_local < now_local:
+                            target_dt_local = target_dt_local.replace(year=now_local.year + 1)
                     elif len(parts) == 1:
                         # HH:MM format (today or tomorrow)
                         hour, minute = map(int, start_time_str.split(":"))
-                        target_dt_msk = datetime.combine(
-                            now_msk.date(),
+                        target_dt_local = datetime.combine(
+                            now_local.date(),
                             datetime.strptime(start_time_str, "%H:%M").time(),
-                        ).replace(tzinfo=msk_tz)
-                        if target_dt_msk < now_msk:
-                            target_dt_msk += timedelta(days=1)
+                        ).replace(tzinfo=now_local.tzinfo)
+                        if target_dt_local < now_local:
+                            target_dt_local += timedelta(days=1)
                     else:
                         raise ValueError("Invalid format")
 
-                    start_dt = target_dt_msk.astimezone(timezone.utc)
+                    # target_dt_local already has MSK timezone set above
+                    start_dt = target_dt_local
                 except Exception:
                     await interaction.edit_original_message(
                         content="❌ Неверный формат. Используйте `ЧЧ:ММ` или `ДД.ММ ЧЧ:ММ` (МСК)"
                     )
                     return
 
-            # Get channel
-            channel = self.bot.get_channel(self.channel_id)
-            if not channel:
-                await interaction.edit_original_message(content="❌ Канал не найден")
-                return
-
-            # Create embed
-            embed = disnake.Embed(
-                title=f"🎉 Событие: {name}",
-                description=f"{description}\n\n**Слоты PR:** {pr_slots}\n**Участников:** 0",
-                color=disnake.Color.gold(),
-            )
-            embed.set_footer(text=f"Создал: {interaction.user.display_name}")
-
-            if start_dt:
-                ts = int(start_dt.timestamp())
-                embed.add_field(
-                    name="🕒 Начало", value=f"<t:{ts}:t> (<t:{ts}:R>)", inline=False
-                )
-
             # Create event via API
             result = await self.bot.api_client.create_event(
                 name=name,
                 description=description,
                 required_pr_count=pr_slots,
-                channel_id=self.channel_id,
                 created_by=interaction.user.id,
                 start_time=start_dt.isoformat() if start_dt else None,
                 pr_slots=pr_slots,
@@ -208,29 +192,23 @@ class EventCreateModal(disnake.ui.Modal):
 
             event_id = result["id"]
 
-            # Send message with Join button
-            join_btn = disnake.ui.Button(
-                label="Присоединиться",
-                custom_id=f"event_join_{event_id}",
-                style=disnake.ButtonStyle.success,
-                emoji="✋",
-            )
-            msg = await channel.send(embed=embed, components=[join_btn])
-
-            # Update API with message_id
-            await self.bot.api_client.update_event_message(event_id, msg.id)
-
-            # Tag role
-            settings = await self.bot.api_client.get_guild_settings()
-            if settings and settings.get("assistant_role_id"):
-                role_mention = f"<@&{settings['assistant_role_id']}>"
-                time_info = "уже началось!" if start_dt is None else "запланировано!"
-                await channel.send(
-                    f"{role_mention} Новое событие **{name}** {time_info}",
-                    delete_after=600,
-                )
-
             await interaction.edit_original_message(content="✅ Событие создано!")
+
+            # Tag role and notify
+            settings = await self.bot.api_client.get_guild_settings()
+            if settings:
+                notification_channel_id = settings.get("notification_channel_id")
+                if notification_channel_id:
+                    channel = self.bot.get_channel(int(notification_channel_id))
+                    if channel:
+                        time_info = "уже началось!" if start_dt is None else "запланировано!"
+                        try:
+                            await channel.send(
+                                f"Новое событие **{name}** {time_info}",
+                                delete_after=600,
+                            )
+                        except Exception as e:
+                            self.bot.logger.error(f"Event announce error: {e}")
 
             # Refresh the persistent Control Panel Message
             try:
@@ -244,7 +222,6 @@ class EventCreateModal(disnake.ui.Modal):
                         if channel:
                             try:
                                 msg = await channel.fetch_message(int(cp_message_id))
-
                                 embed = await get_events_embed(self.bot.api_client)
                                 await msg.edit(embed=embed, view=EventsView(self.bot))
                                 self.bot.logger.info(
@@ -268,7 +245,6 @@ class EventCreateModal(disnake.ui.Modal):
             self.bot.logger.error(f"Event creation error: {e}", exc_info=True)
             await interaction.edit_original_message(content="❌ Ошибка")
 
-
 # =============================================================================
 # Event Select for Ending
 # =============================================================================
@@ -282,9 +258,8 @@ class EventEndSelect(disnake.ui.StringSelect):
         for e in events[:25]:
             ts = parse_to_unix(e.get("start_time"))
             if ts:
-                from datetime import datetime, timezone
-
-                time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                from datetime import datetime
+                time_str = datetime.fromtimestamp(ts, tz=MSK).strftime(
                     "%d.%m %H:%M"
                 )
             else:
@@ -387,20 +362,8 @@ class EventsView(disnake.ui.View):
     async def create_button(
         self, button: disnake.ui.Button, interaction: MessageInteraction
     ):
-        """Show channel select for event creation."""
-        select = disnake.ui.ChannelSelect(
-            custom_id="admin_events_channel_select",
-            placeholder="Выберите канал для события",
-            channel_types=[disnake.ChannelType.text],
-            min_values=1,
-            max_values=1,
-        )
-        view = disnake.ui.View(timeout=None)
-        view.add_item(select)
-
-        await interaction.response.send_message(
-            "Выберите канал для события:", view=view, ephemeral=True
-        )
+        """Show event creation modal."""
+        await interaction.response.send_modal(EventCreateModal(self.bot))
 
     @disnake.ui.button(
         label="Завершить",
@@ -461,44 +424,6 @@ class EventsManager(commands.Cog):
     def __init__(self, bot: "DiscordBot") -> None:
         self.bot = bot
         self.api = bot.api_client
-        self.check_event_starts.start()
-
-    def cog_unload(self):
-        self.check_event_starts.cancel()
-
-    @tasks.loop(seconds=60)
-    async def check_event_starts(self):
-        """Check for scheduled events that need to start."""
-        try:
-            events = await self.api.get_scheduled_events()
-            for event in events:
-                channel_id = event.get("channel_id")
-                channel = self.bot.get_channel(int(channel_id)) if channel_id else None
-
-                if channel:
-                    participants = event.get("participants", [])
-                    if participants:
-                        mentions = [f"<@{p['user_id']}>" for p in participants]
-                        mention_str = ", ".join(mentions)
-                        try:
-                            await channel.send(
-                                f"{mention_str} Событие **{event['name']}** началось!",
-                                delete_after=300,
-                            )
-                        except Exception as e:
-                            self.bot.logger.error(
-                                f"Event start notification error: {e}"
-                            )
-
-                # Mark as notified
-                await self.api.mark_event_notification_sent(event["id"])
-
-        except Exception as e:
-            self.bot.logger.error(f"check_event_starts error: {e}", exc_info=True)
-
-    @check_event_starts.before_loop
-    async def before_check_event_starts(self):
-        await self.bot.wait_until_ready()
 
     @commands.Cog.listener("on_button_click")
     async def on_events_button(self, interaction: MessageInteraction):
@@ -511,14 +436,7 @@ class EventsManager(commands.Cog):
         embed = await get_events_embed(self.api)
         await interaction.edit_original_response(embed=embed, view=EventsView(self.bot))
 
-    @commands.Cog.listener("on_dropdown")
-    async def on_events_channel_select(self, interaction: MessageInteraction):
-        """Handle channel select for event creation."""
-        if interaction.component.custom_id != "admin_events_channel_select":
-            return
 
-        channel_id = int(interaction.values[0])
-        await interaction.response.send_modal(EventCreateModal(self.bot, channel_id))
 
 
 def setup(bot: commands.Bot) -> None:

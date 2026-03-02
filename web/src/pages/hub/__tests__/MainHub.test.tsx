@@ -92,6 +92,6 @@ describe('MainHub', () => {
         expect(navigateMock).toHaveBeenCalledWith('/media');
 
         await ui.click(screen.getByText('Таблица пиаров'));
-        expect(navigateMock).toHaveBeenCalledWith('/pr-stats');
+        expect(navigateMock).toHaveBeenCalledWith('/assistants');
     });
 });

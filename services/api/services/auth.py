@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+MSK = timezone(timedelta(hours=3))
+
 
 class AuthService:
     """JWT-based authentication service."""
@@ -54,7 +56,7 @@ class AuthService:
         if expires_delta is None:
             expires_delta = timedelta(minutes=self.access_token_expire_minutes)
 
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(MSK) + expires_delta
 
         to_encode = {
             "sub": str(user_id),
@@ -70,7 +72,7 @@ class AuthService:
 
     def create_refresh_token(self, user_id: int) -> Tuple[str, datetime]:
         """Create a refresh token. Returns (token, expires_at)."""
-        expires_at = datetime.now(timezone.utc) + timedelta(
+        expires_at = datetime.now(MSK) + timedelta(
             days=self.refresh_token_expire_days
         )
 

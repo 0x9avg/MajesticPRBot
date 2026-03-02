@@ -19,7 +19,7 @@ vi.mock('react-router-dom', async () => {
 import MediaList from '../MediaList';
 
 const makeUser = (role: UserContext['role']): UserContext => ({
-    id: 1,
+    id: '1',
     discord_id: '1001',
     username: 'tester',
     nickname: 'Tester',
@@ -40,17 +40,11 @@ describe('MediaList', () => {
         mockedUser = makeUser('employee');
     });
 
-    it('renders empty activities state', async () => {
+    it('renders empty data state', async () => {
         const fetchMock = vi.fn((input: string | URL | Request) => {
             const url = typeof input === 'string' ? input : input.toString();
-            if (url.includes('/api/streamers?online_only=true')) {
-                return Promise.resolve(makeJsonResponse({ status: 'success', data: { streamers: [] } }));
-            }
             if (url.endsWith('/api/streamers')) {
                 return Promise.resolve(makeJsonResponse({ status: 'success', data: { streamers: [] } }));
-            }
-            if (url.includes('/api/events/active')) {
-                return Promise.resolve(makeJsonResponse({ status: 'success', data: [] }));
             }
             return Promise.resolve(makeJsonResponse({}, 404));
         });
@@ -61,34 +55,23 @@ describe('MediaList', () => {
 
         await waitFor(() => {
             expect(fetchMock).toHaveBeenCalled();
-            expect(screen.getByText('Нет активностей')).toBeInTheDocument();
+            expect(screen.getByText('Нет данных')).toBeInTheDocument();
         });
     });
 
-    it('navigates to participant profile from event card', async () => {
+    it('navigates to streamer profile', async () => {
         const fetchMock = vi.fn((input: string | URL | Request) => {
             const url = typeof input === 'string' ? input : input.toString();
-            if (url.includes('/api/streamers?online_only=true')) {
-                return Promise.resolve(makeJsonResponse({ status: 'success', data: { streamers: [] } }));
-            }
             if (url.endsWith('/api/streamers')) {
-                return Promise.resolve(makeJsonResponse({ status: 'success', data: { streamers: [] } }));
-            }
-            if (url.includes('/api/events/active')) {
                 return Promise.resolve(
                     makeJsonResponse({
                         status: 'success',
                         data: [
                             {
-                                id: 101,
-                                name: 'Night Event',
-                                description: 'Desc',
-                                priority: 2,
-                                is_pinned: false,
-                                participants: [{ pr_id: 42, nickname: 'Nick' }],
-                                current_participants: 1,
-                                required_pr_count: 2,
-                                pr_slots: 2,
+                                streamer_id: 1,
+                                streamer_name: 'alpha',
+                                is_online: true,
+                                priority: 1,
                             },
                         ],
                     })
@@ -103,11 +86,11 @@ describe('MediaList', () => {
         render(<MediaList />);
 
         await waitFor(() => {
-            expect(screen.getByText('Night Event')).toBeInTheDocument();
-            expect(screen.getByText('@Nick')).toBeInTheDocument();
+            expect(screen.getByText('alpha')).toBeInTheDocument();
         });
 
-        await ui.click(screen.getByText('@Nick'));
-        expect(navigateMock).toHaveBeenCalledWith('/profile/42');
+        const profileBtn = screen.getByTitle('Открыть профиль медиа');
+        await ui.click(profileBtn);
+        expect(navigateMock).toHaveBeenCalledWith('/media/1');
     });
 });

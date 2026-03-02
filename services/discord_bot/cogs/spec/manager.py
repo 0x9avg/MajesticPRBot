@@ -42,8 +42,7 @@ class Spec(commands.Cog):
         self.bot = bot
         self.api = bot.api_client
         self.logger = bot.logger
-        # Store pending transfer requests: {transfer_id: {...}}
-        self.pending_transfers = {}
+
         # Lock to prevent concurrent monitoring updates
         self._monitoring_lock = asyncio.Lock()
 
@@ -88,8 +87,7 @@ class Spec(commands.Cog):
                 await self._handle_claim_button(interaction, custom_id)
             elif custom_id.startswith("spec_unclaim_"):
                 await self._handle_unclaim_button(interaction, custom_id)
-            elif custom_id.startswith("spec_transfer_"):
-                await self._handle_transfer_button(interaction, custom_id)
+
             elif custom_id.startswith("probation_choice_main_"):
                 streamer_id = int(custom_id.replace("probation_choice_main_", ""))
                 await self._do_claim(
@@ -126,10 +124,43 @@ class Spec(commands.Cog):
             streamer_id = int(custom_id.replace("spec_claim_", ""))
             pr_id = interaction.user.id
 
-            # Check if user has probation capability
-            capabilities = await self.api.get_assistant_capabilities(pr_id)
+            data = await self.api.get_claimable_streamers(pr_id)
+            if not data:
+                await interaction.followup.send("❌ Ошибка при проверке статуса стримера.", ephemeral=True)
+                return
 
-            if capabilities and capabilities.get("can_spec_probation", False):
+            # Check if PR is already assigned
+            if data.get("assigned_to_type"):
+                target_name = data.get("assigned_to_name", "кем-то")
+                await interaction.followup.send(
+                    f"❌ Вы уже закреплены за {data.get('assigned_to_type') == 'event' and 'событием' or 'стримером'} **{target_name}**.",
+                    ephemeral=True
+                )
+                return
+
+            claimable = False
+            for s in data.get("streamers", []):
+                if str(s.get("streamer_id")) == str(streamer_id):
+                    claimable = True
+                    break
+
+            if not claimable:
+                from config import Config
+                streamer = await self.api.get_streamer(streamer_id)
+                error_msg = "❌ Стример больше не доступен для закрепления."
+                if streamer:
+                    if not streamer.get("is_online"):
+                        error_msg = "❌ Стример в оффлайне."
+                    elif str(streamer.get("game_id", "")) != Config.gta5_game_id:
+                        error_msg = "❌ Стример не в категории GTA 5."
+                    else:
+                        error_msg = "❌ Слоты для закрепления уже заняты."
+                await interaction.followup.send(error_msg, ephemeral=True)
+                return
+
+            can_spec_probation = data.get("can_spec_probation", False)
+
+            if can_spec_probation:
                 # Show probation prompt for eligible users
                 await self._show_probation_prompt(interaction, streamer_id)
                 return
@@ -184,9 +215,11 @@ class Spec(commands.Cog):
         except Exception as e:
             self.logger.debug(f"Defer failed: {e}")
 
+        self.logger.debug(f"[User {pr_id}] Claiming streamer {streamer_id}. Probation: {is_probation}. BEFORE: sending API request.")
         result = await self.api.claim_streamer(
             streamer_id, pr_id, is_probation=is_probation
         )
+        self.logger.debug(f"[User {pr_id}] Claim streamer {streamer_id} result AFTER: {result}")
 
         if result and "streamer_id" in result:
             streamer_name = result.get("streamer_name")
@@ -232,9 +265,11 @@ class Spec(commands.Cog):
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
             pr_id = interaction.user.id
 
+            self.logger.debug(f"[User {pr_id}] Unclaiming streamer {streamer_id}. BEFORE: sending API request.")
             result = await self.api.unclaim_streamer(
-                streamer_id, pr_id=pr_id, reason="manual"
+                streamer_id, pr_id=pr_id, reason="manual_unclaim"
             )
+            self.logger.debug(f"[User {pr_id}] Unclaim streamer {streamer_id} result AFTER: {result}")
 
             if result and "duration_seconds" in result:
                 duration_str = format_spec_duration(result.get("duration_seconds", 0))
@@ -273,22 +308,35 @@ class Spec(commands.Cog):
             return
 
         # Unclaim
-        streamer_id = current["streamer_id"]
-        result = await self.api.unclaim_streamer(
-            streamer_id, pr_id=pr_id, reason="manual"
-        )
-
-        if result and "duration_seconds" in result:
-            duration_str = format_spec_duration(result.get("duration_seconds", 0))
-            await interaction.followup.send(
-                f"✅ Ты открепился от **{result.get('streamer_name')}**.\n"
-                f"⏱️ Время спека: **{duration_str}**",
-                ephemeral=True,
+        if "streamer_id" in current:
+            streamer_id = current["streamer_id"]
+            result = await self.api.unclaim_streamer(
+                streamer_id, pr_id=pr_id, reason="manual_unclaim"
             )
-            await self.update_monitoring()
-        else:
-            error = result.get("detail", "Ошибка") if result else "API Error"
-            await interaction.followup.send(f"❌ {error}", ephemeral=True)
+
+            if result and "duration_seconds" in result:
+                duration_str = format_spec_duration(result.get("duration_seconds", 0))
+                await interaction.followup.send(
+                    f"✅ Ты открепился от **{result.get('streamer_name')}**.\n"
+                    f"⏱️ Время спека: **{duration_str}**",
+                    ephemeral=True,
+                )
+                await self.update_monitoring()
+            else:
+                error = result.get("detail", "Ошибка") if result else "API Error"
+                await interaction.followup.send(f"❌ {error}", ephemeral=True)
+        elif "event_id" in current:
+            event_id = current.get("event_id")
+            # For events, the unclaim route is /events/{event_id}/leave
+            result = await self.api._request(
+                "POST", f"/events/{event_id}/leave", data={"user_id": pr_id}
+            )
+            if result and "event_id" in result:
+                await interaction.followup.send("✅ Вы покинули событие.", ephemeral=True)
+                await self.update_monitoring()
+            else:
+                error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
+                await interaction.followup.send(f"❌ {error}", ephemeral=True)
 
     async def _handle_monitoring_claim(self, interaction: disnake.MessageInteraction):
         """Handle 'Claim' button from monitoring UI - show paginated selector."""
@@ -405,24 +453,61 @@ class Spec(commands.Cog):
             pass
 
         try:
+            # Handle Event claim
+            if str(interaction.values[0]).startswith("event_"):
+                event_id = int(str(interaction.values[0]).replace("event_", ""))
+                user_id = interaction.user.id
+                
+                result = await self.api.join_event(event_id, user_id)
+                if result and "event_id" in result:
+                    join_status = result.get("join_status", "joined")
+                    if join_status == "reserved":
+                        await interaction.followup.send("✅ Вы закреплены за событием. Спек начнётся при старте события.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("✅ Успешно закреплен за событием", ephemeral=True)
+                    await self.update_monitoring()
+                else:
+                    error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
+                    await interaction.followup.send(f"❌ {error}", ephemeral=True)
+                return
+
             streamer_id = int(interaction.values[0])
             user_id = interaction.user.id
 
             # Get user capabilities and streamer info
             data = await self.api.get_claimable_streamers(user_id)
+            
+            # Check if PR is already assigned
+            if data.get("assigned_to_type"):
+                target_name = data.get("assigned_to_name", "кем-то")
+                await interaction.followup.send(
+                    f"❌ Вы уже закреплены за {data.get('assigned_to_type') == 'event' and 'событием' or 'стримером'} **{target_name}**.",
+                    ephemeral=True
+                )
+                return
+
             can_spec_probation = data.get("can_spec_probation", False)
 
             # Find selected streamer info
             selected = None
             for s in data.get("streamers", []):
-                if s["streamer_id"] == streamer_id:
+                if str(s.get("streamer_id")) == str(streamer_id) or str(s.get("event_id")) == str(streamer_id):
                     selected = s
                     break
 
             if not selected:
-                await interaction.followup.send(
-                    "❌ Стример больше недоступен.", ephemeral=True
-                )
+                from config import Config
+                streamer = await self.api.get_streamer(streamer_id)
+                error_msg = "❌ Канал больше недоступен."
+                if streamer:
+                    if not streamer.get("is_online"):
+                        error_msg = "❌ Стример в оффлайне."
+                    elif str(streamer.get("game_id", "")) != Config.gta5_game_id:
+                        error_msg = "❌ Стример не в категории GTA 5."
+                    else:
+                        error_msg = "❌ Слот занят."
+
+                await interaction.followup.send(error_msg, ephemeral=True)
                 return
 
             main_free = selected.get("main_free", True)
@@ -459,88 +544,6 @@ class Spec(commands.Cog):
             self.logger.error(f"Claim select error: {e}", exc_info=True)
             await interaction.followup.send("❌ Ошибка.", ephemeral=True)
 
-    async def _handle_transfer_button(
-        self, interaction: disnake.MessageInteraction, custom_id: str
-    ):
-        """Handle transfer accept/decline buttons."""
-        try:
-            # Format: spec_transfer_{action}_{transfer_id}
-            parts = custom_id.split("_")
-            action = parts[2]  # accept or decline
-            transfer_id = parts[3]  # uuid
-
-            if transfer_id not in self.pending_transfers:
-                await interaction.followup.send("❌ Запрос истёк.", ephemeral=True)
-                return
-
-            transfer_data = self.pending_transfers.pop(transfer_id)
-            from_pr_id = transfer_data["from_pr_id"]
-
-            # Verify this is the intended recipient
-            if interaction.user.id != transfer_data["to_pr_id"]:
-                await interaction.followup.send(
-                    "❌ Этот запрос не для вас.", ephemeral=True
-                )
-                return
-
-            if action == "decline":
-                try:
-                    await interaction.message.edit(
-                        content="❌ Передача отклонена.", components=[]
-                    )
-                except:  # noqa: E722
-                    pass
-
-                # Notify sender
-                try:
-                    sender = await self.bot.fetch_user(from_pr_id)
-                    await sender.send(
-                        f"❌ {interaction.user.display_name} отклонил запрос на передачу."
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Could not notify sender: {e}")
-                return
-
-            # Accept transfer
-            target_streamer_id = transfer_data.get("target_streamer_id")
-
-            if target_streamer_id:
-                # This is a SWAP
-                result = await self.api.swap_streamers(from_pr_id, interaction.user.id)
-
-                if result and result.get("status") == "swapped":
-                    msg = (
-                        f"✅ Обмен завершён!\n"
-                        f"• Ты получил: **{result.get('pr2_new_streamer')}**\n"
-                        f"• Он получил: **{result.get('pr1_new_streamer')}**"
-                    )
-                    try:
-                        await interaction.message.edit(content=msg, components=[])
-                    except Exception as e:
-                        self.logger.warning(f"Failed to edit message: {e}")
-                    await self.update_monitoring()
-                else:
-                    error = result.get("detail", "Ошибка") if result else "API Error"
-                    await interaction.followup.send(f"❌ {error}", ephemeral=True)
-            else:
-                # One-way transfer
-                result = await self.api.transfer_streamer(
-                    transfer_data["streamer_id"], from_pr_id, interaction.user.id
-                )
-
-                if result and "to_pr_id" in result:
-                    msg = f"✅ Ты принял стримера **{result.get('streamer_name')}**!"
-                    try:
-                        await interaction.message.edit(content=msg, components=[])
-                    except Exception as e:
-                        self.logger.warning(f"Failed to edit message: {e}")
-                    await self.update_monitoring()
-                else:
-                    error = result.get("detail", "Ошибка") if result else "API Error"
-                    await interaction.followup.send(f"❌ {error}", ephemeral=True)
-
-        except Exception as e:
-            self.logger.error(f"Transfer error: {e}", exc_info=True)
 
     # =========================================================================
     # Dropdown Handler (Monitoring Select)
@@ -582,68 +585,7 @@ class Spec(commands.Cog):
     # Transfer Initiation (called from admin assistants panel)
     # =========================================================================
 
-    async def initiate_transfer(
-        self,
-        from_user: disnake.Member,
-        to_user: disnake.Member,
-        streamer_data: dict,
-        target_streamer_data: dict | None = None,
-    ):
-        """
-        Initiate a transfer request. Called from assistants admin panel.
 
-        Args:
-            from_user: User giving the streamer
-            to_user: User receiving the streamer
-            streamer_data: Current streamer data
-            target_streamer_data: Target's streamer (for swap) or None
-        """
-        if target_streamer_data:
-            message_text = (
-                f"🔄 **Предложение обмена стримерами**\n\n"
-                f"{from_user.mention} предлагает обменяться:\n"
-                f"• Ты получишь: **{streamer_data['streamer_name']}**\n"
-                f"• Он получит: **{target_streamer_data['streamer_name']}**"
-            )
-        else:
-            message_text = (
-                f"📨 **Предложение принять стримера**\n\n"
-                f"{from_user.mention} хочет передать тебе стримера:\n"
-                f"• **{streamer_data['streamer_name']}**"
-            )
-
-        # Generate unique transfer ID
-        transfer_id = str(uuid.uuid4())[:8]
-
-        # Store pending transfer with unique ID
-        self.pending_transfers[transfer_id] = {
-            "from_pr_id": from_user.id,
-            "to_pr_id": to_user.id,
-            "streamer_id": streamer_data["streamer_id"],
-            "target_streamer_id": (
-                target_streamer_data["streamer_id"] if target_streamer_data else None
-            ),
-        }
-
-        # Create accept/decline buttons with unique transfer_id
-        view = disnake.ui.View(timeout=None)
-        view.add_item(
-            disnake.ui.Button(
-                label="✅ Принять",
-                custom_id=f"spec_transfer_accept_{transfer_id}",
-                style=disnake.ButtonStyle.success,
-            )
-        )
-        view.add_item(
-            disnake.ui.Button(
-                label="❌ Отклонить",
-                custom_id=f"spec_transfer_decline_{transfer_id}",
-                style=disnake.ButtonStyle.danger,
-            )
-        )
-
-        # Send DM to target
-        await to_user.send(content=message_text, view=view)
 
     # =========================================================================
     # Monitoring Update
@@ -690,6 +632,7 @@ class Spec(commands.Cog):
                 # Generate pages
                 online_streamers = status.get("online_streamers", [])
                 available_streamers = status.get("available_for_claim", [])
+                active_events = status.get("active_events", [])
                 total_count = status.get("total_streamers", 0)
                 gta_count = status.get("gta_count", 0)
                 online_count = status.get("online_count", len(online_streamers))
@@ -711,7 +654,7 @@ class Spec(commands.Cog):
                     ]
 
                 pages = create_streamers_component(
-                    online_streamers, total_count, gta_count, online_count=online_count
+                    online_streamers, total_count, gta_count, events=active_events, online_count=online_count
                 )
 
                 # Add select row to last page

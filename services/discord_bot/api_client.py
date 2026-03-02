@@ -186,6 +186,7 @@ class APIClient:
         p1_rate: Optional[float] = None,
         p2_rate: Optional[float] = None,
         p3_rate: Optional[float] = None,
+        probation_rate: Optional[float] = None,
     ) -> Optional[Dict]:
         """Update guild point rates."""
         data = {}
@@ -197,6 +198,8 @@ class APIClient:
             data["p2_rate"] = p2_rate
         if p3_rate is not None:
             data["p3_rate"] = p3_rate
+        if probation_rate is not None:
+            data["probation_rate"] = probation_rate
 
         return await self._request("PATCH", "/guild/rates", data=data)
 
@@ -230,32 +233,6 @@ class APIClient:
             "/spec/unclaim",
             data=data,
         )
-
-    async def transfer_streamer(
-        self, streamer_id: int, from_pr_id: int, to_pr_id: int
-    ) -> Optional[Dict]:
-        """Transfer a streamer."""
-        return await self._request(
-            "POST",
-            "/spec/transfer",
-            data={
-                "streamer_id": streamer_id,
-                "from_pr_id": from_pr_id,
-                "to_pr_id": to_pr_id,
-            },
-        )
-
-    async def swap_streamers(self, pr1_id: int, pr2_id: int) -> Optional[Dict]:
-        """Swap streamers between two PRs."""
-        return await self._request(
-            "POST",
-            "/spec/swap",
-            data={
-                "pr1_id": pr1_id,
-                "pr2_id": pr2_id,
-            },
-        )
-
 
 
     async def get_current_streamer_for_pr(self, pr_id: int) -> Optional[Dict]:
@@ -371,7 +348,6 @@ class APIClient:
         name: str,
         description: str,
         required_pr_count: int,
-        channel_id: int,
         created_by: int,
         start_time: Optional[str] = None,
         pr_slots: Optional[int] = None,
@@ -384,7 +360,6 @@ class APIClient:
             "required_pr_count": required_pr_count,
             "pr_slots": pr_slots if pr_slots is not None else required_pr_count,
             "priority": priority,
-            "channel_id": channel_id,
             "created_by": created_by,
         }
         if start_time:
@@ -408,6 +383,10 @@ class APIClient:
             "POST", f"/events/{event_id}/join", data={"user_id": user_id}
         )
 
+    async def start_event(self, event_id: int) -> Optional[Dict]:
+        """Start an event and migrate its reserved participants to active sessions."""
+        return await self._request("POST", f"/events/{event_id}/start")
+
     async def leave_event(self, event_id: int, user_id: int) -> Optional[Dict]:
         """Leave an event."""
         return await self._request(
@@ -422,15 +401,6 @@ class APIClient:
         """Mark event notification as sent."""
         result = await self._request("PATCH", f"/events/{event_id}/notification-sent")
         return result is not None
-
-    async def update_event_message(self, event_id: int, message_id: int) -> bool:
-        """Update event message ID."""
-        result = await self._request(
-            "PATCH", f"/events/{event_id}/message", params={"message_id": message_id}
-        )
-        return result is not None
-
-
 
     async def get_event(self, event_id: int) -> Optional[Dict]:
         """Get a specific event by ID."""
@@ -447,8 +417,6 @@ class APIClient:
             "PATCH", f"/streamers/{streamer_id}", data={"priority": priority}
         )
         return result is not None and "detail" not in result
-
-
 
     async def get_streamer_assigned_pr(self, streamer_id: int) -> Optional[int]:
         """Get the PR ID assigned to a streamer."""

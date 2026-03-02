@@ -82,8 +82,9 @@ async def get_monitoring_status(
     """
     trace_id = get_trace_id(request)
 
-    # Get all streamers
-    streamers = await db.list_all_streamers()
+    # Get all online streamers with assignments
+    streamers = await db.list_online_streamers()
+    events = await db.get_active_events()
 
     # Process streamer data
     online_streamers = []
@@ -140,9 +141,40 @@ async def get_monitoring_status(
                         }
                     )
 
-    # Sort by priority (P0 first)
+        # Process events for claim dropdown
+    # Events appear in available_for_claim if they have free slots
+    active_events = []
+    for e in events:
+        active_events.append({
+            "is_event": True,
+            "event_id": e["id"],
+            "name": e["name"],
+            "description": e.get("description"),
+            "start_time": e.get("start_time"),
+            "current_participants": e.get("current_participants", 0),
+            "participants": e.get("participants", []),
+            "pr_slots": e.get("pr_slots", e.get("required_pr_count", 1)),
+            "is_pinned": e.get("is_pinned", False),
+            "priority": e.get("priority", 0)
+        })
+
+        if e.get("current_participants", 0) < e.get("pr_slots", e.get("required_pr_count", 1)):
+            available_for_claim.append(
+                {
+                    "is_event": True,
+                    "event_id": e["id"],
+                    "streamer_name": f"[Событие] {e['name']}",
+                    "priority": e.get("priority", 0),
+                    "is_pinned": e.get("is_pinned", False),
+                    "has_main": True,     # Mocked as True for select menu
+                    "has_probation": False
+                }
+            )
+
+    # Sort streamers by priority (P0 first)
     online_streamers.sort(key=lambda x: x["priority"])
-    available_for_claim.sort(key=lambda x: x["priority"])
+    # Sort claimable items by pinning and priority
+    available_for_claim.sort(key=lambda x: (not x.get("is_pinned", False), x["priority"]))
 
     return JSONResponse(
         content=success_envelope(
@@ -152,6 +184,7 @@ async def get_monitoring_status(
                 "gta_count": gta_count,
                 "available_count": len(available_for_claim),
                 "online_streamers": online_streamers,
+                "active_events": active_events,
                 "available_for_claim": available_for_claim,
             },
             message="Monitoring status",

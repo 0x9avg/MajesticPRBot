@@ -16,6 +16,7 @@ if str(API_ROOT) not in sys.path:
 
 import dependencies  # noqa: E402
 from routes.admin import router as admin_router  # noqa: E402
+MSK = timezone(timedelta(hours=3))
 
 
 class _DummyLogger:
@@ -142,6 +143,12 @@ class FakeBroker:
     async def emit_stream_offline(self, **kwargs: Any) -> None:
         self.calls.append(("stream.offline", kwargs))
 
+    async def emit_event_joined(self, **kwargs: Any) -> None:
+        self.calls.append(("event.joined", kwargs))
+
+    async def emit_event_left(self, **kwargs: Any) -> None:
+        self.calls.append(("event.left", kwargs))
+
     async def emit_category_change(self, **kwargs: Any) -> None:
         self.calls.append(("stream.category_change", kwargs))
 
@@ -166,6 +173,9 @@ class FakeBroker:
             ("guild.rates.updated", {"payload": payload, "trace_id": trace_id})
         )
 
+    async def emit_monitoring_refresh(self, trace_id: str) -> None:
+        self.calls.append(("monitoring.refresh", {"trace_id": trace_id}))
+
 
 class FakeAuth:
     def hash_password(self, password: str) -> str:
@@ -177,7 +187,7 @@ class FakeAuth:
         return plain_password == hashed_password
 
     def create_refresh_token(self, user_id: int) -> tuple[str, datetime]:
-        return f"refresh-{user_id}", datetime.now(timezone.utc) + timedelta(days=7)
+        return f"refresh-{user_id}", datetime.now(MSK) + timedelta(days=7)
 
     def create_access_token(
         self,
@@ -196,7 +206,7 @@ class FakeAuth:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(MSK)
 
 
 def _default_streamer(streamer_id: int, streamer_name: str) -> dict[str, Any]:
@@ -205,7 +215,6 @@ def _default_streamer(streamer_id: int, streamer_name: str) -> dict[str, Any]:
         "streamer_name": streamer_name,
         "is_online": True,
         "is_pinned": False,
-        "stream_points_override": None,
         "started_at": None,
         "priority": 0,
         "pr_slots": 1,
@@ -214,6 +223,9 @@ def _default_streamer(streamer_id: int, streamer_name: str) -> dict[str, Any]:
         "stream_title": None,
         "stream_thumbnail_url": None,
         "profile_image_url": None,
+        "allow_juniors": True,
+        "priority_override": None,
+        "pr_slots_override": None,
         "added_at": _now(),
         "added_by_id": 0,
         "assignments": [],
@@ -439,6 +451,18 @@ class FakeDB:
             )
         return logs[offset : offset + limit]
 
+    async def count_admin_logs(self, filters: dict[str, Any] | None = None) -> int:
+        logs = await self.get_admin_logs(limit=1000, offset=0, filters=filters)
+        return len(logs)
+
+    async def get_pr_action_logs(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {"items": [], "total": 0}
+
     # ---------------------------------------------------------------------
     # Assistants
     # ---------------------------------------------------------------------
@@ -459,7 +483,7 @@ class FakeDB:
     ) -> bool:
         existing = self.assistants_by_id.get(pr_id, {})
         appointed_at_dt = (
-            datetime.combine(appointed_at, datetime.min.time(), tzinfo=timezone.utc)
+            datetime.combine(appointed_at, datetime.min.time(), tzinfo=MSK)
             if appointed_at
             else _now() - timedelta(days=max(int(experience_days or 0), 0))
         )
@@ -553,14 +577,12 @@ class FakeDB:
         ended_at: datetime,
         is_probation: bool,
         priority: int,
-        session_admin_comment: str | None = None,
+        target_name: str | None = None,
     ) -> bool:
         if ended_at <= started_at:
             return False
         if target_type == "manual":
             if target_id is not None:
-                return False
-            if not (session_admin_comment or "").strip():
                 return False
         elif target_type in {"streamer", "event"}:
             if target_id is None:
@@ -579,7 +601,7 @@ class FakeDB:
                 "duration_seconds": duration_seconds,
                 "is_probation": is_probation,
                 "priority": priority,
-                "session_admin_comment": session_admin_comment,
+                "target_name": target_name,
             }
         )
         assistant = self.assistants_by_id.setdefault(
@@ -614,7 +636,6 @@ class FakeDB:
         self,
         pr_id: int,
         delta: float,
-        reason: str | None = None,
         source: str = "manual_adjust",
     ) -> dict[str, Any] | None:
         assistant = self.assistants_by_id.get(pr_id)
@@ -637,7 +658,6 @@ class FakeDB:
         return {
             "pr_id": pr_id,
             "delta": round(float(delta), 4),
-            "reason": reason,
             "source": source,
             "before": before,
             "after": deepcopy(assistant),
@@ -648,7 +668,6 @@ class FakeDB:
         pr_id: int,
         penalty_points: float | None = None,
         penalty_percent: float | None = None,
-        reason: str | None = None,
     ) -> dict[str, Any] | None:
         assistant = self.assistants_by_id.get(pr_id)
         if not assistant:
@@ -665,7 +684,6 @@ class FakeDB:
         )
         return {
             "pr_id": pr_id,
-            "reason": reason,
             "before": before,
             "after": deepcopy(assistant),
         }
@@ -675,7 +693,6 @@ class FakeDB:
         pr_id: int,
         oral_delta: int = 0,
         strict_delta: int = 0,
-        reason: str | None = None,
     ) -> dict[str, Any] | None:
         assistant = self.assistants_by_id.get(pr_id)
         if not assistant:
@@ -696,7 +713,6 @@ class FakeDB:
             "units_delta": units_delta,
             "oral_delta": int(oral_delta),
             "strict_delta": int(strict_delta),
-            "reason": reason,
             "before": before,
             "after": deepcopy(assistant),
         }
@@ -714,7 +730,6 @@ class FakeDB:
                 "target_id": "1",
                 "started_at": _now().isoformat(),
                 "ended_at": (_now() + timedelta(hours=1)).isoformat(),
-                "session_admin_comment": None,
             }
             sessions.append(session)
 
@@ -772,6 +787,7 @@ class FakeDB:
         stream_title: str | None = None,
         stream_thumbnail_url: str | None = None,
         profile_image_url: str | None = None,
+        allow_juniors: bool = True,
     ) -> None:
         streamer = _default_streamer(streamer_id, streamer_name)
         streamer.update(
@@ -780,6 +796,7 @@ class FakeDB:
                 "started_at": started_at,
                 "priority": priority,
                 "pr_slots": pr_slots,
+                "allow_juniors": allow_juniors,
                 "added_by_id": added_by_id,
                 "game_id": game_id,
                 "game_name": game_name,
@@ -796,7 +813,9 @@ class FakeDB:
         priority: int | None = None,
         pr_slots: int | None = None,
         is_pinned: bool | None = None,
-        stream_points_override: float | None = None,
+        allow_juniors: bool | None = None,
+        priority_override: int | None = None,
+        pr_slots_override: int | None = None,
     ) -> None:
         streamer = self.streamers_by_id[twitch_id]
         if priority is not None:
@@ -805,8 +824,12 @@ class FakeDB:
             streamer["pr_slots"] = pr_slots
         if is_pinned is not None:
             streamer["is_pinned"] = is_pinned
-        if stream_points_override is not None:
-            streamer["stream_points_override"] = stream_points_override
+        if allow_juniors is not None:
+            streamer["allow_juniors"] = allow_juniors
+        if priority_override is not None:
+            streamer["priority_override"] = priority_override
+        if pr_slots_override is not None:
+            streamer["pr_slots_override"] = pr_slots_override
 
     async def remove_streamer(self, twitch_id: int) -> None:
         self.streamers_by_id.pop(twitch_id, None)
@@ -883,7 +906,7 @@ class FakeDB:
         }
 
     async def unassign_pr_from_streamer(
-        self, streamer_id: int, pr_id: int | None = None, end_reason: str = "manual"
+        self, streamer_id: int, pr_id: int | None = None, end_reason: str = "manual_unclaim"
     ) -> list[dict[str, Any]]:
         streamer = self.streamers_by_id.get(streamer_id)
         if not streamer:
@@ -917,42 +940,7 @@ class FakeDB:
             )
         return results
 
-    async def swap_pr_streamers(self, pr1_id: int, pr2_id: int) -> dict[str, Any]:
-        pr1 = self.pr_current_streamer.get(pr1_id)
-        pr2 = self.pr_current_streamer.get(pr2_id)
-        if not pr1 or not pr2:
-            raise ValueError("Один из сотрудников не закреплен")
 
-        s1 = self.streamers_by_id[pr1["streamer_id"]]
-        s2 = self.streamers_by_id[pr2["streamer_id"]]
-        s1["assignments"] = [
-            a for a in s1.get("assignments", []) if int(a["pr_id"]) != pr1_id
-        ]
-        s2["assignments"] = [
-            a for a in s2.get("assignments", []) if int(a["pr_id"]) != pr2_id
-        ]
-        s1["assignments"].append(
-            {"pr_id": pr2_id, "nickname": f"user{pr2_id}", "is_probation": False}
-        )
-        s2["assignments"].append(
-            {"pr_id": pr1_id, "nickname": f"user{pr1_id}", "is_probation": False}
-        )
-
-        self.pr_current_streamer[pr1_id] = {
-            "streamer_id": s2["streamer_id"],
-            "streamer_name": s2["streamer_name"],
-            "assigned_at": _now(),
-        }
-        self.pr_current_streamer[pr2_id] = {
-            "streamer_id": s1["streamer_id"],
-            "streamer_name": s1["streamer_name"],
-            "assigned_at": _now(),
-        }
-
-        return {
-            "pr1_new_streamer": {"streamer_name": s2["streamer_name"]},
-            "pr2_new_streamer": {"streamer_name": s1["streamer_name"]},
-        }
 
     async def get_pr_spec_sessions(
         self, pr_id: int, limit: int = 50
@@ -967,14 +955,12 @@ class FakeDB:
         self,
         name: str,
         description: str,
-        channel_id: int | None,
-        message_id: int,
         created_by: int,
-        required_pr_count: int,
-        start_time: datetime | None,
-        notification_sent: bool,
-        pr_slots: int,
-        priority: int,
+        start_time: datetime | None = None,
+        required_pr_count: int = 1,
+        notification_sent: bool = False,
+        pr_slots: int = 1,
+        priority: int = 0,
     ) -> int | None:
         if self.force_create_event_fail:
             return None
@@ -989,12 +975,12 @@ class FakeDB:
             "priority": priority,
             "is_pinned": False,
             "start_time": start_time,
-            "channel_id": channel_id,
+            "channel_id": None,
             "created_by": created_by,
             "is_active": True,
             "created_at": _now(),
             "notification_sent": notification_sent,
-            "message_id": message_id,
+            "message_id": None,
         }
         self.event_participants[event_id] = {}
         return event_id
@@ -1024,7 +1010,7 @@ class FakeDB:
             key=lambda e: (
                 1 if e.get("is_active") else 0,
                 1 if e.get("is_pinned") else 0,
-                e.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+                e.get("created_at") or datetime.min.replace(tzinfo=MSK),
             ),
             reverse=True,
         )
@@ -1050,27 +1036,35 @@ class FakeDB:
             else []
         )
 
-    async def join_event(self, event_id: int, user_id: int) -> bool:
+    async def join_event(self, event_id: int, user_id: int) -> dict[str, Any]:
         event = self.events_by_id.get(event_id)
         if not event or not event.get("is_active"):
-            return False
+            return {"status": "error", "detail": "Event not found or inactive"}
         participants = self.event_participants.setdefault(event_id, {})
         if user_id in participants:
-            return False
+            return {"status": "error", "detail": "Already reserved for this event"}
         participants[user_id] = _now()
-        return True
+        return {"status": "joined", "detail": "Joined active event"}
 
-    async def leave_event(self, event_id: int, user_id: int) -> int:
+    async def leave_event(self, event_id: int, user_id: int, end_reason: str = "manual_unclaim") -> int:
         participants = self.event_participants.setdefault(event_id, {})
         participants.pop(user_id, None)
         return 60
+
+    async def get_user_active_event_participation(self, user_id: int) -> dict[str, Any] | None:
+        for event_id, participants in self.event_participants.items():
+            if user_id in participants:
+                event = self.events_by_id.get(event_id)
+                if event and event.get("is_active"):
+                    return {"event_id": event_id, "name": event.get("name")}
+        return None
 
     async def end_event(self, event_id: int) -> list[dict[str, Any]]:
         event = self.events_by_id.get(event_id)
         if event:
             event["is_active"] = False
         participants = self.event_participants.get(event_id, {})
-        return [{"pr_id": p_id, "duration": 60} for p_id in participants.keys()]
+        return [{"user_id": p_id, "duration": 60} for p_id in participants.keys()]
 
     async def update_event(
         self,
@@ -1106,6 +1100,49 @@ class FakeDB:
     async def update_event_message_id(self, event_id: int, message_id: int) -> None:
         if event_id in self.events_by_id:
             self.events_by_id[event_id]["message_id"] = message_id
+
+    async def recalc_target_active_sessions(self, target_type: str, target_id: int) -> None:
+        pass
+
+    async def update_pending_spec_request(
+        self,
+        event_id: int,
+        name: str | None = None,
+        description: str | None = None,
+        priority: int | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> bool:
+        event = self.events_by_id.get(event_id)
+        if not event:
+            return False
+        if name is not None:
+            event["name"] = name
+        if description is not None:
+            event["description"] = description
+        if priority is not None:
+            event["priority"] = priority
+        if start_time is not None:
+            event["start_time"] = start_time
+        if end_time is not None:
+            event["end_time"] = end_time
+        return True
+
+    async def approve_spec_request(self, event_id: int, approved_by: int) -> bool:
+        event = self.events_by_id.get(event_id)
+        if not event:
+            return False
+        event["approval_status"] = "approved"
+        event["approved_by"] = approved_by
+        event["approved_at"] = _now()
+        return True
+
+    async def get_pending_spec_requests(self) -> list[dict[str, Any]]:
+        return [
+            self._event_view(e)
+            for e in self.events_by_id.values()
+            if e.get("approval_status") == "pending"
+        ]
 
     # ---------------------------------------------------------------------
     # Guild/settings

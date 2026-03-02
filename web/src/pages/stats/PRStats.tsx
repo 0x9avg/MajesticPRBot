@@ -332,7 +332,7 @@ export function PRStats() {
                                         <td className="p-3">
                                             <div
                                                 className="flex items-center gap-2 cursor-pointer group"
-                                                onClick={() => navigate(`/profile/${assistant.pr_id}`)}
+                                                onClick={() => navigate(`/assistants/${assistant.pr_id}`)}
                                                 title="Перейти в профиль"
                                             >
                                                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#3b82f6] to-[#e81c5a] flex items-center justify-center text-white font-bold text-sm">

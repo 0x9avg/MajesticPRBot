@@ -150,7 +150,11 @@ export default function MainLayout() {
 
                 <div className="flex items-center gap-6">
                     <button
-                        onClick={() => navigate('/profile')}
+                        onClick={() => {
+                            if (user?.discord_id) {
+                                navigate(`/assistants/${user.discord_id}`);
+                            }
+                        }}
                         className="hidden md:flex items-center gap-3 text-sm hover:bg-white/5 p-2 rounded-xl transition-all group cursor-pointer"
                     >
                         <div className="text-right">

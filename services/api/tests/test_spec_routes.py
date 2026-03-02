@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.spec import router as spec_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -17,7 +18,6 @@ def _seed_streamer(
         "streamer_name": name,
         "is_online": is_online,
         "is_pinned": False,
-        "stream_points_override": None,
         "started_at": None,
         "priority": 1,
         "pr_slots": 2,
@@ -26,7 +26,7 @@ def _seed_streamer(
         "stream_title": "Live",
         "stream_thumbnail_url": "https://img.test/thumb.jpg",
         "profile_image_url": "https://img.test/profile.jpg",
-        "added_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
         "added_by_id": 10,
         "assignments": [],
         "assigned_pr_id": None,
@@ -62,7 +62,7 @@ async def test_claim_streamer_validation_errors(build_api_app, fake_db) -> None:
     fake_db.pr_current_streamer[999] = {
         "streamer_id": 3003,
         "streamer_name": "occupied",
-        "assigned_at": datetime.now(timezone.utc),
+        "assigned_at": datetime.now(MSK),
     }
 
     async with await _client(build_api_app) as client:
@@ -99,21 +99,21 @@ async def test_unclaim_streamer_success_and_errors(
     fake_db.pr_current_streamer[111] = {
         "streamer_id": 3004,
         "streamer_name": "to_unclaim",
-        "assigned_at": datetime.now(timezone.utc),
+        "assigned_at": datetime.now(MSK),
     }
 
     async with await _client(build_api_app) as client:
         missing_streamer = await client.post(
             "/api/spec/unclaim",
-            json={"streamer_id": 9999, "pr_id": 111, "reason": "manual"},
+            json={"streamer_id": 9999, "pr_id": 111, "reason": "manual_unclaim"},
         )
         bad_pr = await client.post(
             "/api/spec/unclaim",
-            json={"streamer_id": 3004, "pr_id": 5555, "reason": "manual"},
+            json={"streamer_id": 3004, "pr_id": 5555, "reason": "manual_unclaim"},
         )
         ok = await client.post(
             "/api/spec/unclaim",
-            json={"streamer_id": 3004, "pr_id": 111, "reason": "manual"},
+            json={"streamer_id": 3004, "pr_id": 111, "reason": "manual_unclaim"},
         )
 
     assert missing_streamer.status_code == 404
@@ -122,83 +122,6 @@ async def test_unclaim_streamer_success_and_errors(
     assert any(call[0] == "spec.unclaimed" for call in fake_broker.calls)
 
 
-async def test_transfer_streamer_success_and_conflicts(
-    build_api_app, fake_db, fake_broker
-) -> None:
-    _seed_streamer(fake_db, 3005, "source", True)
-    fake_db.streamers_by_id[3005]["assignments"] = [
-        {"pr_id": 201, "nickname": "u201", "is_probation": False}
-    ]
-    fake_db.pr_current_streamer[201] = {
-        "streamer_id": 3005,
-        "streamer_name": "source",
-        "assigned_at": datetime.now(timezone.utc),
-    }
-    fake_db.pr_current_streamer[202] = {
-        "streamer_id": 3999,
-        "streamer_name": "busy",
-        "assigned_at": datetime.now(timezone.utc),
-    }
-
-    async with await _client(build_api_app) as client:
-        target_busy = await client.post(
-            "/api/spec/transfer",
-            json={"streamer_id": 3005, "from_pr_id": 201, "to_pr_id": 202},
-        )
-
-    assert target_busy.status_code == 409
-
-    fake_db.pr_current_streamer.pop(202, None)
-
-    async with await _client(build_api_app) as client:
-        bad_from = await client.post(
-            "/api/spec/transfer",
-            json={"streamer_id": 3005, "from_pr_id": 999, "to_pr_id": 203},
-        )
-        ok = await client.post(
-            "/api/spec/transfer",
-            json={"streamer_id": 3005, "from_pr_id": 201, "to_pr_id": 203},
-        )
-
-    assert bad_from.status_code == 400
-    assert ok.status_code == 200
-    assert fake_db.pr_current_streamer[203]["streamer_id"] == 3005
-    assert any(call[0] == "spec.transferred" for call in fake_broker.calls)
-
-
-async def test_swap_streamers_success_and_errors(
-    build_api_app, fake_db, fake_broker
-) -> None:
-    _seed_streamer(fake_db, 3006, "one", True)
-    _seed_streamer(fake_db, 3007, "two", True)
-
-    fake_db.streamers_by_id[3006]["assignments"] = [
-        {"pr_id": 301, "nickname": "u301", "is_probation": False}
-    ]
-    fake_db.streamers_by_id[3007]["assignments"] = [
-        {"pr_id": 302, "nickname": "u302", "is_probation": False}
-    ]
-    fake_db.pr_current_streamer[301] = {
-        "streamer_id": 3006,
-        "streamer_name": "one",
-        "assigned_at": datetime.now(timezone.utc),
-    }
-    fake_db.pr_current_streamer[302] = {
-        "streamer_id": 3007,
-        "streamer_name": "two",
-        "assigned_at": datetime.now(timezone.utc),
-    }
-
-    async with await _client(build_api_app) as client:
-        same = await client.post("/api/spec/swap", json={"pr1_id": 301, "pr2_id": 301})
-        ok = await client.post("/api/spec/swap", json={"pr1_id": 301, "pr2_id": 302})
-
-    assert same.status_code == 400
-    assert ok.status_code == 200
-    assert fake_db.pr_current_streamer[301]["streamer_id"] == 3007
-    assert fake_db.pr_current_streamer[302]["streamer_id"] == 3006
-    assert any(call[0] == "spec.swapped" for call in fake_broker.calls)
-
 
 async def test_get_pr_sessions_and_assignments(build_api_app, fake_db) -> None:
     fake_db.pr_sessions[901] = [
@@ -206,16 +129,16 @@ async def test_get_pr_sessions_and_assignments(build_api_app, fake_db) -> None:
             "id": 1,
             "pr_id": 901,
             "streamer_id": 555,
-            "started_at": datetime.now(timezone.utc),
-            "ended_at": datetime.now(timezone.utc),
+            "started_at": datetime.now(MSK),
+            "ended_at": datetime.now(MSK),
             "duration_seconds": 60,
-            "end_reason": "manual",
+            "end_reason": "manual_unclaim",
         }
     ]
     fake_db.pr_current_streamer[901] = {
         "streamer_id": 555,
         "streamer_name": "tester",
-        "assigned_at": datetime.now(timezone.utc),
+        "assigned_at": datetime.now(MSK),
     }
 
     async with await _client(build_api_app) as client:
@@ -255,7 +178,7 @@ async def test_get_claimable_streamers_by_role_permissions(
         "status": "free",
         "total_spec_seconds": 0,
         "session_count": 0,
-        "added_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
     }
 
     # Junior: probation allowed, should also see main_taken.
@@ -267,7 +190,7 @@ async def test_get_claimable_streamers_by_role_permissions(
         "status": "free",
         "total_spec_seconds": 0,
         "session_count": 0,
-        "added_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
     }
 
     async with await _client(build_api_app) as client:

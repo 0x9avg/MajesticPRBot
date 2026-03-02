@@ -16,14 +16,13 @@ from config import Config
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
-from schemas.envelope import success_envelope
 from schemas.spec import (
     SpecClaimRequest,
     SpecSessionResponse,
-    SpecSwapRequest,
-    SpecTransferRequest,
     SpecUnclaimRequest,
 )
+from schemas.enums import SpecSessionEndReason
+from schemas.envelope import success_envelope
 
 router = APIRouter(prefix="/spec", tags=["Spec System"])
 
@@ -198,122 +197,7 @@ async def unclaim_streamer(
     )
 
 
-@router.post("/transfer")
-async def transfer_streamer(
-    request: Request,
-    data: SpecTransferRequest,
-    db: "Database" = Depends(get_db),
-    broker: "BrokerService" = Depends(get_broker),
-):
-    """Transfer a streamer from one PR to another."""
-    trace_id = get_trace_id(request)
 
-    streamer = await db.get_streamer(data.streamer_id)
-    if not streamer:
-        raise HTTPException(status_code=404, detail="Стример не найден")
-
-    # Check if target PR is free
-    current = await db.get_pr_current_streamer(data.to_pr_id)
-    if current:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Целевой PR уже закреплен за стримером {current['streamer_name']}",
-        )
-
-    # Unclaim from specific PR (Strict check: must be assigned to from_pr_id)
-    results = await db.unassign_pr_from_streamer(
-        data.streamer_id, pr_id=data.from_pr_id, end_reason="transfer"
-    )
-
-    if not results:
-        raise HTTPException(
-            status_code=400,
-            detail="Стример не закреплен за указанным исходным PR",
-        )
-
-    result = results[0]
-
-    # Claim for new PR
-    # Warning: Transferring DOES NOT preserve is_probation status implicitly in this logic
-    # It assumes standard claim. If we want to preserve, we should check `result['is_probation']`
-    # Defaulting to regular claim for now as per original logic.
-    try:
-        await db.assign_pr_to_streamer(data.streamer_id, data.to_pr_id)
-    except ValueError as e:
-        # If assignment fails, we should technically revert unassignment, but transfer is complex.
-        raise HTTPException(status_code=409, detail=f"Ошибка перевода: {e}")
-
-    if broker:
-        await broker.publish(
-            "spec.transferred",
-            {
-                "event": "spec.transferred",
-                "streamer_id": data.streamer_id,
-                "streamer_name": streamer["streamer_name"],
-                "from_pr_id": data.from_pr_id,
-                "to_pr_id": data.to_pr_id,
-                "duration_seconds": result.get("duration_seconds", 0),
-            },
-        )
-
-    return JSONResponse(
-        content=success_envelope(
-            data={
-                "streamer_id": data.streamer_id,
-                "streamer_name": streamer["streamer_name"],
-                "from_pr_id": data.from_pr_id,
-                "to_pr_id": data.to_pr_id,
-            },
-            message=f"Transferred {streamer['streamer_name']}",
-            code="SPEC_TRANSFERRED",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.post("/swap")
-async def swap_streamers(
-    request: Request,
-    data: SpecSwapRequest,
-    db: "Database" = Depends(get_db),
-    broker: "BrokerService" = Depends(get_broker),
-):
-    """Swap streamers between two PR assistants."""
-    trace_id = get_trace_id(request)
-
-    if data.pr1_id == data.pr2_id:
-        raise HTTPException(status_code=400, detail="Нельзя обменяться с самим собой")
-
-    try:
-        result = await db.swap_pr_streamers(data.pr1_id, data.pr2_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if broker:
-        await broker.publish(
-            "spec.swapped",
-            {
-                "event": "spec.swapped",
-                "pr1_id": data.pr1_id,
-                "pr2_id": data.pr2_id,
-                "pr1_new_streamer": result["pr1_new_streamer"]["streamer_name"],
-                "pr2_new_streamer": result["pr2_new_streamer"]["streamer_name"],
-            },
-        )
-
-    return JSONResponse(
-        content=success_envelope(
-            data={
-                "pr1_id": data.pr1_id,
-                "pr1_new_streamer": result["pr1_new_streamer"]["streamer_name"],
-                "pr2_id": data.pr2_id,
-                "pr2_new_streamer": result["pr2_new_streamer"]["streamer_name"],
-            },
-            message="Streamers swapped",
-            code="SPEC_SWAPPED",
-            trace_id=trace_id,
-        )
-    )
 
 
 @router.get("/sessions/{pr_id}")
@@ -344,15 +228,31 @@ async def get_current_streamer_for_pr(
     pr_id: int,
     db: "Database" = Depends(get_db),
 ):
-    """Get the streamer currently assigned to a PR assistant."""
+    """Get the session currently assigned to a PR assistant."""
     trace_id = get_trace_id(request)
-    streamer = await db.get_pr_current_streamer(pr_id)
+    session = await db.get_pr_current_streamer(pr_id)
 
-    if not streamer:
+    if not session:
         return JSONResponse(
             content=success_envelope(
                 data={"assigned": False, "streamer": None},
-                message="No streamer assigned",
+                message="No session assigned",
+                trace_id=trace_id,
+            )
+        )
+
+    if session.get("target_type") == "event":
+        return JSONResponse(
+            content=success_envelope(
+                data={
+                    "assigned": True,
+                    "streamer": {
+                        "event_id": session["event_id"],
+                        "event_name": session["event_name"],
+                        "assigned_at": str(session["assigned_at"]),
+                    },
+                },
+                message=f"Assigned to event: {session['event_name']}",
                 trace_id=trace_id,
             )
         )
@@ -362,12 +262,12 @@ async def get_current_streamer_for_pr(
             data={
                 "assigned": True,
                 "streamer": {
-                    "streamer_id": streamer["streamer_id"],
-                    "streamer_name": streamer["streamer_name"],
-                    "assigned_at": str(streamer["assigned_at"]),
+                    "streamer_id": session["streamer_id"],
+                    "streamer_name": session["streamer_name"],
+                    "assigned_at": str(session["assigned_at"]),
                 },
             },
-            message=f"Assigned to {streamer['streamer_name']}",
+            message=f"Assigned to {session['streamer_name']}",
             trace_id=trace_id,
         )
     )
@@ -394,10 +294,15 @@ async def get_claimable_streamers(
     # Get user capabilities via role-based permissions
     assistant = await db.get_assistant(user_id)
     can_spec_probation = False
+    assigned_to_type = None
+    assigned_to_name = None
+    
     if assistant:
         role = assistant.get("role", "employee")
         permissions = await db.get_role_permissions(role)
         can_spec_probation = permissions.get("can_spec_probation", False)
+        assigned_to_type = assistant.get("assigned_to_type")
+        assigned_to_name = assistant.get("assigned_to_name")
 
     # Get all online GTA streamers with assignments
     all_streamers = await db.list_online_streamers()
@@ -411,11 +316,17 @@ async def get_claimable_streamers(
             continue
 
         # Determine slot availability
-        assignments = s.get("assignments", [])
-        if isinstance(assignments, str):
+        assignments = s.get("assignments")
+        if not assignments:
+            assignments = []
+        elif isinstance(assignments, str):
             import json
-
-            assignments = json.loads(assignments)
+            try:
+                assignments = json.loads(assignments)
+                if not assignments:
+                    assignments = []
+            except Exception:
+                assignments = []
 
         main_free = True
         probation_free = True
@@ -446,19 +357,41 @@ async def get_claimable_streamers(
                 "streamer_id": s["streamer_id"],
                 "streamer_name": s["streamer_name"],
                 "priority": s.get("priority", 3),
+                "is_pinned": s.get("is_pinned", False),
                 "main_free": main_free,
                 "probation_free": probation_free,
             }
         )
 
-    # Sort by priority (P0 first)
-    claimable.sort(key=lambda x: x["priority"])
+    # Get active events and add them if they have free slots
+    active_events = await db.get_active_events()
+    for e in active_events:
+        slots = e.get("pr_slots", e.get("required_pr_count", 1))
+        current = e.get("current_participants", 0)
+        if current < slots:
+            claimable.append(
+                {
+                    "is_event": True,
+                    "event_id": e["id"],
+                    "streamer_id": f"event_{e['id']}",  # Unique ID for the dropdown
+                    "streamer_name": f"[Событие] {e['name']}",
+                    "priority": e.get("priority", 0),
+                    "is_pinned": e.get("is_pinned", False),
+                    "main_free": True,  # Treat event slots as 'main' for UI simplicity
+                    "probation_free": False, # Events don't have separate probation slots natively yet
+                }
+            )
+
+    # Sort by priority (P0 first) and then by pinning
+    claimable.sort(key=lambda x: (not x.get("is_pinned", False), x["priority"]))
 
     return JSONResponse(
         content=success_envelope(
             data={
                 "streamers": claimable,
                 "can_spec_probation": can_spec_probation,
+                "assigned_to_type": assigned_to_type,
+                "assigned_to_name": assigned_to_name,
             },
             message=f"Found {len(claimable)} claimable streamers",
             trace_id=trace_id,

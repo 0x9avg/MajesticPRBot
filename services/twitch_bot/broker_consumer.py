@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
+
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
 
 import aio_pika
 from aio_pika import ExchangeType
@@ -161,7 +165,7 @@ class BrokerConsumer:
                         streamer_name=username,
                         is_online=is_online,
                         started_at=(
-                            str(stream_info.get("started_at"))
+                            self.bot._convert_twitch_time_to_msk(stream_info.get("started_at"))
                             if stream_info.get("started_at")
                             else None
                         ),
@@ -219,7 +223,7 @@ class BrokerConsumer:
                         streamer_id,
                         is_online,
                         started_at=(
-                            str(stream_info.get("started_at"))
+                            self.bot._convert_twitch_time_to_msk(stream_info.get("started_at"))
                             if stream_info.get("started_at")
                             else None
                         ),
@@ -272,7 +276,7 @@ class BrokerConsumer:
                     streamer_id,
                     is_online,
                     started_at=(
-                        str(stream_info.get("started_at"))
+                        self.bot._convert_twitch_time_to_msk(stream_info.get("started_at"))
                         if stream_info.get("started_at")
                         else None
                     ),

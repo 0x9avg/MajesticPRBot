@@ -1,9 +1,12 @@
 """Utility functions for Discord Bot."""
 
-import datetime
-import logging
-import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
+import time
+import logging
+
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
 
 import disnake
 from config import Config
@@ -69,19 +72,20 @@ def parse_to_unix(value: Union[str, datetime.datetime, None]) -> int:
     try:
         if isinstance(value, str):
             # Handle ISO format with optional 'Z' suffix
-            dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-            # If naive (no timezone), assume Local System Time and convert to UTC
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # If naive (no timezone), assume MSK (project standard)
             if dt.tzinfo is None:
-                dt = dt.astimezone(datetime.timezone.utc)
+                dt = dt.replace(tzinfo=MSK)
             return int(dt.timestamp())
-        elif isinstance(value, datetime.datetime):
-            # If naive, assume Local System Time and convert to UTC
+        elif isinstance(value, datetime):
+            # If naive, assume MSK
             if value.tzinfo is None:
-                value = value.astimezone(datetime.timezone.utc)
+                value = value.replace(tzinfo=MSK)
             return int(value.timestamp())
         elif isinstance(value, datetime.date):
-            # Convert date to datetime at midnight UTC
-            dt = datetime.datetime.combine(value, datetime.time.min).replace(tzinfo=datetime.timezone.utc)
+            # Convert date to datetime at midnight MSK
+            from datetime import time as dt_time
+            dt = datetime.combine(value, dt_time.min).replace(tzinfo=MSK)
             return int(dt.timestamp())
     except Exception as e:
         logger.warning(f"Failed to parse timestamp '{value}': {e}")
@@ -308,6 +312,15 @@ def create_streamers_component(
         start_unix = parse_to_unix(event.get("start_time"))
         participant_count = event.get("current_participants", 0)
         slots = event.get("pr_slots", event.get("required_pr_count", 0))
+        participants = event.get("participants", [])
+
+        # Build participant mentions line
+        if participants:
+            mentions = ", ".join(f"<@{p['pr_id']}>" for p in participants)
+            pr_line = f"👤 PR ({participant_count}/{slots}): {mentions}"
+        else:
+            pr_line = f"👤 PR (0/{slots}): *свободен*"
+
         return [
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
             disnake.ui.TextDisplay(content=f"### {event['name']}"),
@@ -315,7 +328,7 @@ def create_streamers_component(
                 content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', '')) > 100 else ''}"
             ),
             disnake.ui.TextDisplay(
-                content=f"👥 **Участников:** {participant_count} / {slots}\n🕒 **Начало:** <t:{start_unix}:R>"
+                content=f"{pr_line}\n🕒 **Начало:** <t:{start_unix}:R>"
             ),
         ]
 

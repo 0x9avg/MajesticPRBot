@@ -1,9 +1,10 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { Users, Wifi, Activity, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2 } from 'lucide-react';
+import { Users, Wifi, Activity, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock } from 'lucide-react';
 import type { OutletUserContext } from '../../types/auth';
 import type { DashboardStats, Event, EventParticipant, Streamer, StreamerAssignment } from '../../types/domain';
 import { unwrapApiData, getApiErrorMessage } from '../../types/api';
+import { formatMskToLocal } from '../../utils/datetime';
 import StreamerSettingsModal from '../media/components/StreamerSettingsModal';
 import EventSettingsModal from '../media/components/EventSettingsModal';
 
@@ -32,6 +33,13 @@ export function MainHub() {
     const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
     const [selectedEvent, setSelectedEvent] = React.useState<Event | null>(null);
     const [claimError, setClaimError] = React.useState<string | null>(null);
+
+    // Spec request modal state
+    const [isSpecRequestOpen, setIsSpecRequestOpen] = React.useState(false);
+    const [specRequestName, setSpecRequestName] = React.useState('');
+    const [specRequestDesc, setSpecRequestDesc] = React.useState('');
+    const [specRequestPriority, setSpecRequestPriority] = React.useState(0);
+    const [specRequestLoading, setSpecRequestLoading] = React.useState(false);
 
     React.useEffect(() => {
         const fetchStats = async () => {
@@ -279,6 +287,40 @@ export function MainHub() {
         }
     };
 
+    const handleCreateSpecRequest = async () => {
+        if (!specRequestName.trim()) return;
+        setSpecRequestLoading(true);
+        try {
+            const token = localStorage.getItem('access_token');
+            const response = await fetch('/api/events/spec-request', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({
+                    name: specRequestName.trim(),
+                    description: specRequestDesc.trim(),
+                    priority: specRequestPriority,
+                })
+            });
+            if (response.ok) {
+                setIsSpecRequestOpen(false);
+                setSpecRequestName('');
+                setSpecRequestDesc('');
+                setSpecRequestPriority(0);
+                await fetchActiveEventsManual();
+            } else {
+                const error = await response.json().catch(() => ({} as unknown));
+                setClaimError(getApiErrorMessage(error, 'Не удалось создать запрос'));
+                setTimeout(() => setClaimError(null), 3000);
+            }
+        } catch (error) {
+            console.error('Error creating spec request:', error);
+            setClaimError('Ошибка при создании запроса');
+            setTimeout(() => setClaimError(null), 3000);
+        } finally {
+            setSpecRequestLoading(false);
+        }
+    };
+
     const stats = [
         {
             label: 'Кол-во занятых PR',
@@ -311,7 +353,7 @@ export function MainHub() {
         {
             title: 'Таблица пиаров',
             desc: 'Статистика работы сотрудников',
-            path: '/pr-stats',
+            path: '/assistants',
             icon: Users,
             color: 'from-purple-500/20 to-purple-600/5 hover:border-purple-500/50'
         },
@@ -392,6 +434,16 @@ export function MainHub() {
                     <span className="text-sm font-normal text-white/40 ml-2">
                         {activities.length > 0 ? `${activities.length}` : ''}
                     </span>
+                    {!isGlobalClaimed && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); setIsSpecRequestOpen(true); }}
+                            className="ml-4 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs font-semibold hover:bg-amber-500/20 transition-colors text-amber-400 whitespace-nowrap"
+                            title="Запросить спек"
+                        >
+                            <Plus className="w-3.5 h-3.5" />
+                            Запросить спек
+                        </button>
+                    )}
                     <div className={`ml-auto p-2 rounded-full bg-white/5 transition-transform duration-300 ${isActivitiesOpen ? 'rotate-180' : ''}`}>
                         <ChevronDown className="w-5 h-5 text-white/60" />
                     </div>
@@ -407,11 +459,12 @@ export function MainHub() {
                                 {activities.map((item) => {
                                     if (item.type === 'event') {
                                         const event = item;
+                                        const isPending = event.event_kind === 'spec_request' && event.approval_status === 'pending';
                                         const participants = event.participants || [];
                                         const currentParticipants = event.current_participants || participants.length;
                                         const isUserParticipant = participants.some((p: EventParticipant) => String(p.pr_id) === String(user?.discord_id));
                                         return (
-                                            <div key={`event-${event.id}`} className="group flex items-center p-3 rounded-xl hover:bg-white/5 transition-all">
+                                            <div key={`event-${event.id}`} className={`group flex items-center p-3 rounded-xl hover:bg-white/5 transition-all ${isPending ? 'opacity-60' : ''}`}>
                                                 <div className="flex items-center gap-4 flex-1 min-w-0 mr-2">
                                                     <div className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center font-bold select-none shrink-0 relative ${event.priority === 1 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
                                                         event.priority === 2 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
@@ -431,9 +484,15 @@ export function MainHub() {
                                                     <div className="min-w-0">
                                                         <h4 className="font-bold text-lg text-white truncate">
                                                             {event.name}
+                                                            {isPending && (
+                                                                <span className="ml-2 inline-flex items-center gap-1 text-xs font-medium text-amber-400/70 bg-amber-500/10 px-2 py-0.5 rounded-full">
+                                                                    <Clock className="w-3 h-3" />
+                                                                    Ожидает
+                                                                </span>
+                                                            )}
                                                             {event.start_time && (
                                                                 <span className="ml-2 text-purple-400 text-sm font-medium">
-                                                                    [{new Date(event.start_time).toLocaleDateString()} {new Date(event.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}]
+                                                                    [{formatMskToLocal(event.start_time)}]
                                                                 </span>
                                                             )}
                                                         </h4>
@@ -447,10 +506,11 @@ export function MainHub() {
                                                                 {participants.map((participant: EventParticipant) => (
                                                                     <span
                                                                         key={participant.pr_id}
-                                                                        onClick={() => navigate(`/profile/${participant.pr_id}`)}
-                                                                        className="font-bold text-blue-400 hover:text-blue-300 cursor-pointer transition-colors"
+                                                                        onClick={() => navigate(`/assistants/${participant.pr_id}`)}
+                                                                        className={`font-bold cursor-pointer transition-colors ${participant.status === 'reserved' ? 'text-gray-400 hover:text-gray-300' : 'text-blue-400 hover:text-blue-300'}`}
+                                                                        title={participant.status === 'reserved' ? 'Зарезервирован' : 'Активен'}
                                                                     >
-                                                                        @{participant.nickname}
+                                                                        @{participant.nickname || participant.pr_id}
                                                                     </span>
                                                                 ))}
                                                             </div>
@@ -466,7 +526,7 @@ export function MainHub() {
                                                             >
                                                                 Открепиться
                                                             </button>
-                                                        ) : !isGlobalClaimed && (
+                                                        ) : !isGlobalClaimed && event.event_kind !== 'spec_request' && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); void handleJoinEvent(event.id); }}
                                                                 className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap"
@@ -540,9 +600,17 @@ export function MainHub() {
                                                                 </span>
                                                             )}
                                                         </h4>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                                                            <span className="text-sm text-green-400">Онлайн</span>
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <a
+                                                                href={`https://twitch.tv/${streamer.streamer_name}`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#9146ff]/10 text-[#9146ff] hover:bg-[#9146ff]/20 transition-colors text-xs font-semibold"
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            >
+                                                                <Twitch className="w-3.5 h-3.5" />
+                                                                Перейти на канал
+                                                            </a>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -555,7 +623,7 @@ export function MainHub() {
                                                                         key={a.pr_id}
                                                                         onClick={(e) => {
                                                                             e.stopPropagation();
-                                                                            navigate(`/profile/${a.pr_id}`);
+                                                                            navigate(`/assistants/${a.pr_id}`);
                                                                         }}
                                                                         className={`font-bold cursor-pointer transition-colors ${a.is_probation ? 'text-green-400 hover:text-green-300' : 'text-blue-400 hover:text-blue-300'
                                                                             }`}
@@ -689,6 +757,74 @@ export function MainHub() {
                                 </div>
                             </div>
                         ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Spec Request Modal */}
+            {isSpecRequestOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
+                    <div className="bg-[#1e1e1e] border border-white/10 rounded-2xl p-8 w-full max-w-md shadow-2xl">
+                        <h3 className="text-xl font-bold text-white mb-6">Запросить спек</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm text-white/60 mb-1">Название</label>
+                                <input
+                                    type="text"
+                                    value={specRequestName}
+                                    onChange={(e) => setSpecRequestName(e.target.value)}
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder-white/30 focus:outline-none focus:border-amber-500/50 transition-colors"
+                                    placeholder="Название спека"
+                                    maxLength={100}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm text-white/60 mb-1">Описание</label>
+                                <textarea
+                                    value={specRequestDesc}
+                                    onChange={(e) => setSpecRequestDesc(e.target.value)}
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder-white/30 focus:outline-none focus:border-amber-500/50 transition-colors resize-none"
+                                    placeholder="Описание (необязательно)"
+                                    rows={3}
+                                    maxLength={1000}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm text-white/60 mb-1">Приоритет</label>
+                                <div className="flex gap-2">
+                                    {[0, 1, 2, 3].map((p) => (
+                                        <button
+                                            key={p}
+                                            onClick={() => setSpecRequestPriority(p)}
+                                            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors border ${specRequestPriority === p
+                                                ? p === 0 ? 'bg-white/10 text-white border-white/30'
+                                                    : p === 1 ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                                                        : p === 2 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
+                                                            : 'bg-red-500/20 text-red-400 border-red-500/30'
+                                                : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10'
+                                                }`}
+                                        >
+                                            {p}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex gap-3 mt-6">
+                            <button
+                                onClick={() => setIsSpecRequestOpen(false)}
+                                className="flex-1 py-2.5 rounded-xl border border-white/10 text-white/60 font-semibold hover:bg-white/5 transition-colors"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                onClick={() => void handleCreateSpecRequest()}
+                                disabled={specRequestLoading || !specRequestName.trim()}
+                                className="flex-1 py-2.5 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 font-semibold hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {specRequestLoading ? 'Отправка…' : 'Отправить'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

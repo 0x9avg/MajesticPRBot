@@ -3,6 +3,7 @@ import { User, Clock, Shield, History, ArrowLeft, Wifi, Calendar, Coins, BadgePe
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Assistant, AssistantLog } from '../types/domain';
 import { unwrapApiData } from '../types/api';
+import { formatMskToLocal } from '../utils/datetime';
 
 export default function UserProfile() {
     const navigate = useNavigate();
@@ -21,7 +22,7 @@ export default function UserProfile() {
         return unwrapApiData<Assistant>(json);
     };
 
-    const fetchAssistantLogs = async (prId: number) => {
+    const fetchAssistantLogs = async (prId: string | number) => {
         const logsRes = await fetch(`/api/assistants/${prId}/logs`);
         if (!logsRes.ok) {
             return [];
@@ -54,29 +55,19 @@ export default function UserProfile() {
                 }
 
                 if (!authRes.ok) throw new Error('Failed to load user info');
-                const authUser = await authRes.json() as { discord_id: string; nickname: string };
 
-                // 2. Determine Target User (Me or route param)
-                // If id is present, we are viewing someone else. If not, we view ourselves.
-                const targetId = id || authUser.discord_id;
+                // 2. Target ID must be present in the new route design (/assistants/:id)
+                const targetId = id;
+                if (!targetId) {
+                    setError('ID профиля не указан в URL.');
+                    setLoading(false);
+                    return;
+                }
+
                 let assistantData: Assistant | null = null;
 
                 try {
-                    // Try fetch by Target ID
                     assistantData = await fetchAssistantData(targetId);
-                    if (!assistantData && !id) {
-                        // Only fall back to nickname search if we are viewing "Me" and ID fetch failed
-                        // (Logic preserved from original code for self-profile robustness)
-                        const allRes = await fetch('/api/assistants');
-                        if (allRes.ok) {
-                            const allJson = await allRes.json() as unknown;
-                            const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
-                            const normalized = Array.isArray(allData) ? allData : allData.assistants;
-                            assistantData = normalized.find((assistant) =>
-                                assistant.nickname.toLowerCase() === authUser.nickname.toLowerCase()
-                            ) || null;
-                        }
-                    }
                 } catch (e) {
                     console.warn("Failed to fetch assistant data", e);
                 }
@@ -218,7 +209,7 @@ export default function UserProfile() {
                                     <div className="flex items-center gap-1.5 text-white/40 text-sm">
                                         <span className="w-1 h-1 rounded-full bg-white/40"></span>
                                         <Calendar className="w-4 h-4" />
-                                        <span>Назначен: {new Date(user.appointed_at).toLocaleDateString('ru-RU')}</span>
+                                        <span>Назначен: {formatMskToLocal(user.appointed_at, { day: '2-digit', month: '2-digit', year: 'numeric' })}</span>
                                     </div>
                                 )}
                             </div>
@@ -328,7 +319,7 @@ export default function UserProfile() {
                                     </div>
 
                                     <div className="text-sm text-white/30 font-mono">
-                                        {new Date(log.created_at).toLocaleString('ru-RU', {
+                                        {formatMskToLocal(log.created_at, {
                                             day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
                                         })}
                                     </div>

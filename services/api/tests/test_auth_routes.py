@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.auth import router as auth_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -22,7 +23,7 @@ def _seed_auth_user(
         "failed_login_attempts": 0,
         "last_failed_login": None,
         "last_login": None,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(MSK),
         "role": "manager",
         "nickname": "Manager",
         "permissions": {"can_register_users": True},
@@ -76,7 +77,7 @@ async def test_login_rate_limited_when_locked(build_api_app, fake_db) -> None:
     fake_db.users_by_username["locked"][
         "failed_login_attempts"
     ] = Config.max_login_attempts
-    fake_db.users_by_username["locked"]["last_failed_login"] = datetime.now(timezone.utc)
+    fake_db.users_by_username["locked"]["last_failed_login"] = datetime.now(MSK)
 
     async with await _client(build_api_app) as auth_client:
         response = await auth_client.post(

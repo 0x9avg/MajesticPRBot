@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, X, Calendar as CalendarIcon, Check, Clock } from 'lucide-react';
+import { getMskTodayStr, getMskNow, formatMskToLocal } from '../utils/datetime';
 
 // ==========================================
 // Custom Select Component
@@ -117,7 +118,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
     const containerRef = useRef<HTMLDivElement>(null);
 
     // Internal state for calendar navigation
-    const [viewDate, setViewDate] = useState(new Date());
+    const [viewDate, setViewDate] = useState(getMskNow());
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -185,7 +186,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
         for (let day = 1; day <= daysInMonth; day++) {
             const dateStr = `${year}-${(month + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
             const isSelected = value === dateStr;
-            const isToday = new Date().toISOString().split('T')[0] === dateStr;
+            const isToday = getMskTodayStr() === dateStr;
 
             slots.push(
                 <button
@@ -216,7 +217,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
             >
                 <CalendarIcon className="w-4 h-4 text-white/40" />
                 <span className={value ? 'text-white' : 'text-white/40'}>
-                    {value ? new Date(value).toLocaleDateString() : placeholder}
+                    {value ? formatMskToLocal(value, { day: '2-digit', month: '2-digit', year: 'numeric', hour: undefined, minute: undefined } as any) : placeholder}
                 </span>
                 {value && (
                     <div
@@ -273,8 +274,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
                         </button>
                         <button
                             onClick={() => {
-                                const today = new Date();
-                                const dateStr = today.toISOString().split('T')[0];
+                                const dateStr = getMskTodayStr();
                                 onChange(dateStr);
                                 setIsOpen(false);
                             }}

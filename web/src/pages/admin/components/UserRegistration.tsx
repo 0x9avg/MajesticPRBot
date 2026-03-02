@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { UserPlus, ShieldAlert, AlertCircle, Copy, Check } from 'lucide-react';
+import { ShieldAlert, AlertCircle, Copy, Check, UserPlus } from 'lucide-react';
+import { getMskTodayStr } from '../../../utils/datetime';
 import { CustomSelect } from '../../../components/CustomInputs';
 import { useOutletContext } from 'react-router-dom';
 import type { KnownRole, OutletUserContext } from '../../../types/auth';
@@ -40,13 +41,13 @@ const getAllowedRoles = (userRole?: Role, canRegisterUsers?: boolean): Role[] =>
 
 const UserRegistration = () => {
     const { user } = useOutletContext<OutletUserContext>();
-    const getTodayUtcDate = () => new Date().toISOString().slice(0, 10);
+    const getTodayMskDate = () => getMskTodayStr();
     const [formData, setFormData] = useState({
         username: '',
         nickname: '',
         role: '',
         discord_id: '',
-        appointed_at: getTodayUtcDate(),
+        appointed_at: getTodayMskDate(),
     });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -69,7 +70,7 @@ const UserRegistration = () => {
 
     const handleCopy = () => {
         if (createdUser) {
-            navigator.clipboard.writeText(`Login: ${createdUser.username}\nPassword: ${createdUser.password}`);
+            navigator.clipboard.writeText(`Login: ${createdUser.username} \nPassword: ${createdUser.password} `);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         }
@@ -97,7 +98,7 @@ const UserRegistration = () => {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
+                    'Authorization': `Bearer ${token} `
                 },
                 body: JSON.stringify({
                     username: formData.username,
@@ -125,7 +126,7 @@ const UserRegistration = () => {
                 nickname: '',
                 role: '',
                 discord_id: '',
-                appointed_at: getTodayUtcDate(),
+                appointed_at: getTodayMskDate(),
             });
 
         } catch (err: unknown) {
@@ -280,7 +281,7 @@ const UserRegistration = () => {
                         <button
                             onClick={handleSubmit}
                             disabled={loading || !canRegisterUsers}
-                            className={`px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            className={`px - 8 py - 3 bg - blue - 500 hover: bg - blue - 600 text - white font - bold rounded - xl shadow - lg shadow - blue - 500 / 20 transition - all ${loading ? 'opacity-50 cursor-not-allowed' : ''} `}
                         >
                             {loading ? 'Создание...' : 'Создать пользователя'}
                         </button>

@@ -90,7 +90,11 @@ PRMajesticBot/
 
 - `POST /api/auth/login` выдает access token с `sid` (ID сессии).
 - `POST /api/auth/logout` отзывает сессии пользователя; старые access token после этого невалидны.
-- Количество активных спек-сессий для клиентов берется из `GET /api/stats/dashboard` (`assigned_pr_count`).
+- Клиенты получают общие данные для дашборда (количество стримеров и спеков) через `GET /api/stats/dashboard`.
+- Система поддерживает логику **Pending Spec Requests**: 
+  - Создание запроса: `POST /api/events/spec-request`. 
+  - Получение: `GET /api/events/pending`.
+  - Модерация: `POST /api/events/{id}/approve` или `POST /api/events/{id}/reject`.
 
 ## 🔧 Устранение неполадок
 

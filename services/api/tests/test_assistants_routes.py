@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.assistants import router as assistants_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -23,8 +24,8 @@ def _seed_assistant(
         "assigned_to_name": None,
         "total_spec_seconds": 7200,
         "session_count": 5,
-        "added_at": datetime.now(timezone.utc),
-        "appointed_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
+        "appointed_at": datetime.now(MSK),
         "auto_points_total": 10.0,
         "manual_points_adjustment": 0.0,
         "total_points": 10.0,
@@ -139,7 +140,8 @@ async def test_get_logs_for_assistant(build_api_app, fake_db) -> None:
         },
         {
             "id": 2,
-            "action": "Unassigned (manual)",
+            "action": "Unassigned (manual_unclaim)",
+            "priority": 1.0,
             "target": "StreamerAlpha",
             "created_at": "2026-02-14T11:30:00",
         },
@@ -174,7 +176,6 @@ async def test_get_assistant_sessions_admin_only_endpoint(
             "ended_at": "2026-02-14T11:00:00",
             "duration_seconds": 3600,
             "credited_points": 1.0,
-            "session_admin_comment": "manual",
             "is_probation": False,
             "priority_auto": 1,
             "priority_override": None,
@@ -262,7 +263,7 @@ async def test_adjust_points_sanctions_and_warnings_endpoints(
     async with await _client(build_api_app) as assistants_client:
         adjust = await assistants_client.post(
             "/api/assistants/1700/points/adjust",
-            json={"delta": 3.25, "reason": "bonus"},
+            json={"delta": 3.25},
         )
         sanctions = await assistants_client.patch(
             "/api/assistants/1700/sanctions",
@@ -293,13 +294,11 @@ async def test_admin_session_patch_and_delete_routes(build_api_app, fake_db) -> 
                 "target_id": None,
                 "started_at": "2026-02-14T12:00:00Z",
                 "ended_at": "2026-02-14T13:00:00Z",
-                "session_admin_comment": "updated by admin",
                 "priority_override": 2,
             },
         )
         delete_resp = await assistants_client.delete(
             "/api/assistants/1800/sessions/9001",
-            params={"reason": "mistake"},
         )
 
     assert patch_resp.status_code == 200
@@ -338,6 +337,7 @@ async def test_non_admin_cannot_use_sensitive_assistant_endpoints(
 async def test_manual_session_validation_rules(build_api_app, fake_db) -> None:
     _seed_assistant(fake_db, 1910, "ValidationUser")
     async with await _client(build_api_app) as assistants_client:
+        # Manual without comment should now succeed (comment no longer required)
         manual_without_comment = await assistants_client.post(
             "/api/assistants/1910/session",
             json={
@@ -347,16 +347,17 @@ async def test_manual_session_validation_rules(build_api_app, fake_db) -> None:
                 "ended_at": "2026-02-14T11:00:00Z",
             },
         )
+        # Manual with target_id should still fail
         manual_with_target = await assistants_client.post(
             "/api/assistants/1910/session",
             json={
                 "target_type": "manual",
                 "target_id": 5001,
-                "session_admin_comment": "manual fix",
                 "started_at": "2026-02-14T10:00:00Z",
                 "ended_at": "2026-02-14T11:00:00Z",
             },
         )
+        # Streamer without target_id should still fail
         streamer_without_target = await assistants_client.post(
             "/api/assistants/1910/session",
             json={
@@ -367,6 +368,6 @@ async def test_manual_session_validation_rules(build_api_app, fake_db) -> None:
             },
         )
 
-    assert manual_without_comment.status_code in {400, 422}
+    assert manual_without_comment.status_code == 200
     assert manual_with_target.status_code in {400, 422}
     assert streamer_without_target.status_code in {400, 422}

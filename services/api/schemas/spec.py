@@ -5,9 +5,18 @@ Spec system schemas for API requests and responses.
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from schemas.common import Snowflake
+from schemas.enums import SpecSessionEndReason
+
+from datetime import timezone, timedelta
+MSK = timezone(timedelta(hours=3))
+
+def make_aware(v):
+    if isinstance(v, datetime) and v.tzinfo is None:
+        return v.replace(tzinfo=MSK)
+    return v
 
 
 class SpecClaimRequest(BaseModel):
@@ -23,20 +32,10 @@ class SpecUnclaimRequest(BaseModel):
     pr_id: Optional[Snowflake] = Field(
         None, description="Discrod user ID of assistant (optional)"
     )
-    reason: str = Field(default="manual", description="Reason for unclaiming")
+    reason: str = Field(default=SpecSessionEndReason.MANUAL_UNCLAIM.value, description="Reason for unclaiming")
 
 
-class SpecTransferRequest(BaseModel):
-    streamer_id: Snowflake
-    from_pr_id: Snowflake
-    to_pr_id: Snowflake
 
-
-class SpecSwapRequest(BaseModel):
-    """Request to swap streamers between two PRs."""
-
-    pr1_id: Snowflake = Field(..., description="First PR assistant ID")
-    pr2_id: Snowflake = Field(..., description="Second PR assistant ID")
 
 
 class SpecSessionResponse(BaseModel):
@@ -46,9 +45,18 @@ class SpecSessionResponse(BaseModel):
     started_at: datetime
     ended_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
-    end_reason: Optional[str] = None
+    end_reason: Optional[SpecSessionEndReason] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['started_at', 'ended_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
 
 
 class ActiveSpecResponse(BaseModel):
@@ -57,6 +65,15 @@ class ActiveSpecResponse(BaseModel):
     pr_id: Snowflake
     assigned_at: datetime
     duration_seconds: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['assigned_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
 
 
 # Broker event

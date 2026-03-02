@@ -3,8 +3,11 @@ Streamer schemas for API requests and responses.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+
+# Moscow timezone (UTC+3)
+MSK = timezone(timedelta(hours=3))
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -127,6 +130,13 @@ class StreamerResponse(BaseModel):
     added_at: datetime
     added_by_id: Optional[Snowflake] = None
     assignments: List[dict] = Field(default_factory=list)
+
+    @field_validator("started_at", "added_at", mode="before")
+    @classmethod
+    def make_aware(cls, v):
+        if isinstance(v, datetime) and v.tzinfo is None:
+            return v.replace(tzinfo=MSK)
+        return v
 
     model_config = ConfigDict(from_attributes=True)
 

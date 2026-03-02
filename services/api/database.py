@@ -102,7 +102,7 @@ class Database:
                 maxsize=10,
                 pool_recycle=3600,  # Recreate connections every hour to prevent stale connections
                 autocommit=True,  # Ensure commits are immediately visible
-                init_command="SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",  # Prevent stale reads
+                init_command="SET SESSION transaction_isolation='READ-COMMITTED', time_zone='+03:00'",  # Prevent stale reads & force MSK
             )
 
             elapsed = time.time() - start_time
@@ -310,7 +310,7 @@ class Database:
                     await cursor.execute(
                         """
                         UPDATE assistants
-                        SET appointed_at = COALESCE(appointed_at, added_at, UTC_TIMESTAMP())
+                        SET appointed_at = COALESCE(appointed_at, added_at, CURRENT_TIMESTAMP)
                         """
                     )
 
@@ -329,7 +329,7 @@ class Database:
                             
                             started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             ended_at TIMESTAMP NULL,
-                            end_reason VARCHAR(50),
+                            end_reason ENUM('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown') NULL,
                             
                             # Priority snapshot & override
                             priority_auto TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -433,124 +433,35 @@ class Database:
                     except Exception:
                         pass
 
-                    # Deterministic backfill for automatic points component:
-                    # - each session stores its factual credited_points;
-                    # - assistants.auto_points_total mirrors sum of credited sessions.
-                    await cursor.execute(
-                        """
-                        UPDATE spec_sessions
-                        SET credited_points = ROUND(
-                            CASE
-                                WHEN ended_at IS NULL OR deleted_at IS NOT NULL THEN 0
-                                ELSE (COALESCE(duration_seconds, 0) / 3600.0) * COALESCE(applied_hourly_rate, 0)
-                            END,
-                            4
+                    # Migration: Sanitize and alter end_reason to tight ENUM
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE spec_sessions
+                            SET end_reason = 'manual_unclaim'
+                            WHERE end_reason IN ('manual', 'swap', 'transfer', 'manual_assignment_clear')
+                            """
                         )
-                        """
-                    )
-                    await cursor.execute(
-                        """
-                        UPDATE assistants a
-                        LEFT JOIN (
-                            SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
-                            FROM spec_sessions
-                            GROUP BY pr_id
-                        ) s ON s.pr_id = a.pr_id
-                        SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
-                        """
-                    )
-
-                    # =========================================================
-                    # 5. Daily Stats Table
-                    # =========================================================
-                    # 5. Day-Slicing View (Recursive CTE)
-                    # =========================================================
-                    await cursor.execute(
-                        """
-                        CREATE OR REPLACE VIEW spec_session_day_slices AS
-                        WITH RECURSIVE day_slices AS (
-                            # Anchor: start of each completed, non-deleted session
-                            SELECT
-                                ss.id AS session_id,
-                                ss.pr_id,
-                                ss.target_type,
-                                ss.target_id,
-                                ss.is_probation,
-                                ss.applied_priority_level,
-                                ss.applied_hourly_rate,
-                                ss.started_at,
-                                ss.ended_at,
-                                # slice_start = started_at for the first day
-                                ss.started_at AS slice_start,
-                                # slice_end = midnight of the next day, or ended_at (whichever is earlier)
-                                LEAST(
-                                    DATE_ADD(DATE(ss.started_at), INTERVAL 1 DAY),
-                                    ss.ended_at
-                                ) AS slice_end
-                            FROM spec_sessions ss
-                            WHERE ss.ended_at IS NOT NULL
-                              AND ss.deleted_at IS NULL
-                            
-                            UNION ALL
-                            
-                            # Recursive: next day slices
-                            SELECT
-                                ds.session_id,
-                                ds.pr_id,
-                                ds.target_type,
-                                ds.target_id,
-                                ds.is_probation,
-                                ds.applied_priority_level,
-                                ds.applied_hourly_rate,
-                                ds.started_at,
-                                ds.ended_at,
-                                ds.slice_end AS slice_start,
-                                LEAST(
-                                    DATE_ADD(DATE(ds.slice_end), INTERVAL 1 DAY),
-                                    ds.ended_at
-                                ) AS slice_end
-                            FROM day_slices ds
-                            WHERE ds.slice_end < ds.ended_at
+                        await cursor.execute(
+                            """
+                            UPDATE spec_sessions
+                            SET end_reason = 'unknown'
+                            WHERE end_reason IS NOT NULL
+                              AND end_reason NOT IN ('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown')
+                            """
                         )
-                        SELECT
-                            session_id,
-                            pr_id,
-                            target_type,
-                            target_id,
-                            is_probation,
-                            applied_priority_level,
-                            applied_hourly_rate,
-                            DATE(slice_start) AS work_date,
-                            TIMESTAMPDIFF(SECOND, slice_start, slice_end) AS seconds_in_day,
-                            ROUND(
-                                (TIMESTAMPDIFF(SECOND, slice_start, slice_end) / 3600.0) * applied_hourly_rate,
-                                4
-                            ) AS points_in_day
-                        FROM day_slices
-                        """
-                    )
+                        await cursor.execute(
+                            """
+                            ALTER TABLE spec_sessions
+                            MODIFY COLUMN end_reason ENUM('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown') NULL
+                            """
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Error migrating end_reason to ENUM: {e}")
 
-                    # =========================================================
-                    # 6. Aggregated Daily Stats View
-                    # =========================================================
-                    await cursor.execute(
-                        """
-                        CREATE OR REPLACE VIEW daily_stats AS
-                        SELECT
-                            pr_id,
-                            work_date AS date,
-                            SUM(CASE WHEN applied_priority_level = 0 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p0_seconds,
-                            SUM(CASE WHEN applied_priority_level = 1 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p1_seconds,
-                            SUM(CASE WHEN applied_priority_level = 2 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p2_seconds,
-                            SUM(CASE WHEN applied_priority_level = 3 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p3_seconds,
-                            SUM(CASE WHEN is_probation THEN seconds_in_day ELSE 0 END) AS probation_seconds,
-                            SUM(points_in_day) AS total_points
-                        FROM spec_session_day_slices
-                        GROUP BY pr_id, work_date
-                        """
-                    )
 
-                    # =========================================================
+
+
                     # 6. Events Table
                     # =========================================================
                     await cursor.execute(
@@ -566,13 +477,31 @@ class Database:
                             required_pr_count INT DEFAULT 1,
                             priority INT DEFAULT 0,
                             pr_slots INT DEFAULT 1,
-                            
-                            channel_id BIGINT UNSIGNED,
-                            message_id BIGINT UNSIGNED,
-                            created_by BIGINT UNSIGNED
+                            created_by BIGINT UNSIGNED,
+                            event_kind ENUM('regular','spec_request') NOT NULL DEFAULT 'regular',
+                            approval_status ENUM('approved','pending','rejected') NOT NULL DEFAULT 'approved',
+                            requested_by BIGINT UNSIGNED NULL,
+                            approved_by BIGINT UNSIGNED NULL,
+                            approved_at TIMESTAMP NULL,
+                            rejected_by BIGINT UNSIGNED NULL,
+                            rejected_at TIMESTAMP NULL
                         )
                         """
                     )
+                    
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE events DROP COLUMN channel_id"
+                        )
+                    except Exception:
+                        pass
+                    
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE events DROP COLUMN message_id"
+                        )
+                    except Exception:
+                        pass
 
                     # Migration: Add columns if they don't exist
                     try:
@@ -595,6 +524,36 @@ class Database:
                         )
                     except Exception:
                         pass
+
+                    # Spec-request feature: new columns
+                    for stmt in [
+                        "ALTER TABLE events ADD COLUMN event_kind ENUM('regular','spec_request') NOT NULL DEFAULT 'regular'",
+                        "ALTER TABLE events ADD COLUMN approval_status ENUM('approved','pending','rejected') NOT NULL DEFAULT 'approved'",
+                        "ALTER TABLE events ADD COLUMN requested_by BIGINT UNSIGNED NULL",
+                        "ALTER TABLE events ADD COLUMN approved_by BIGINT UNSIGNED NULL",
+                        "ALTER TABLE events ADD COLUMN approved_at TIMESTAMP NULL",
+                        "ALTER TABLE events ADD COLUMN rejected_by BIGINT UNSIGNED NULL",
+                        "ALTER TABLE events ADD COLUMN rejected_at TIMESTAMP NULL",
+                    ]:
+                        try:
+                            await cursor.execute(stmt)
+                        except Exception:
+                            pass
+
+                    # =========================================================
+                    # 6.5. Event Participants Table (Deferred spec_sessions)
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS event_participants (
+                            event_id INT UNSIGNED NOT NULL,
+                            pr_id BIGINT UNSIGNED NOT NULL,
+                            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (event_id, pr_id),
+                            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+                        )
+                        """
+                    )
 
                     # =========================================================
                     # 7. Web Auth Table (ex Users)
@@ -799,12 +758,138 @@ class Database:
                         "ALTER TABLE spec_sessions ADD INDEX idx_target_active (target_type, target_id, ended_at, deleted_at)",
                         "ALTER TABLE spec_sessions ADD INDEX idx_pr_active (pr_id, ended_at, deleted_at)",
                         "ALTER TABLE events ADD INDEX idx_events_active_order (is_active, is_pinned, priority, start_time)",
+                        "ALTER TABLE events ADD INDEX idx_events_kind_status_active (event_kind, approval_status, is_active)",
+                        "ALTER TABLE events ADD INDEX idx_events_requested_by_active (requested_by, is_active)",
                         "ALTER TABLE streamers ADD INDEX idx_streamers_online_order (is_online, is_pinned, priority, streamer_name)",
                     ]:
                         try:
                             await cursor.execute(statement)
                         except Exception:
                             pass
+
+                    # =========================================================
+                    # Deterministic backfill for automatic points component
+                    # (must run AFTER events table + migrations exist)
+                    # =========================================================
+                    # - each session stores its factual credited_points;
+                    # - assistants.auto_points_total mirrors sum of credited sessions.
+                    # Note: must account for spec_request events that are not yet approved.
+                    await cursor.execute(
+                        """
+                        UPDATE spec_sessions ss
+                        LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
+                        SET ss.credited_points = ROUND(
+                            CASE
+                                WHEN ss.ended_at IS NULL OR ss.deleted_at IS NOT NULL THEN 0
+                                WHEN e.event_kind = 'spec_request' AND e.approval_status != 'approved' THEN 0
+                                ELSE (COALESCE(ss.duration_seconds, 0) / 3600.0) * COALESCE(ss.applied_hourly_rate, 0)
+                            END,
+                            4
+                        )
+                        """
+                    )
+                    await cursor.execute(
+                        """
+                        UPDATE assistants a
+                        LEFT JOIN (
+                            SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
+                            FROM spec_sessions
+                            WHERE deleted_at IS NULL
+                            GROUP BY pr_id
+                        ) s ON s.pr_id = a.pr_id
+                        SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
+                        """
+                    )
+
+                    # =========================================================
+                    # VIEWS (Requires multiple tables)
+                    # =========================================================
+                    # Day-Slicing View (Recursive CTE)
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW spec_session_day_slices AS
+                        WITH RECURSIVE day_slices AS (
+                            # Anchor: start of each completed, non-deleted session
+                            SELECT
+                                ss.id AS session_id,
+                                ss.pr_id,
+                                ss.target_type,
+                                ss.target_id,
+                                ss.is_probation,
+                                ss.applied_priority_level,
+                                ss.applied_hourly_rate,
+                                ss.started_at,
+                                ss.ended_at,
+                                # slice_start = started_at for the first day
+                                ss.started_at AS slice_start,
+                                # slice_end = midnight of the next day, or ended_at (whichever is earlier)
+                                LEAST(
+                                    DATE_ADD(DATE(ss.started_at), INTERVAL 1 DAY),
+                                    ss.ended_at
+                                ) AS slice_end
+                            FROM spec_sessions ss
+                            LEFT JOIN events e
+                              ON ss.target_type = 'event' AND e.id = ss.target_id
+                            WHERE ss.ended_at IS NOT NULL
+                              AND ss.deleted_at IS NULL
+                              AND (ss.target_type <> 'event' OR e.approval_status = 'approved')
+                            
+                            UNION ALL
+                            
+                            # Recursive: next day slices
+                            SELECT
+                                ds.session_id,
+                                ds.pr_id,
+                                ds.target_type,
+                                ds.target_id,
+                                ds.is_probation,
+                                ds.applied_priority_level,
+                                ds.applied_hourly_rate,
+                                ds.started_at,
+                                ds.ended_at,
+                                ds.slice_end AS slice_start,
+                                LEAST(
+                                    DATE_ADD(DATE(ds.slice_end), INTERVAL 1 DAY),
+                                    ds.ended_at
+                                ) AS slice_end
+                            FROM day_slices ds
+                            WHERE ds.slice_end < ds.ended_at
+                        )
+                        SELECT
+                            session_id,
+                            pr_id,
+                            target_type,
+                            target_id,
+                            is_probation,
+                            applied_priority_level,
+                            applied_hourly_rate,
+                            DATE(slice_start) AS work_date,
+                            TIMESTAMPDIFF(SECOND, slice_start, slice_end) AS seconds_in_day,
+                            ROUND(
+                                (TIMESTAMPDIFF(SECOND, slice_start, slice_end) / 3600.0) * applied_hourly_rate,
+                                4
+                            ) AS points_in_day
+                        FROM day_slices
+                        """
+                    )
+
+                    # Aggregated Daily Stats View
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW daily_stats AS
+                        SELECT
+                            pr_id,
+                            work_date AS date,
+                            SUM(CASE WHEN applied_priority_level = 0 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p0_seconds,
+                            SUM(CASE WHEN applied_priority_level = 1 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p1_seconds,
+                            SUM(CASE WHEN applied_priority_level = 2 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p2_seconds,
+                            SUM(CASE WHEN applied_priority_level = 3 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p3_seconds,
+                            SUM(CASE WHEN is_probation THEN seconds_in_day ELSE 0 END) AS probation_seconds,
+                            SUM(points_in_day) AS total_points
+                        FROM spec_session_day_slices
+                        GROUP BY pr_id, work_date
+                        """
+                    )
 
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
@@ -889,15 +974,13 @@ class Database:
             await cursor.execute("SELECT COUNT(*) as count FROM settings")
 
             result = await cursor.fetchone()
-            row_count = result["count"]
+            row_count = int(result["count"])
 
             if row_count == 0:
                 self.logger.debug(
                     "  ℹ No settings row found, will be created on first update"
                 )
-            elif row_count == 1:
-                self.logger.debug("  ✓ Settings table has exactly 1 row")
-            else:
+            elif row_count > 1 :
                 self.logger.warning(
                     f"  ⚠ Settings table has {row_count} rows, cleaning up to keep only 1..."
                 )
@@ -1306,7 +1389,7 @@ class Database:
                             allow_juniors, added_at, added_by_id, stream_game_id, stream_game_name, stream_title, 
                             stream_thumbnail_url, profile_image_url
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s) AS new_data
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s) AS new_data
                         ON DUPLICATE KEY UPDATE 
                             streamer_name = new_data.streamer_name,
                             is_online = new_data.is_online,
@@ -1579,6 +1662,12 @@ class Database:
                             set_parts.append("profile_image_url = %s")
                             params.append(update["profile_image_url"])
 
+                        # Reset overrides when streamer goes offline (same as update_streamer_status)
+                        if not update.get("is_online", False):
+                            set_parts.append("is_pinned = FALSE")
+                            set_parts.append("priority_override = NULL")
+                            set_parts.append("pr_slots_override = NULL")
+
                         params.append(streamer_id)
 
                         query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
@@ -1731,6 +1820,118 @@ class Database:
         except Exception as e:
             self.logger.error(
                 f"Failed retroactive update for streamer {streamer_id}: {e}",
+                exc_info=True,
+            )
+            return 0
+
+    @db_retry()
+    async def recalc_target_active_sessions(
+        self,
+        target_type: str,
+        target_id: int,
+    ) -> int:
+        """Recalculate priority_auto, rate_auto, priority_override, rate_override
+        for ALL active sessions on a given target (streamer or event).
+
+        Reads the current priority state from the target entity (streamers or events),
+        calculates the matching rates from settings, and updates all non-probation
+        active sessions.
+
+        Returns number of sessions updated.
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # 1. Read the current priority state of the target
+                    if target_type == "streamer":
+                        await cursor.execute(
+                            "SELECT priority, priority_override FROM streamers WHERE streamer_id = %s",
+                            (target_id,),
+                        )
+                    elif target_type == "event":
+                        await cursor.execute(
+                            "SELECT priority, NULL AS priority_override FROM events WHERE id = %s",
+                            (target_id,),
+                        )
+                    else:
+                        return 0
+
+                    target_row = await cursor.fetchone()
+                    if not target_row:
+                        return 0
+
+                    new_priority_auto = int(target_row.get("priority") or 0)
+                    new_priority_override = target_row.get("priority_override")
+
+                    # 2. Find all active sessions on this target
+                    await cursor.execute(
+                        """
+                        SELECT id, is_probation
+                        FROM spec_sessions
+                        WHERE target_type = %s
+                          AND target_id = %s
+                          AND ended_at IS NULL
+                          AND deleted_at IS NULL
+                        """,
+                        (target_type, target_id),
+                    )
+                    active_sessions = await cursor.fetchall()
+
+                    if not active_sessions:
+                        return 0
+
+                    # 3. Read rates from settings
+                    config = await self.get_points_config()
+                    probation_rate = await self._get_probation_rate()
+
+                    new_rate_auto = config.get(new_priority_auto, 0.5)
+
+                    updated = 0
+                    for session in active_sessions:
+                        if session.get("is_probation"):
+                            # Probation sessions keep their own rate
+                            continue
+
+                        if new_priority_override is not None:
+                            new_rate_override = config.get(int(new_priority_override), 0.5)
+                            await cursor.execute(
+                                """
+                                UPDATE spec_sessions
+                                SET priority_auto = %s, rate_auto = %s,
+                                    priority_override = %s, rate_override = %s
+                                WHERE id = %s
+                                """,
+                                (
+                                    new_priority_auto,
+                                    new_rate_auto,
+                                    int(new_priority_override),
+                                    new_rate_override,
+                                    session["id"],
+                                ),
+                            )
+                        else:
+                            await cursor.execute(
+                                """
+                                UPDATE spec_sessions
+                                SET priority_auto = %s, rate_auto = %s,
+                                    priority_override = NULL, rate_override = NULL
+                                WHERE id = %s
+                                """,
+                                (new_priority_auto, new_rate_auto, session["id"]),
+                            )
+                        updated += 1
+
+                    await conn.commit()
+
+                    self.logger.info(
+                        f"Recalc target sessions: {updated} sessions on "
+                        f"{target_type}:{target_id} updated "
+                        f"(priority_auto={new_priority_auto}, priority_override={new_priority_override})"
+                    )
+                    return updated
+        except Exception as e:
+            self.logger.error(
+                f"Failed recalc_target_active_sessions for {target_type}:{target_id}: {e}",
                 exc_info=True,
             )
             return 0
@@ -2147,12 +2348,20 @@ class Database:
         }
 
     @staticmethod
-    def _normalize_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    def _normalize_msk_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        """Normalize any datetime to naive MSK for MySQL."""
         if value is None:
             return None
+        
+        # Moscow timezone
+        MSK = timezone(timedelta(hours=3))
+        
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            # Assume it's already MSK (as our DB stores naive MSK)
+            return value
+            
+        # If it has a timezone (e.g. UTC from Twitch), convert to MSK then strip tzinfo
+        return value.astimezone(MSK).replace(tzinfo=None)
 
     def _compute_session_points(self, session_row: Dict[str, Any]) -> float:
         """Compute deterministic points contribution for a single session row."""
@@ -2162,6 +2371,11 @@ class Database:
             return 0.0
         if session_row.get("deleted_at") is not None:
             return 0.0
+            
+        # Spec requests only yield points if they are approved
+        if session_row.get("event_kind") == "spec_request" and session_row.get("approval_status") != "approved":
+            return 0.0
+            
         duration_seconds = float(session_row.get("duration_seconds") or 0.0)
         applied_rate = float(session_row.get("applied_hourly_rate") or 0.0)
         return self._round_points((duration_seconds / 3600.0) * applied_rate)
@@ -2177,10 +2391,13 @@ class Database:
         async with conn.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(
                 f"""
-                SELECT id, pr_id, ended_at, deleted_at, duration_seconds,
-                       applied_hourly_rate, credited_points
-                FROM spec_sessions
-                WHERE id = %s
+                SELECT ss.id, ss.pr_id, ss.ended_at, ss.deleted_at, ss.duration_seconds,
+                       ss.applied_hourly_rate, ss.credited_points,
+                       ss.target_type, ss.target_id,
+                       e.event_kind, e.approval_status
+                FROM spec_sessions ss
+                LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
+                WHERE ss.id = %s
                 {lock_sql}
                 """,
                 (session_id,),
@@ -2283,12 +2500,12 @@ class Database:
                     if not is_probation:
                         # Main slot: enforce pr_slots limit
                         await cursor.execute(
-                            "SELECT pr_slots, priority, priority_override FROM streamers WHERE streamer_id = %s",
+                            "SELECT pr_slots, pr_slots_override, priority, priority_override FROM streamers WHERE streamer_id = %s",
                             (streamer_id,),
                         )
                         streamer_row = await cursor.fetchone()
                         pr_slots = (
-                            streamer_row.get("pr_slots", 1) if streamer_row else 1
+                            streamer_row.get("pr_slots_override") or streamer_row.get("pr_slots", 1) if streamer_row else 1
                         )
                         streamer_priority = (
                             streamer_row.get("priority", 0) if streamer_row else 0
@@ -2351,7 +2568,7 @@ class Database:
                             INSERT INTO spec_sessions 
                                 (pr_id, target_type, target_id, is_probation, started_at,
                                  priority_auto, rate_auto, priority_override, rate_override)
-                            VALUES (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s)
+                            VALUES (%s, 'streamer', %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s)
                             """,
                             (
                                 pr_id,
@@ -2388,7 +2605,7 @@ class Database:
         self,
         streamer_id: int,
         pr_id: Optional[int] = None,
-        end_reason: str = "unknown",
+        end_reason: str = "manual_unclaim",
     ) -> List[Dict[str, Any]]:
         """
         Снятие PR-ассистента(ов) со стримера.
@@ -2451,7 +2668,7 @@ class Database:
                             UPDATE spec_sessions 
                             SET ended_at = GREATEST(
                                     DATE_ADD(started_at, INTERVAL 1 SECOND),
-                                    UTC_TIMESTAMP()
+                                    CURRENT_TIMESTAMP
                                 ),
                                 end_reason = %s
                             WHERE id IN ({format_strings})
@@ -2492,166 +2709,7 @@ class Database:
             )
             raise
 
-    @db_retry()
-    async def swap_pr_streamers(self, pr1_id: int, pr2_id: int) -> Dict[str, Any]:
-        """
-        Atomically swap claimed streamers between two PRs.
 
-        Args:
-            pr1_id: Discord ID of first assistant
-            pr2_id: Discord ID of second assistant
-
-        Returns:
-            Dict with swap details
-
-        Raises:
-            ValueError: If either PR has no claimed streamer
-        """
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Get PR1's current active session
-                    await cursor.execute(
-                        """
-                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, s.priority_override, ss.is_probation
-                        FROM spec_sessions ss
-                        JOIN streamers s ON s.streamer_id = ss.target_id
-                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
-                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        """,
-                        (pr1_id,),
-                    )
-                    pr1_assignment = await cursor.fetchone()
-
-                    if not pr1_assignment:
-                        raise ValueError(f"PR {pr1_id} has no claimed streamer")
-
-                    # Get PR2's current active session
-                    await cursor.execute(
-                        """
-                        SELECT ss.target_id as streamer_id, s.streamer_name, s.priority, s.priority_override, ss.is_probation
-                        FROM spec_sessions ss
-                        JOIN streamers s ON s.streamer_id = ss.target_id
-                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
-                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        """,
-                        (pr2_id,),
-                    )
-                    pr2_assignment = await cursor.fetchone()
-
-                    if not pr2_assignment:
-                        raise ValueError(f"PR {pr2_id} has no claimed streamer")
-
-                    streamer1_id = pr1_assignment["streamer_id"]
-                    streamer2_id = pr2_assignment["streamer_id"]
-
-                    await cursor.execute(
-                        """
-                        SELECT id
-                        FROM spec_sessions
-                        WHERE pr_id IN (%s, %s)
-                          AND ended_at IS NULL
-                          AND deleted_at IS NULL
-                        FOR UPDATE
-                        """,
-                        (pr1_id, pr2_id),
-                    )
-                    rows_to_close = await cursor.fetchall()
-                    close_session_ids = [int(row["id"]) for row in rows_to_close]
-
-                    # Close existing spec sessions for both PRs (with reason 'swap')
-                    await cursor.execute(
-                        """
-                        UPDATE spec_sessions 
-                        SET ended_at = GREATEST(
-                                DATE_ADD(started_at, INTERVAL 1 SECOND),
-                                UTC_TIMESTAMP()
-                            ),
-                            end_reason = 'swap'
-                        WHERE pr_id IN (%s, %s) AND ended_at IS NULL AND deleted_at IS NULL
-                        """,
-                        (pr1_id, pr2_id),
-                    )
-
-                    if close_session_ids:
-                        await self._recalc_points_for_sessions(
-                            conn, close_session_ids, lock=False
-                        )
-
-                    # Snapshot rates for new sessions
-                    config = await self.get_points_config()
-
-                    # PR1 gets streamer2
-                    pr1_probation = pr1_assignment.get("is_probation", False)
-                    s2_priority = pr2_assignment.get("priority", 0)
-                    s2_priority_override = pr2_assignment.get("priority_override")
-                    if pr1_probation:
-                        rate1 = await self._get_probation_rate()
-                        s2_po = None
-                        s2_ro = None
-                    else:
-                        rate1 = config.get(s2_priority, 0.5)
-                        s2_po = s2_priority_override
-                        s2_ro = config.get(s2_priority_override, 0.5) if s2_priority_override is not None else None
-
-                    # PR2 gets streamer1
-                    pr2_probation = pr2_assignment.get("is_probation", False)
-                    s1_priority = pr1_assignment.get("priority", 0)
-                    s1_priority_override = pr1_assignment.get("priority_override")
-                    if pr2_probation:
-                        rate2 = await self._get_probation_rate()
-                        s1_po = None
-                        s1_ro = None
-                    else:
-                        rate2 = config.get(s1_priority, 0.5)
-                        s1_po = s1_priority_override
-                        s1_ro = config.get(s1_priority_override, 0.5) if s1_priority_override is not None else None
-
-                    # Create new spec sessions with snapshots
-                    await cursor.execute(
-                        """
-                        INSERT INTO spec_sessions 
-                            (pr_id, target_type, target_id, is_probation, started_at,
-                             priority_auto, rate_auto, priority_override, rate_override)
-                        VALUES 
-                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s), 
-                            (%s, 'streamer', %s, %s, UTC_TIMESTAMP(), %s, %s, %s, %s)
-                        """,
-                        (
-                            pr1_id,
-                            streamer2_id,
-                            pr1_probation,
-                            s2_priority,
-                            rate1,
-                            s2_po,
-                            s2_ro,
-                            pr2_id,
-                            streamer1_id,
-                            pr2_probation,
-                            s1_priority,
-                            rate2,
-                            s1_po,
-                            s1_ro,
-                        ),
-                    )
-
-                    await conn.commit()
-
-                    self.logger.info(
-                        f"✓ Swapped: PR {pr1_id} ({pr1_assignment['streamer_name']}) <-> PR {pr2_id} ({pr2_assignment['streamer_name']})"
-                    )
-
-                    return {
-                        "pr1_id": pr1_id,
-                        "pr2_id": pr2_id,
-                        "pr1_new_streamer": pr2_assignment,
-                        "pr2_new_streamer": pr1_assignment,
-                    }
-        except ValueError:
-            raise
-        except Exception as e:
-            self.logger.error(f"Failed to swap PR streamers: {e}", exc_info=True)
-            raise
 
     @db_retry()
     async def get_active_sessions(self) -> List[Dict[str, Any]]:
@@ -2704,38 +2762,80 @@ class Database:
     @db_retry()
     async def get_pr_current_streamer(self, pr_id: int) -> Optional[Dict[str, Any]]:
         """
-        Получение стримера, которому назначен ассистент.
+        Получение текущей сессии (стримера или события), назначенной PR-ассистенту.
 
         Args:
             pr_id: Discord ID ассистента
 
         Returns:
-            Словарь с данными стримера или None
+            Словарь с данными стримера/события или None
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url, s.stream_game_id, s.stream_game_name, s.stream_started_at, s.priority, s.added_at, s.added_by_id, s.updated_at, ss.started_at as assigned_at
+                        SELECT 
+                            ss.target_type,
+                            ss.target_id,
+                            ss.started_at as assigned_at,
+                            s.streamer_id, 
+                            s.streamer_name, 
+                            s.is_online, 
+                            s.stream_title, 
+                            s.stream_thumbnail_url, 
+                            s.stream_game_id, 
+                            s.stream_game_name, 
+                            s.stream_started_at, 
+                            s.priority, 
+                            s.added_at, 
+                            s.added_by_id, 
+                            s.updated_at,
+                            e.id as event_id,
+                            e.name as event_name,
+                            e.is_active as event_is_active
                         FROM spec_sessions ss
-                        JOIN streamers s ON s.streamer_id = ss.target_id
-                        WHERE ss.pr_id = %s AND ss.target_type = 'streamer'
+                        LEFT JOIN streamers s ON s.streamer_id = ss.target_id AND ss.target_type = 'streamer'
+                        LEFT JOIN events e ON e.id = ss.target_id AND ss.target_type = 'event'
+                        WHERE ss.pr_id = %s 
+                          AND (ss.target_type = 'streamer' OR ss.target_type = 'event')
                           AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
                         """,
                         (pr_id,),
                     )
                     result = await cursor.fetchone()
                     if result:
-                        result["streamer_id"] = str(result["streamer_id"])
-                        if result.get("added_by_id"):
-                            result["added_by_id"] = str(result["added_by_id"])
-                        if result.get("stream_game_id"):
-                            result["stream_game_id"] = str(result["stream_game_id"])
-                    return result
+                        if result["target_type"] == "streamer" and result.get("streamer_id"):
+                            result["streamer_id"] = str(result["streamer_id"])
+                            if result.get("added_by_id"):
+                                result["added_by_id"] = str(result["added_by_id"])
+                            if result.get("stream_game_id"):
+                                result["stream_game_id"] = str(result["stream_game_id"])
+                        elif result["target_type"] == "event" and result.get("event_id"):
+                            # Data stays as is, let Python handle integers
+                            pass
+                        return result
+
+                    # If not currently active in a session, check if they reserved a slot for a future event
+                    await cursor.execute(
+                        """
+                        SELECT
+                            'event' as target_type,
+                            e.id as target_id,
+                            ep.joined_at as assigned_at,
+                            e.id as event_id,
+                            e.name as event_name,
+                            e.is_active as event_is_active
+                        FROM event_participants ep
+                        JOIN events e ON e.id = ep.event_id
+                        WHERE ep.pr_id = %s
+                        """,
+                        (pr_id,)
+                    )
+                    return await cursor.fetchone()
         except Exception as e:
             self.logger.error(
-                f"Failed to get current streamer for PR {pr_id}: {e}",
+                f"Failed to get current session for PR {pr_id}: {e}",
                 exc_info=True,
             )
             raise
@@ -2841,8 +2941,6 @@ class Database:
         self,
         name: str,
         description: str,
-        channel_id: int,
-        message_id: int,
         created_by: int,
         start_time=None,
         required_pr_count=1,
@@ -2857,27 +2955,25 @@ class Database:
                 if isinstance(start_time, str):
                     start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                 if start_time.tzinfo is None:
-                    start_time = start_time.replace(tzinfo=timezone.utc)
-                if start_time < datetime.now(timezone.utc):
+                    start_time = start_time.replace(tzinfo=timezone(timedelta(hours=3)))
+                if start_time < datetime.now(timezone(timedelta(hours=3))):
                     raise ValueError("Время начала события не может быть в прошлом")
             else:
-                start_time = datetime.now(timezone.utc)
+                start_time = datetime.now(timezone(timedelta(hours=3)))
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
                         INSERT INTO events (
-                            name, description, channel_id, message_id,
+                            name, description,
                             required_pr_count, created_by, start_time, notification_sent,
                             pr_slots, priority
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             name,
                             description,
-                            channel_id,
-                            message_id,
                             required_pr_count,
                             created_by,
                             start_time,
@@ -2900,9 +2996,9 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT id, name, description, created_at, start_time, is_active,
-                               channel_id, message_id, created_by, notification_sent,
-                               required_pr_count, priority, pr_slots, is_pinned
+                        SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent,
+                               required_pr_count, priority, pr_slots, is_pinned,
+                               event_kind, approval_status, requested_by, approved_by, approved_at, rejected_by, rejected_at
                         FROM events
                         ORDER BY is_active DESC, is_pinned DESC, created_at DESC
                         """
@@ -2939,16 +3035,20 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events 
+                        SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent,
+                               required_pr_count, priority, pr_slots, is_pinned,
+                               event_kind, approval_status, requested_by, approved_by, approved_at, rejected_by, rejected_at
+                        FROM events
                         WHERE is_active = TRUE
                         ORDER BY is_pinned DESC, priority DESC, start_time ASC
                         """
                     )
                     events = await cursor.fetchall()
                     for event in events:
+                        # Active participants (spec started)
                         await cursor.execute(
                             """
-                            SELECT ss.pr_id, a.nickname
+                            SELECT ss.pr_id, a.nickname, 'active' as status
                             FROM spec_sessions ss
                             LEFT JOIN assistants a ON a.pr_id = ss.pr_id
                             WHERE ss.target_type = 'event' AND ss.target_id = %s
@@ -2956,11 +3056,25 @@ class Database:
                             """,
                             (event["id"],),
                         )
-                        participants = await cursor.fetchall()
-                        event["current_participants"] = len(participants)
+                        active_participants = await cursor.fetchall() or []
+
+                        # Reserved participants (waiting for event start)
+                        await cursor.execute(
+                            """
+                            SELECT ep.pr_id, a.nickname, 'reserved' as status
+                            FROM event_participants ep
+                            LEFT JOIN assistants a ON a.pr_id = ep.pr_id
+                            WHERE ep.event_id = %s
+                            """,
+                            (event["id"],),
+                        )
+                        reserved_participants = await cursor.fetchall() or []
+
+                        all_participants = list(active_participants) + list(reserved_participants)
+                        event["current_participants"] = len(all_participants)
                         event["participants"] = [
-                            {"pr_id": str(p["pr_id"]), "nickname": p.get("nickname")}
-                            for p in participants
+                            {"pr_id": str(p["pr_id"]), "nickname": p.get("nickname"), "status": p.get("status", "active")}
+                            for p in all_participants
                         ]
 
                     return events
@@ -2975,7 +3089,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT id, name, description, created_at, start_time, is_active, channel_id, message_id, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events WHERE id = %s",
+                        "SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events WHERE id = %s",
                         (event_id,),
                     )
                     return await cursor.fetchone()
@@ -2987,9 +3101,11 @@ class Database:
     async def end_event(self, event_id: int) -> list:
         """Завершение события и возврат списка участников с длительностью участия."""
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(timezone(timedelta(hours=3)))
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"Attempting to end event {event_id}.")
+
                     await cursor.execute(
                         """
                         SELECT id, pr_id, started_at
@@ -3000,16 +3116,18 @@ class Database:
                         (event_id,),
                     )
                     participants = await cursor.fetchall()
+                    self.logger.debug(f"Found {len(participants)} active participants for event {event_id}.")
 
                     await cursor.execute(
                         "SELECT start_time FROM events WHERE id = %s", (event_id,)
                     )
                     event_data = await cursor.fetchone()
                     if not event_data:
+                        self.logger.warning(f"Event {event_id} not found during end_event operation.")
                         return []
 
                     event_start_time = (
-                        event_data["start_time"].replace(tzinfo=timezone.utc)
+                        event_data["start_time"].replace(tzinfo=timezone(timedelta(hours=3)))
                         if event_data["start_time"]
                         else now
                     )
@@ -3022,32 +3140,35 @@ class Database:
                         """,
                         (event_id,),
                     )
+                    self.logger.debug(f"Event {event_id} marked as inactive.")
 
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
                         SET ended_at = GREATEST(
                                 DATE_ADD(started_at, INTERVAL 1 SECOND),
-                                UTC_TIMESTAMP()
+                                CURRENT_TIMESTAMP
                             ),
                             end_reason = 'event_end'
                         WHERE target_type = 'event' AND target_id = %s AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (event_id,),
                     )
+                    self.logger.debug(f"Closed active spec sessions for event {event_id}.")
 
                     session_ids = [int(p["id"]) for p in participants]
                     if session_ids:
                         await self._recalc_points_for_sessions(
                             conn, session_ids, lock=False
                         )
+                        self.logger.debug(f"Recalculated points for sessions: {session_ids}.")
 
                     results = []
                     for p in participants:
                         user_id = p["pr_id"]
                         started_at = p["started_at"]
                         if started_at.tzinfo is None:
-                            started_at = started_at.replace(tzinfo=timezone.utc)
+                            started_at = started_at.replace(tzinfo=timezone(timedelta(hours=3)))
 
                         effective_start = max(started_at, event_start_time)
 
@@ -3057,8 +3178,12 @@ class Database:
 
                         results.append({"user_id": user_id, "duration": duration})
 
-                    await conn.commit()
-                    return results
+                await conn.commit()
+                self.logger.debug(
+                    f"Event {event_id} ended. Processed {len(results)} participant sessions. "
+                    f"Participant results: {results}"
+                )
+                return results
         except Exception as e:
             self.logger.error(f"Failed to end event {event_id}: {e}", exc_info=True)
             return []
@@ -3114,7 +3239,7 @@ class Database:
         ended_at: datetime,
         is_probation: bool = False,
         priority: int = 0,
-        session_admin_comment: Optional[str] = None,
+        target_name: Optional[str] = None,
     ) -> bool:
         """
         Создание ручной записи сессии спека (для админских корректировок).
@@ -3127,8 +3252,8 @@ class Database:
                 )
                 return False
 
-            start_time = self._normalize_utc_datetime(started_at)
-            end_time = self._normalize_utc_datetime(ended_at)
+            start_time = self._normalize_msk_datetime(started_at)
+            end_time = self._normalize_msk_datetime(ended_at)
             if start_time is None or end_time is None or end_time <= start_time:
                 self.logger.warning(
                     "Invalid manual session window for PR=%s: start=%s end=%s",
@@ -3140,12 +3265,6 @@ class Database:
 
             if target_type == "manual":
                 target_id_value: Optional[int] = None
-                if not (session_admin_comment or "").strip():
-                    self.logger.warning(
-                        "Manual session requires non-empty session_admin_comment (PR=%s)",
-                        pr_id,
-                    )
-                    return False
             else:
                 if target_id is None:
                     self.logger.warning(
@@ -3175,20 +3294,20 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO spec_sessions 
-                        (pr_id, target_type, target_id, started_at, ended_at, end_reason, 
-                         is_probation, priority_auto, rate_auto, session_admin_comment)
-                        VALUES (%s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s, %s)
+                        (pr_id, target_type, target_id, target_name, started_at, ended_at, end_reason, 
+                         is_probation, priority_auto, rate_auto)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s)
                         """,
                         (
                             pr_id,
                             target_type,
                             target_id_value,
+                            target_name,
                             start_time,
                             end_time,
                             is_probation,
                             safe_priority,
                             rate_auto,
-                            session_admin_comment,
                         ),
                     )
                     session_id = cursor.lastrowid
@@ -3265,7 +3384,10 @@ class Database:
                         (priority, streamer_id),
                     )
                     await conn.commit()
-                    return True
+
+            # Propagate new priority to active sessions
+            await self.recalc_target_active_sessions("streamer", streamer_id)
+            return True
         except Exception as e:
             self.logger.error(f"Failed to update streamer {streamer_id}: {e}")
             return False
@@ -3284,11 +3406,13 @@ class Database:
             return 1.2
 
     @db_retry()
-    async def join_event(self, event_id: int, user_id: int) -> bool:
+    async def join_event(self, event_id: int, user_id: int) -> Optional[Dict[str, Any]]:
         """Добавление пользователя в событие с проверкой лимита слотов."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"User {user_id} attempting to join event {event_id}.")
+
                     # Check if already has active session
                     await cursor.execute(
                         """
@@ -3299,20 +3423,39 @@ class Database:
                     )
                     active = await cursor.fetchone()
                     if active:
-                        return False  # Busy
+                        self.logger.debug(f"User {user_id} already has active session {active['id']}.")
+                        return {"status": "error", "detail": "Already in an active session"}
 
-                    # Capacity check: count current participants vs pr_slots
+                    # Also check if already reserved for THIS event
                     await cursor.execute(
-                        "SELECT pr_slots, priority FROM events WHERE id = %s AND is_active = TRUE",
+                        "SELECT pr_id FROM event_participants WHERE event_id = %s AND pr_id = %s",
+                        (event_id, user_id)
+                    )
+                    if await cursor.fetchone():
+                        self.logger.debug(f"User {user_id} already reserved for event {event_id}.")
+                        return {"status": "error", "detail": "Already reserved for this event"}
+
+                    # Capacity check: count current participants (active + reserved) vs pr_slots
+                    await cursor.execute(
+                        "SELECT name, pr_slots, priority, start_time, event_kind, requested_by FROM events WHERE id = %s AND is_active = TRUE",
                         (event_id,),
                     )
                     event = await cursor.fetchone()
                     if not event:
-                        return False  # Event not found or inactive
+                        self.logger.debug(f"Event {event_id} not found or inactive for user {user_id}.")
+                        return {"status": "error", "detail": "Event not found or inactive"}
 
+                    # Block non-creators from joining spec_request events
+                    if event.get("event_kind") == "spec_request" and event.get("requested_by") != user_id:
+                        self.logger.debug(f"User {user_id} tried to join spec_request {event_id} but is not the creator.")
+                        return {"status": "error", "detail": "Cannot join another user's spec request"}
+
+                    event_name = event.get("name", f"Событие #{event_id}")
                     pr_slots = event.get("pr_slots", 1)
                     event_priority = event.get("priority", 0)
-
+                    start_time = event.get("start_time")
+                    
+                    # Count active
                     await cursor.execute(
                         """
                         SELECT COUNT(*) as cnt FROM spec_sessions
@@ -3321,11 +3464,21 @@ class Database:
                         """,
                         (event_id,),
                     )
-                    count_row = await cursor.fetchone()
-                    current_count = count_row["cnt"] if count_row else 0
+                    count_active_row = await cursor.fetchone()
+                    active_count = count_active_row["cnt"] if count_active_row else 0
+                    
+                    # Count reserved
+                    await cursor.execute(
+                        "SELECT COUNT(*) as cnt FROM event_participants WHERE event_id = %s",
+                        (event_id,)
+                    )
+                    count_reserved_row = await cursor.fetchone()
+                    reserved_count = count_reserved_row["cnt"] if count_reserved_row else 0
 
-                    if current_count >= pr_slots:
-                        return False  # Full
+                    self.logger.debug(f"Event {event_id} slots: {active_count} active, {reserved_count} reserved, {pr_slots} total.")
+                    if (active_count + reserved_count) >= pr_slots:
+                        self.logger.debug(f"Event {event_id} has no available slots for user {user_id}.")
+                        return {"status": "error", "detail": "No slots available"}
 
                     # Snapshot rate from config
                     config = await self.get_points_config()
@@ -3337,33 +3490,62 @@ class Database:
                         (user_id,),
                     )
 
-                    # Create spec session with snapshot
-                    try:
+                    # Determine if we insert into spec_sessions or event_participants
+                    now = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None) # Start time in DB is naiive UTC
+                    if not start_time or start_time <= now:
+                        # Event has started - join directly
+                        try:
+                            await cursor.execute(
+                                """
+                                INSERT INTO spec_sessions 
+                                    (pr_id, target_type, target_id, target_name, started_at, priority_auto, rate_auto)
+                                VALUES (%s, 'event', %s, %s, CURRENT_TIMESTAMP, %s, %s)
+                                """,
+                                (user_id, event_id, event_name, event_priority, rate_auto),
+                            )
+                            await conn.commit()
+                            self.logger.debug(
+                                f"User {user_id} joined active event {event_id} ('{event_name}'). "
+                                f"State AFTER: joined spec_sessions with priority {event_priority}."
+                            )
+                            return {"status": "joined", "detail": "Joined active event"}
+                        except Exception as e:
+                            if "uq_one_active_session_per_pr" in str(e):
+                                self.logger.warning(f"User {user_id} tried to join event {event_id} but already has an active session (DB constraint).")
+                                return {"status": "error", "detail": "Already in an active session"}
+                            raise
+                    else:
+                        # Event has not started - reserve slot
                         await cursor.execute(
-                            """
-                            INSERT INTO spec_sessions 
-                                (pr_id, target_type, target_id, started_at, priority_auto, rate_auto)
-                            VALUES (%s, 'event', %s, UTC_TIMESTAMP(), %s, %s)
-                            """,
-                            (user_id, event_id, event_priority, rate_auto),
+                            "INSERT INTO event_participants (event_id, pr_id) VALUES (%s, %s)",
+                            (event_id, user_id)
                         )
-                    except Exception as e:
-                        if "uq_one_active_session_per_pr" in str(e):
-                            return False
-                        raise
+                        await conn.commit()
+                        self.logger.debug(f"User {user_id} reserved slot for future event {event_id} ('{event_name}').")
+                        return {"status": "reserved", "detail": "Reserved slot for future event"}
 
-                    await conn.commit()
-                    return True
         except Exception as e:
             self.logger.error(f"Failed to join event: {e}", exc_info=True)
-            return False
+            return {"status": "error", "detail": "Internal database error"}
 
     @db_retry()
-    async def leave_event(self, event_id: int, user_id: int) -> int:
+    async def leave_event(self, event_id: int, user_id: int, end_reason: str = "manual_unclaim") -> int:
         """Удаление пользователя из события и возврат длительности."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"User {user_id} attempting to leave event {event_id}. Reason: {end_reason}.")
+
+                    # 0. Check if user is in reserved state
+                    await cursor.execute(
+                        "DELETE FROM event_participants WHERE event_id = %s AND pr_id = %s",
+                        (event_id, user_id)
+                    )
+                    if cursor.rowcount > 0:
+                        await conn.commit()
+                        self.logger.debug(f"User {user_id} was in reserved state for event {event_id} and removed.")
+                        return 0
+
                     # 1. Lock active session row for this participant
                     await cursor.execute(
                         """
@@ -3378,9 +3560,11 @@ class Database:
                     result = await cursor.fetchone()
 
                     if not result:
+                        self.logger.debug(f"User {user_id} not found in active sessions for event {event_id}.")
                         return 0
 
                     session_id = result["id"]
+                    self.logger.debug(f"Found active session {session_id} for user {user_id} in event {event_id}.")
 
                     # 2. Close session using DB time and guarantee ended_at > started_at
                     await cursor.execute(
@@ -3388,15 +3572,17 @@ class Database:
                         UPDATE spec_sessions 
                         SET ended_at = GREATEST(
                                 DATE_ADD(started_at, INTERVAL 1 SECOND),
-                                UTC_TIMESTAMP()
+                                CURRENT_TIMESTAMP
                             ),
-                            end_reason = 'manual'
+                            end_reason = %s
                         WHERE id = %s
                         """,
-                        (session_id,),
+                        (end_reason, session_id),
                     )
+                    self.logger.debug(f"Session {session_id} for user {user_id} in event {event_id} marked as ended.")
 
                     await self._recalc_session_points_delta(conn, session_id, lock=False)
+                    self.logger.debug(f"Points recalculated for session {session_id}.")
 
                     await cursor.execute(
                         """
@@ -3408,14 +3594,394 @@ class Database:
                     )
                     duration_row = await cursor.fetchone()
 
+                    # Auto-end spec_request events if 0 participants remain
+                    await cursor.execute(
+                        "SELECT event_kind FROM events WHERE id = %s",
+                        (event_id,),
+                    )
+                    ev = await cursor.fetchone()
+                    if ev and ev.get("event_kind") == "spec_request":
+                        await cursor.execute(
+                            """
+                            SELECT COUNT(*) as cnt FROM spec_sessions
+                            WHERE target_type = 'event' AND target_id = %s
+                              AND ended_at IS NULL AND deleted_at IS NULL
+                            """,
+                            (event_id,),
+                        )
+                        cnt_row = await cursor.fetchone()
+                        if cnt_row and cnt_row["cnt"] == 0:
+                            await cursor.execute(
+                                "UPDATE events SET is_active = FALSE WHERE id = %s",
+                                (event_id,),
+                            )
+                            self.logger.debug(f"Spec request event {event_id} auto-marked as inactive due to 0 participants.")
+
                     await conn.commit()
                     duration = (
                         int(duration_row["duration_seconds"]) if duration_row else 0
+                    )
+                    self.logger.debug(
+                        f"User {user_id} left event {event_id}. Reason: {end_reason}. "
+                        f"Session ID {session_id} ended. Duration: {duration}s."
                     )
                     return max(duration, 0)
         except Exception as e:
             self.logger.error(f"Failed to leave event {event_id}: {e}", exc_info=True)
             return 0
+
+    @db_retry()
+    async def create_spec_request(
+        self,
+        name: str,
+        description: str,
+        requested_by: int,
+        priority: int = 0,
+    ) -> Optional[int]:
+        """Create a spec_request event and auto-join the creator."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # Check if user already has an active session
+                    await cursor.execute(
+                        """
+                        SELECT id FROM spec_sessions
+                        WHERE pr_id = %s AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
+                        (requested_by,),
+                    )
+                    if await cursor.fetchone():
+                        raise ValueError("У вас уже есть активная сессия")
+
+                    # Snapshot rate from config
+                    config = await self.get_points_config()
+                    rate_auto = config.get(priority, 0.5)
+
+                    # Ensure assistant exists
+                    await cursor.execute(
+                        "INSERT INTO assistants (pr_id) VALUES (%s) ON DUPLICATE KEY UPDATE pr_id = pr_id",
+                        (requested_by,),
+                    )
+
+                    # Create event
+                    await cursor.execute(
+                        """
+                        INSERT INTO events (
+                            name, description, created_by, requested_by,
+                            start_time, notification_sent,
+                            pr_slots, priority, required_pr_count,
+                            event_kind, approval_status, is_active
+                        ) VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, TRUE, 1, %s, 1, 'spec_request', 'pending', TRUE)
+                        """,
+                        (name, description, requested_by, requested_by, priority),
+                    )
+                    event_id = cursor.lastrowid
+
+                    # Auto-join: create spec_session immediately
+                    await cursor.execute(
+                        """
+                        INSERT INTO spec_sessions
+                            (pr_id, target_type, target_id, target_name, started_at, priority_auto, rate_auto)
+                        VALUES (%s, 'event', %s, %s, CURRENT_TIMESTAMP, %s, %s)
+                        """,
+                        (requested_by, event_id, name, priority, rate_auto),
+                    )
+
+                    await conn.commit()
+                    return event_id
+        except ValueError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to create spec request: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def update_pending_spec_request(
+        self,
+        event_id: int,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        priority: Optional[int] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> bool:
+        """Update a pending spec_request event without approving it."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, approval_status, event_kind FROM events
+                        WHERE id = %s FOR UPDATE
+                        """,
+                        (event_id,),
+                    )
+                    event = await cursor.fetchone()
+                    if not event:
+                        raise ValueError("Event not found")
+                    if event["event_kind"] != "spec_request":
+                        raise ValueError("Event is not a spec_request")
+                    if event["approval_status"] != "pending":
+                        raise ValueError("Event is not pending")
+
+                    # Build dynamic update for events table
+                    set_parts = []
+                    params: list = []
+
+                    if name is not None:
+                        set_parts.append("name = %s")
+                        params.append(name)
+                    if description is not None:
+                        set_parts.append("description = %s")
+                        params.append(description)
+                    if priority is not None:
+                        set_parts.append("priority = %s")
+                        params.append(priority)
+
+                    if set_parts:
+                        params.append(event_id)
+                        await cursor.execute(
+                            f"UPDATE events SET {', '.join(set_parts)} WHERE id = %s",
+                            tuple(params),
+                        )
+
+                    # If priority was changed, update the session rate/priority snapshot
+                    if priority is not None:
+                        config = await self.get_points_config()
+                        new_rate = config.get(priority, 0.5)
+                        await cursor.execute(
+                            """
+                            UPDATE spec_sessions
+                            SET priority_auto = %s, rate_auto = %s
+                            WHERE target_type = 'event' AND target_id = %s
+                              AND deleted_at IS NULL
+                            """,
+                            (priority, new_rate, event_id),
+                        )
+
+                    # Update session times if provided by admin
+                    if start_time is not None or end_time is not None:
+                        time_set_parts = []
+                        time_params: list = []
+                        if start_time is not None:
+                            time_set_parts.append("started_at = %s")
+                            time_params.append(start_time)
+                        if end_time is not None:
+                            time_set_parts.append("ended_at = %s")
+                            time_params.append(end_time)
+                            time_set_parts.append("end_reason = 'admin_closed'")
+                        time_params.append(event_id)
+                        await cursor.execute(
+                            f"""
+                            UPDATE spec_sessions
+                            SET {', '.join(time_set_parts)}
+                            WHERE target_type = 'event' AND target_id = %s
+                              AND deleted_at IS NULL
+                            """,
+                            tuple(time_params),
+                        )
+
+                    # Recalculate points for sessions of this event
+                    await cursor.execute(
+                        """
+                        SELECT id FROM spec_sessions
+                        WHERE target_type = 'event' AND target_id = %s
+                          AND ended_at IS NOT NULL AND deleted_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+                    closed_sessions = await cursor.fetchall()
+                    if closed_sessions:
+                        session_ids = [int(s["id"]) for s in closed_sessions]
+                        await self._recalc_points_for_sessions(conn, session_ids, lock=False)
+
+                    await conn.commit()
+                    return True
+        except ValueError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to update pending spec request {event_id}: {e}", exc_info=True)
+            return False
+
+    @db_retry()
+    async def approve_spec_request(
+        self,
+        event_id: int,
+        approved_by: int,
+    ) -> bool:
+        """Approve a pending spec_request event."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"Attempting to approve spec request {event_id} by {approved_by}.")
+
+                    await cursor.execute(
+                        """
+                        SELECT id, approval_status, event_kind FROM events
+                        WHERE id = %s FOR UPDATE
+                        """,
+                        (event_id,),
+                    )
+                    event = await cursor.fetchone()
+                    if not event:
+                        self.logger.warning(f"Spec request {event_id} not found for approval.")
+                        raise ValueError("Event not found")
+                    if event["event_kind"] != "spec_request":
+                        self.logger.warning(f"Event {event_id} is not a spec_request, cannot approve.")
+                        raise ValueError("Event is not a spec_request")
+                    if event["approval_status"] != "pending":
+                        self.logger.warning(f"Event {event_id} is not pending, current status: {event['approval_status']}.")
+                        raise ValueError("Event is not pending")
+
+                    # Check for sessions that were closed (ended_at is NOT NULL) but still belong to this pending event
+                    await cursor.execute(
+                        """
+                        SELECT id, pr_id, duration_seconds, ended_at
+                        FROM spec_sessions
+                        WHERE target_type = 'event' AND target_id = %s
+                          AND ended_at IS NOT NULL AND deleted_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+                    closed_sessions = await cursor.fetchall()
+                    self.logger.debug(f"Found {len(closed_sessions)} closed sessions for spec request {event_id}.")
+
+                    # If we found closed sessions, it means the spec request is already finished.
+                    # We should mark the event as inactive (is_active = FALSE).
+                    is_active_clause = ""
+                    if closed_sessions:
+                        is_active_clause = ", is_active = FALSE"
+
+                    await cursor.execute(
+                        f"""
+                        UPDATE events 
+                        SET approval_status = 'approved', approved_by = %s, approved_at = CURRENT_TIMESTAMP{is_active_clause}
+                        WHERE id = %s
+                        """,
+                        (approved_by, event_id),
+                    )
+                    self.logger.debug(f"Spec request {event_id} status updated to 'approved'. is_active set to {not bool(closed_sessions)}.")
+
+                    # Recalculate points for closed sessions now that status is 'approved'
+                    if closed_sessions:
+                        session_ids = [int(s["id"]) for s in closed_sessions]
+                        await self._recalc_points_for_sessions(conn, session_ids, lock=False)
+                        self.logger.debug(f"Recalculated points for closed sessions: {session_ids}.")
+
+                    await conn.commit()
+                self.logger.debug(
+                    f"Spec Request {event_id} approved by {approved_by}. "
+                    f"Closed {len(closed_sessions)} associated sessions. Event is_active={not bool(closed_sessions)}."
+                )
+                return {
+                    "success": True,
+                    "closed_sessions": [
+                        {
+                                "pr_id": s["pr_id"],
+                                "duration": s.get("duration_seconds", 0),
+                                "ended_at": s["ended_at"].isoformat() if s["ended_at"] else None
+                            }
+                            for s in closed_sessions
+                        ]
+                    }
+        except ValueError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to approve spec request {event_id}: {e}", exc_info=True)
+            return False
+
+    @db_retry()
+    async def reject_spec_request(
+        self,
+        event_id: int,
+        rejected_by: int,
+    ) -> bool:
+        """Reject a pending spec_request event and close active sessions."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, approval_status, event_kind FROM events
+                        WHERE id = %s FOR UPDATE
+                        """,
+                        (event_id,),
+                    )
+                    event = await cursor.fetchone()
+                    if not event:
+                        raise ValueError("Event not found")
+                    if event["event_kind"] != "spec_request":
+                        raise ValueError("Event is not a spec_request")
+                    if event["approval_status"] != "pending":
+                        raise ValueError("Event is not pending")
+
+                    # Mark event as rejected and inactive
+                    await cursor.execute(
+                        """
+                        UPDATE events
+                        SET approval_status = 'rejected',
+                            rejected_by = %s,
+                            rejected_at = CURRENT_TIMESTAMP,
+                            is_active = FALSE
+                        WHERE id = %s
+                        """,
+                        (rejected_by, event_id),
+                    )
+
+                    # Close active sessions with reason 'event_rejected'
+                    await cursor.execute(
+                        """
+                        UPDATE spec_sessions
+                        SET ended_at = GREATEST(
+                                DATE_ADD(started_at, INTERVAL 1 SECOND),
+                                CURRENT_TIMESTAMP
+                            ),
+                            end_reason = 'event_rejected'
+                        WHERE target_type = 'event' AND target_id = %s
+                          AND ended_at IS NULL AND deleted_at IS NULL
+                        """,
+                        (event_id,),
+                    )
+
+                    # No points recalculation needed — rejected sessions
+                    # will be excluded by view filter (approval_status != 'approved')
+
+                    await conn.commit()
+                    return True
+        except ValueError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to reject spec request {event_id}: {e}", exc_info=True)
+            return False
+
+    @db_retry()
+    async def get_pending_spec_requests(self) -> list:
+        """Get all pending spec_request events with session info for admin review."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT
+                            e.id, e.name, e.description, e.created_at, e.start_time,
+                            e.priority, e.requested_by, e.is_active,
+                            a.nickname AS requester_nickname,
+                            ss.started_at AS session_started_at,
+                            ss.ended_at AS session_ended_at,
+                            ss.duration_seconds AS session_duration_seconds
+                        FROM events e
+                        LEFT JOIN assistants a ON a.pr_id = e.requested_by
+                        LEFT JOIN spec_sessions ss
+                            ON ss.target_type = 'event' AND ss.target_id = e.id AND ss.deleted_at IS NULL
+                        WHERE e.event_kind = 'spec_request'
+                          AND e.approval_status = 'pending'
+                        ORDER BY e.created_at DESC
+                        """
+                    )
+                    return await cursor.fetchall() or []
+        except Exception as e:
+            self.logger.error(f"Failed to get pending spec requests: {e}", exc_info=True)
+            return []
 
     @db_retry()
     async def mark_event_notification_sent(self, event_id: int) -> None:
@@ -3458,22 +4024,110 @@ class Database:
 
     @db_retry()
     async def get_event_participants(self, event_id: int) -> list:
-        """Получение списка активных участников события."""
+        """Получение списка активных и зарезервированных участников события."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # Get active
                     await cursor.execute(
                         """
-                        SELECT pr_id as user_id, started_at as joined_at 
+                        SELECT pr_id as user_id, started_at as joined_at, 'active' as status
                         FROM spec_sessions
                         WHERE target_type = 'event' AND target_id = %s 
                           AND ended_at IS NULL AND deleted_at IS NULL
                         """,
                         (event_id,),
                     )
-                    return await cursor.fetchall() or []
+                    active = await cursor.fetchall() or []
+
+                    # Get reserved
+                    await cursor.execute(
+                        """
+                        SELECT pr_id as user_id, joined_at, 'reserved' as status
+                        FROM event_participants
+                        WHERE event_id = %s
+                        """,
+                        (event_id,)
+                    )
+                    reserved = await cursor.fetchall() or []
+
+                    return list(active) + list(reserved)
         except Exception as e:
             self.logger.error(f"Failed to get participants: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def start_event_sessions(self, event_id: int) -> list:
+        """
+        Migrates reserved participants from `event_participants` to `spec_sessions`.
+        Called when an event officially starts.
+        Returns a list of PR IDs that were migrated.
+        """
+        try:
+            migrated_pr_ids = []
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"Attempting to start sessions for event {event_id}.")
+
+                    # Lock rows
+                    await cursor.execute(
+                        "SELECT pr_id FROM event_participants WHERE event_id = %s FOR UPDATE",
+                        (event_id,)
+                    )
+                    participants = await cursor.fetchall()
+                    self.logger.debug(f"Found {len(participants)} reserved participants for event {event_id}.")
+
+                    if not participants:
+                        self.logger.debug(f"No reserved participants to migrate for event {event_id}.")
+                        return []
+
+                    # Get event details for config
+                    await cursor.execute("SELECT name, priority FROM events WHERE id = %s", (event_id,))
+                    event = await cursor.fetchone()
+                    priority = event.get("priority", 0) if event else 0
+                    event_name = event.get("name", f"Событие #{event_id}") if event else f"Событие #{event_id}"
+                    config = await self.get_points_config()
+                    rate_auto = config.get(priority, 0.5)
+
+                    for p in participants:
+                        pr_id = p["pr_id"]
+                        
+                        # Verify they don't already have an active session
+                        await cursor.execute(
+                            """
+                            SELECT id FROM spec_sessions 
+                            WHERE pr_id = %s AND ended_at IS NULL AND deleted_at IS NULL
+                            """,
+                            (pr_id,)
+                        )
+                        if not await cursor.fetchone():
+                            # Insert into spec
+                            await cursor.execute(
+                                """
+                                INSERT INTO spec_sessions 
+                                    (pr_id, target_type, target_id, target_name, started_at, priority_auto, rate_auto)
+                                VALUES (%s, 'event', %s, %s, CURRENT_TIMESTAMP, %s, %s)
+                                """,
+                                (pr_id, event_id, event_name, priority, rate_auto)
+                            )
+                            migrated_pr_ids.append(pr_id)
+                            self.logger.debug(f"Migrated PR {pr_id} to active session for event {event_id}.")
+                        else:
+                            self.logger.debug(f"PR {pr_id} already has an active session, skipping migration for event {event_id}.")
+
+                    # Delete reserved since they are now migrated or rejected
+                    await cursor.execute(
+                        "DELETE FROM event_participants WHERE event_id = %s",
+                        (event_id,)
+                    )
+                    await conn.commit()
+            self.logger.debug(
+                f"Event {event_id} started. Migrated {len(migrated_pr_ids)} reserved participants "
+                f"to active spec_sessions. IDs: {migrated_pr_ids}"
+            )
+            return migrated_pr_ids
+        except Exception as e:
+            self.logger.error(f"Failed to start sessions for event {event_id}: {e}", exc_info=True)
             return []
 
     @db_retry()
@@ -3524,7 +4178,7 @@ class Database:
                     await cursor.execute(
                         """
                         UPDATE spec_sessions 
-                        SET deleted_at = UTC_TIMESTAMP(), delete_reason = 'admin_reset'
+                        SET deleted_at = CURRENT_TIMESTAMP, delete_reason = 'admin_reset'
                         WHERE pr_id = %s AND deleted_at IS NULL
                         """,
                         (pr_id,),
@@ -3573,7 +4227,6 @@ class Database:
         self,
         pr_id: int,
         delta: float,
-        reason: Optional[str] = None,
         source: str = "manual_adjust",
     ) -> Optional[Dict[str, Any]]:
         """Adjust manual assistant points component (persistent across auto recalculation)."""
@@ -3610,7 +4263,6 @@ class Database:
                     return {
                         "pr_id": pr_id,
                         "delta": rounded_delta,
-                        "reason": reason,
                         "source": source,
                         "before": before,
                         "after": after,
@@ -3627,7 +4279,6 @@ class Database:
         pr_id: int,
         penalty_points: Optional[float] = None,
         penalty_percent: Optional[float] = None,
-        reason: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Update assistant sanctions (penalty points/percent)."""
         if penalty_points is None and penalty_percent is None:
@@ -3635,6 +4286,8 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    self.logger.debug(f"Updating sanctions for pr_id={pr_id}. Penalty points: {penalty_points}, percent: {penalty_percent}.")
+
                     await cursor.execute(
                         """
                         INSERT INTO assistants (pr_id)
@@ -3647,15 +4300,16 @@ class Database:
                         cursor, pr_id, for_update=True
                     )
                     if not before:
+                        self.logger.warning(f"Assistant {pr_id} not found for sanction update.")
                         return None
 
                     clauses: List[str] = []
                     params: List[Any] = []
                     if penalty_points is not None:
-                        clauses.append("penalty_points = GREATEST(0, ROUND(%s, 4))")
+                        clauses.append("penalty_points = GREATEST(0, ROUND(COALESCE(penalty_points, 0) + %s, 4))")
                         params.append(penalty_points)
                     if penalty_percent is not None:
-                        clauses.append("penalty_percent = GREATEST(0, ROUND(%s, 4))")
+                        clauses.append("penalty_percent = GREATEST(0, ROUND(COALESCE(penalty_percent, 0) + %s, 4))")
                         params.append(penalty_percent)
                     params.append(pr_id)
                     await cursor.execute(
@@ -3663,13 +4317,16 @@ class Database:
                         tuple(params),
                     )
                     after = await self._get_assistant_points_snapshot(cursor, pr_id)
-                    await conn.commit()
-                    return {
-                        "pr_id": pr_id,
-                        "reason": reason,
-                        "before": before,
-                        "after": after,
-                    }
+                await conn.commit()
+                self.logger.debug(
+                    f"Assistant sanctions updated for pr_id={pr_id}.\n"
+                    f"BEFORE: {before}\nAFTER: {after}"
+                )
+                return {
+                    "pr_id": pr_id,
+                    "before": before,
+                    "after": after,
+                }
         except Exception as e:
             self.logger.error(
                 f"Failed to update assistant sanctions for {pr_id}: {e}",
@@ -3683,7 +4340,6 @@ class Database:
         pr_id: int,
         oral_delta: int = 0,
         strict_delta: int = 0,
-        reason: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Update warnings units (oral=1 unit, strict=2 units)."""
         units_delta = int(oral_delta or 0) + int(strict_delta or 0) * 2
@@ -3720,7 +4376,6 @@ class Database:
                         "units_delta": units_delta,
                         "oral_delta": int(oral_delta or 0),
                         "strict_delta": int(strict_delta or 0),
-                        "reason": reason,
                         "before": before,
                         "after": after,
                     }
@@ -3741,9 +4396,9 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT
-                            id, pr_id, target_type, target_id, started_at, ended_at,
+                            id, pr_id, target_type, target_id, target_name, started_at, ended_at,
                             is_probation, priority_override, rate_override,
-                            session_admin_comment, deleted_at, credited_points
+                            deleted_at, credited_points
                         FROM spec_sessions
                         WHERE id = %s AND pr_id = %s AND deleted_at IS NULL
                         FOR UPDATE
@@ -3759,10 +4414,10 @@ class Database:
 
                     current_target_type = before.get("target_type")
                     current_target_id = before.get("target_id")
-                    current_started = self._normalize_utc_datetime(
+                    current_started = self._normalize_msk_datetime(
                         before.get("started_at")
                     )
-                    current_ended = self._normalize_utc_datetime(before.get("ended_at"))
+                    current_ended = self._normalize_msk_datetime(before.get("ended_at"))
 
                     next_target_type = (
                         patch.get("target_type")
@@ -3790,8 +4445,8 @@ class Database:
                         )
 
                     if started_in_patch and ended_in_patch:
-                        next_started = self._normalize_utc_datetime(patch["started_at"])
-                        next_ended = self._normalize_utc_datetime(patch["ended_at"])
+                        next_started = self._normalize_msk_datetime(patch["started_at"])
+                        next_ended = self._normalize_msk_datetime(patch["ended_at"])
                         if not next_started or not next_ended or next_ended <= next_started:
                             raise ValueError("ended_at must be greater than started_at")
                         updates.append("started_at = %s")
@@ -3801,7 +4456,7 @@ class Database:
                         # If session was open and admin is closing it, set end_reason
                         if current_ended is None:
                             updates.append("end_reason = %s")
-                            params.append("admin")
+                            params.append("admin_closed")
 
                     if next_target_type == "manual":
                         next_target_id = None
@@ -3813,16 +4468,6 @@ class Database:
                     else:
                         raise ValueError("Unsupported target_type")
 
-                    merged_comment = (
-                        patch.get("session_admin_comment")
-                        if "session_admin_comment" in patch
-                        else before.get("session_admin_comment")
-                    )
-                    if next_target_type == "manual" and not (merged_comment or "").strip():
-                        raise ValueError(
-                            "session_admin_comment is required for manual sessions"
-                        )
-
                     if next_target_type != current_target_type:
                         updates.append("target_type = %s")
                         params.append(next_target_type)
@@ -3831,29 +4476,40 @@ class Database:
                         updates.append("target_id = %s")
                         params.append(next_target_id)
 
-                    if "priority_override" in patch:
-                        new_priority = patch.get("priority_override")
-                        updates.append("priority_override = %s")
-                        params.append(new_priority)
+                    if "target_name" in patch:
+                        updates.append("target_name = %s")
+                        params.append(patch.get("target_name"))
 
-                        # Auto-calculate rate_override from priority
-                        if new_priority is not None:
+                    if "is_probation" in patch:
+                        updates.append("is_probation = %s")
+                        params.append(patch.get("is_probation"))
+
+                    if "priority_override" in patch:
+                        updates.append("priority_override = %s")
+                        params.append(patch.get("priority_override"))
+
+                    # If is_probation OR priority_override changed, we might need a new rate_override
+                    probation_changed = "is_probation" in patch
+                    priority_changed = "priority_override" in patch
+
+                    if probation_changed or priority_changed:
+                        # Get latest values (considering patch or existing)
+                        next_is_probation = patch.get("is_probation") if probation_changed else before.get("is_probation", False)
+                        next_priority = patch.get("priority_override") if priority_changed else before.get("priority_override")
+
+                        if next_priority is not None:
                             config = await self.get_points_config()
-                            is_probation = before.get("is_probation", False)
-                            if is_probation:
+                            if next_is_probation:
                                 auto_rate = await self._get_probation_rate()
                             else:
-                                auto_rate = config.get(new_priority, 0.5)
+                                auto_rate = config.get(next_priority, 0.5)
                             updates.append("rate_override = %s")
                             params.append(auto_rate)
-                        else:
-                            # Clearing priority_override => clear rate_override too
+                        elif priority_changed:
+                            # Specifically clearing priority_override
                             updates.append("rate_override = NULL")
+                        # Else: priority stayed None, rate stays as is (likely NULL or auto)
 
-
-                    if "session_admin_comment" in patch:
-                        updates.append("session_admin_comment = %s")
-                        params.append(patch.get("session_admin_comment"))
 
                     if updates:
                         params.append(session_id)
@@ -3867,9 +4523,9 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT
-                            id, pr_id, target_type, target_id, started_at, ended_at,
+                            id, pr_id, target_type, target_id, target_name, started_at, ended_at,
                             is_probation, priority_override, rate_override,
-                            session_admin_comment, credited_points
+                            credited_points, duration_seconds
                         FROM spec_sessions
                         WHERE id = %s
                         """,
@@ -3916,7 +4572,7 @@ class Database:
                     await cursor.execute(
                         """
                         UPDATE spec_sessions
-                        SET deleted_at = UTC_TIMESTAMP(),
+                        SET deleted_at = CURRENT_TIMESTAMP,
                             deleted_by_id = %s,
                             delete_reason = %s
                         WHERE id = %s
@@ -3957,7 +4613,7 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             GREATEST(
-                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
@@ -4030,7 +4686,7 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             GREATEST(
-                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
@@ -4127,6 +4783,7 @@ class Database:
                             AND ss.target_id = e.id
                         WHERE ss.pr_id = %s
                           AND ss.deleted_at IS NULL
+                          AND (ss.target_type != 'event' OR e.approval_status IS NULL OR e.approval_status != 'rejected')
                         ORDER BY COALESCE(ss.ended_at, ss.started_at) DESC
                         LIMIT %s
                         """,
@@ -4238,7 +4895,7 @@ class Database:
                         SELECT 
                             a.pr_id, a.nickname, a.role, 
                             GREATEST(
-                                DATEDIFF(UTC_TIMESTAMP(), COALESCE(a.appointed_at, a.added_at, UTC_TIMESTAMP())),
+                                DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
                             CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
@@ -4367,7 +5024,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     if appointed_at is not None:
                         appointed_at_dt = datetime.combine(
-                            appointed_at, datetime.min.time(), tzinfo=timezone.utc
+                            appointed_at, datetime.min.time(), tzinfo=timezone(timedelta(hours=3))
                         )
                         await cursor.execute(
                             """
@@ -4384,11 +5041,11 @@ class Database:
                         await cursor.execute(
                             """
                             INSERT INTO assistants (pr_id, nickname, role, appointed_at)
-                            VALUES (%s, %s, %s, DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY))
+                            VALUES (%s, %s, %s, DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %s DAY))
                             ON DUPLICATE KEY UPDATE
                                 nickname = VALUES(nickname),
                                 role = VALUES(role),
-                                appointed_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s DAY)
+                                appointed_at = DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %s DAY)
                             """,
                             (pr_id, nickname, role, experience_days, experience_days),
                         )
@@ -4431,9 +5088,9 @@ class Database:
                             UPDATE spec_sessions
                             SET ended_at = GREATEST(
                                     DATE_ADD(started_at, INTERVAL 1 SECOND),
-                                    UTC_TIMESTAMP()
+                                    CURRENT_TIMESTAMP
                                 ),
-                                end_reason = 'manual_assignment_clear'
+                                end_reason = 'manual_unclaim'
                             WHERE id = %s
                             """,
                             (session_id,),
@@ -4580,13 +5237,13 @@ class Database:
         """Получение событий, которые должны начаться (для уведомлений)."""
         try:
             async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT id, name, channel_id 
+                        SELECT id, name
                         FROM events 
                         WHERE is_active = TRUE 
-                          AND start_time <= UTC_TIMESTAMP() 
+                          AND start_time <= CURRENT_TIMESTAMP 
                           AND (notification_sent IS FALSE OR notification_sent IS NULL)
                         """
                     )
@@ -4595,7 +5252,6 @@ class Database:
             # Add participants to each event
             results = []
             for e in events:
-                e["channel_id"] = str(e["channel_id"]) if e.get("channel_id") else None
                 participants = await self.get_event_participants(e["id"])
                 e["participants"] = participants
                 results.append(e)
@@ -4634,7 +5290,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT s.streamer_id, s.streamer_name, ss.pr_id as assigned_pr_id, ss.started_at as assigned_at,
-                               TIMESTAMPDIFF(SECOND, ss.started_at, UTC_TIMESTAMP()) as duration_seconds
+                               TIMESTAMPDIFF(SECOND, ss.started_at, CURRENT_TIMESTAMP) as duration_seconds
                         FROM spec_sessions ss
                         JOIN streamers s ON s.streamer_id = ss.target_id
                         WHERE ss.target_type = 'streamer'
@@ -4664,7 +5320,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT id, pr_id, target_type, target_id, started_at, ended_at, end_reason, target_id as streamer_id,
-                               TIMESTAMPDIFF(SECOND, started_at, COALESCE(ended_at, UTC_TIMESTAMP())) as duration_seconds
+                               TIMESTAMPDIFF(SECOND, started_at, COALESCE(ended_at, CURRENT_TIMESTAMP)) as duration_seconds
                         FROM spec_sessions
                         WHERE pr_id = %s AND target_type = 'streamer'
                         ORDER BY started_at DESC
@@ -4705,6 +5361,7 @@ class Database:
                             ss.target_type,
                             ss.target_id,
                             CASE
+                                WHEN ss.target_name IS NOT NULL THEN ss.target_name
                                 WHEN ss.target_type = 'streamer' THEN s.streamer_name
                                 WHEN ss.target_type = 'event' THEN e.name
                                 ELSE NULL
@@ -4719,7 +5376,6 @@ class Database:
                             ss.rate_auto,
                             ss.rate_override,
                             ss.credited_points,
-                            ss.session_admin_comment,
                             ss.deleted_at,
                             ss.delete_reason
                         FROM spec_sessions ss
@@ -4728,6 +5384,7 @@ class Database:
                         LEFT JOIN events e
                             ON ss.target_type = 'event' AND ss.target_id = e.id
                         WHERE ss.pr_id = %s
+                          AND (ss.target_type <> 'event' OR e.approval_status = 'approved')
                           {deleted_clause}
                         ORDER BY ss.started_at DESC
                         LIMIT %s
@@ -4747,39 +5404,7 @@ class Database:
             )
             return []
 
-    @db_retry()
-    async def transfer_streamer(
-        self, from_pr_id: int, to_pr_id: int, streamer_id: int
-    ) -> Optional[int]:
-        """
-        Передача стримера от одного ассистента другому.
 
-        Args:
-            from_pr_id: ID текущего ассистента
-            to_pr_id: ID нового ассистента
-            streamer_id: Twitch ID стримера
-
-        Returns:
-            Длительность сессии предыдущего ассистента или None
-        """
-        try:
-            # First unassign current PR with 'transfer' reason
-            result = await self.unassign_pr_from_streamer(
-                streamer_id, pr_id=from_pr_id, end_reason="transfer"
-            )
-            if not result:
-                return None
-
-            # Assign new PR
-            await self.assign_pr_to_streamer(streamer_id, to_pr_id)
-
-            return result[0].get("duration_seconds")
-        except Exception as e:
-            self.logger.error(
-                f"Failed to transfer streamer {streamer_id} from {from_pr_id} to {to_pr_id}: {e}",
-                exc_info=True,
-            )
-            raise
 
     # =========================================================================
     # Web Auth Operations (consolidated from web/backend)
@@ -4800,7 +5425,7 @@ class Database:
                     await cursor.execute(
                         """
                         INSERT INTO web_auth (discord_id, username, password_hash, created_at) 
-                        VALUES (%s, %s, %s, NOW())
+                        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
                         """,
                         (discord_id, username, password_hash),
                     )
@@ -4988,7 +5613,7 @@ class Database:
                         WHERE id = %s
                           AND user_id = %s
                           AND revoked = FALSE
-                          AND expires_at > UTC_TIMESTAMP()
+                          AND expires_at > CURRENT_TIMESTAMP
                         LIMIT 1
                         """,
                         (session_id, user_id),

@@ -61,7 +61,8 @@ export interface Streamer {
 
 export interface EventParticipant {
     pr_id: string;
-    nickname: string;
+    nickname: string | null;
+    status?: string | null;
 }
 
 export interface Event {
@@ -76,6 +77,13 @@ export interface Event {
     current_participants?: number;
     participants?: EventParticipant[];
     start_time?: string | null;
+    event_kind?: 'regular' | 'spec_request';
+    approval_status?: 'approved' | 'pending' | 'rejected';
+    requested_by?: string | null;
+    approved_by?: string | null;
+    approved_at?: string | null;
+    rejected_by?: string | null;
+    rejected_at?: string | null;
 }
 
 export interface DashboardStats {

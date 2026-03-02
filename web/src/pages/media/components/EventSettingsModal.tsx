@@ -137,17 +137,19 @@ const EventSettingsModal = ({ event, isOpen, onClose, onSave }: EventSettingsMod
                         </div>
                     </div>
 
-                    {/* PR Slots */}
-                    <div>
-                        <label className="text-sm font-medium text-white/60 mb-3 block">Количество слотов (PR)</label>
-                        <input
-                            type="number"
-                            min="1"
-                            value={prSlots}
-                            onChange={(e) => setPrSlots(Math.max(1, parseInt(e.target.value) || 1))}
-                            className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-purple-500 transition-colors"
-                        />
-                    </div>
+                    {/* PR Slots - hidden for spec_request events */}
+                    {event.event_kind !== 'spec_request' && (
+                        <div>
+                            <label className="text-sm font-medium text-white/60 mb-3 block">Количество слотов (PR)</label>
+                            <input
+                                type="number"
+                                min="1"
+                                value={prSlots}
+                                onChange={(e) => setPrSlots(Math.max(1, parseInt(e.target.value) || 1))}
+                                className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-purple-500 transition-colors"
+                            />
+                        </div>
+                    )}
 
                     <div className="flex items-center gap-2 text-xs text-yellow-500/60 p-3 bg-yellow-500/5 rounded-lg border border-yellow-500/10">
                         <AlertCircle className="w-4 h-4 shrink-0" />

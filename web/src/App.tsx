@@ -15,35 +15,34 @@ import UserProfile from './pages/UserProfile'
 import MediaProfile from './pages/MediaProfile'
 
 function App() {
-  return (
-    <Router>
-      <Routes>
-        <Route path="/login" element={<Login />} />
+    return (
+        <Router>
+            <Routes>
+                <Route path="/login" element={<Login />} />
 
-        <Route element={<ProtectedRoute />}>
-          <Route element={<MainLayout />}>
-            <Route path="/hub" element={<MainHub />} />
-            <Route path="/profile" element={<UserProfile />} />
-            <Route path="/profile/:id" element={<UserProfile />} />
-            <Route path="/media" element={<MediaList />} />
-            <Route path="/media/:id" element={<MediaProfile />} />
-            <Route path="/pr-stats" element={<PRStats />} />
-            <Route path="/logs" element={<SpectateLogs />} />
-            <Route path="/events/new" element={<CreateEvent />} />
+                <Route element={<ProtectedRoute />}>
+                    <Route element={<MainLayout />}>
+                        <Route path="/hub" element={<MainHub />} />
+                        <Route path="/assistants/:id" element={<UserProfile />} />
+                        <Route path="/media" element={<MediaList />} />
+                        <Route path="/media/:id" element={<MediaProfile />} />
+                        <Route path="/assistants" element={<PRStats />} />
+                        <Route path="/logs" element={<SpectateLogs />} />
+                        <Route path="/events/new" element={<CreateEvent />} />
 
-            <Route element={<ProtectedRoute allowedRoles={['manager', 'developer']} />}>
-              <Route path="/admin" element={<AdminPanel />} />
-            </Route>
+                        <Route element={<ProtectedRoute allowedRoles={['manager', 'developer']} />}>
+                            <Route path="/admin" element={<AdminPanel />} />
+                        </Route>
 
-            <Route path="/bot" element={<BotDashboard />} />
-          </Route>
-        </Route>
+                        <Route path="/bot" element={<BotDashboard />} />
+                    </Route>
+                </Route>
 
-        <Route path="/" element={<Navigate to="/hub" replace />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
-    </Router>
-  )
+                <Route path="/" element={<Navigate to="/hub" replace />} />
+                <Route path="*" element={<NotFound />} />
+            </Routes>
+        </Router>
+    )
 }
 
 export default App

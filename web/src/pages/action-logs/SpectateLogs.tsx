@@ -7,6 +7,9 @@ import NotificationToast from './components/NotificationToast';
 import type { OutletUserContext } from '../../types/auth';
 import type { AdminLogRecord } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
+import { formatMskToLocal } from '../../utils/datetime';
+
+export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
 
 interface PRActionLogItem {
     session_id: number;
@@ -23,7 +26,7 @@ interface PRActionLogItem {
     duration_seconds: number | null;
     priority: number;
     is_probation: boolean;
-    end_reason: string | null;
+    end_reason: SpecSessionEndReason | null;
 }
 
 interface AssistantOption {
@@ -72,11 +75,11 @@ function endReasonLabel(reason: string | null): string {
     switch (reason) {
         case 'stream_end': return 'Стрим завершен';
         case 'category_change': return 'Смена категории';
-        case 'manual': return 'Открепился вручную';
-        case 'transfer': return 'Передан';
+        case 'manual_unclaim': return 'Открепился вручную';
+        case 'admin_closed': return 'Завершено администратором';
         case 'event_end': return 'Событие завершено';
-        case 'admin': return 'Завершено администратором';
-        case 'stream_offline': return 'Стрим завершен';
+        case 'event_rejected': return 'Событие отклонено';
+        case 'unknown': return 'Неизвестно';
         default: return 'Откреплен';
     }
 }
@@ -353,13 +356,6 @@ export function SpectateLogs() {
         void fetchAdminLogs(1);
     };
 
-    const handleSort = (key: string) => {
-        setSortConfig(prev => ({
-            key,
-            direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
-        }));
-    };
-
     const handleResetFilters = () => {
         setFilters({
             action: [],
@@ -382,7 +378,7 @@ export function SpectateLogs() {
     };
 
     const handleCopyLog = (log: AdminLogRecord) => {
-        const date = new Date(log.created_at).toLocaleString();
+        const date = formatMskToLocal(log.created_at);
         const details = log.details ? JSON.stringify(log.details, null, 2) : 'Нет деталей';
         const actorName = log.actor_name || log.admin_name || 'unknown';
         const actorRole = log.actor_role || log.admin_role || 'unknown';
@@ -661,10 +657,10 @@ export function SpectateLogs() {
                                             {/* Right: Timestamp */}
                                             <div className="flex flex-col items-end justify-center pr-4 py-3 flex-shrink-0">
                                                 <span className="text-xs text-white/35 tabular-nums">
-                                                    {new Date(log.action_time).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' })}
+                                                    {formatMskToLocal(log.action_time, { day: '2-digit', month: 'short' })}
                                                 </span>
                                                 <span className="text-[11px] text-white/25 tabular-nums">
-                                                    {new Date(log.action_time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                                    {formatMskToLocal(log.action_time, { hour: '2-digit', minute: '2-digit' })}
                                                 </span>
                                             </div>
                                         </div>
@@ -871,10 +867,10 @@ export function SpectateLogs() {
                                                 <div className="flex items-center gap-3 pr-4 py-3 flex-shrink-0">
                                                     <div className="flex flex-col items-end">
                                                         <span className="text-xs text-white/35 tabular-nums">
-                                                            {new Date(log.created_at).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' })}
+                                                            {formatMskToLocal(log.created_at, { day: '2-digit', month: 'short' })}
                                                         </span>
                                                         <span className="text-[11px] text-white/25 tabular-nums">
-                                                            {new Date(log.created_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                                                            {formatMskToLocal(log.created_at, { hour: '2-digit', minute: '2-digit' })}
                                                         </span>
                                                     </div>
                                                     {log.details && (

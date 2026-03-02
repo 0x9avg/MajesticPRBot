@@ -9,6 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from schemas.common import Snowflake
 
+from datetime import timezone, timedelta
+from schemas.enums import SpecSessionEndReason
+MSK = timezone(timedelta(hours=3))
+
+def make_aware(v):
+    if isinstance(v, datetime) and v.tzinfo is None:
+        return v.replace(tzinfo=MSK)
+    return v
+
 
 class AssistantBase(BaseModel):
     user_id: str = Field(..., description="Discord user ID")
@@ -40,6 +49,15 @@ class AssistantResponse(BaseModel):
     added_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['added_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
 
 
 class AssistantStatsResponse(BaseModel):
@@ -82,6 +100,15 @@ class AssistantFull(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['added_at', 'appointed_at', 'updated_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
+
 
 class DailyStatsUpdate(BaseModel):
     """Schema for manual daily stats update by admin."""
@@ -105,7 +132,6 @@ class ManualSpecSession(BaseModel):
     ended_at: datetime
     is_probation: bool = False
     priority: int = Field(0, ge=0, le=3)  # For points calculation
-    session_admin_comment: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_session(self):
@@ -114,10 +140,6 @@ class ManualSpecSession(BaseModel):
         if self.target_type == "manual":
             if self.target_id is not None:
                 raise ValueError("target_id must be null for manual sessions")
-            if not (self.session_admin_comment or "").strip():
-                raise ValueError(
-                    "session_admin_comment is required for manual sessions"
-                )
         elif self.target_id is None:
             raise ValueError("target_id is required for streamer/event sessions")
         return self
@@ -152,6 +174,15 @@ class SessionCreatedResponse(BaseModel):
     started_at: datetime
     ended_at: datetime
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['started_at', 'ended_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
+
 
 class AssistantSessionRecord(BaseModel):
     id: Snowflake
@@ -162,44 +193,49 @@ class AssistantSessionRecord(BaseModel):
     started_at: datetime
     ended_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
-    end_reason: Optional[str] = None
+    end_reason: Optional["SpecSessionEndReason"] = None
     is_probation: bool = False
     priority_auto: Optional[int] = None
     priority_override: Optional[int] = None
     rate_auto: Optional[float] = None
     rate_override: Optional[float] = None
     credited_points: float = 0.0
-    session_admin_comment: Optional[str] = None
     deleted_at: Optional[datetime] = None
     delete_reason: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_timezone(cls, data):
+        if isinstance(data, dict):
+            for field in ['started_at', 'ended_at', 'deleted_at']:
+                if field in data and data[field]:
+                    data[field] = make_aware(data[field])
+        return data
 
 
 class AssistantPointsAdjustRequest(BaseModel):
     delta: float
-    reason: Optional[str] = None
     source: Optional[str] = "manual_adjust"
 
 
 class AssistantSanctionsUpdateRequest(BaseModel):
     penalty_points: Optional[float] = None
     penalty_percent: Optional[float] = None
-    reason: Optional[str] = None
 
 
 class AssistantWarningsUpdateRequest(BaseModel):
     oral_delta: int = 0
     strict_delta: int = 0
-    reason: Optional[str] = None
 
 
 class AssistantSessionPatchRequest(BaseModel):
     target_type: Optional[Literal["streamer", "event", "manual"]] = None
     target_id: Optional[Snowflake] = None
+    target_name: Optional[str] = None
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     priority_override: Optional[int] = Field(None, ge=0, le=3)
-    session_admin_comment: Optional[str] = None
-    reason: Optional[str] = None
+    is_probation: Optional[bool] = None
 
     @model_validator(mode="after")
     def validate_patch(self):
@@ -216,8 +252,4 @@ class AssistantSessionPatchRequest(BaseModel):
         if self.target_type == "manual":
             if self.target_id is not None:
                 raise ValueError("target_id must be null when target_type is manual")
-            if self.session_admin_comment is not None and not self.session_admin_comment.strip():
-                raise ValueError(
-                    "session_admin_comment cannot be empty for manual sessions"
-                )
         return self

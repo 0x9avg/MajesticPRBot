@@ -385,6 +385,7 @@ class BrokerService:
         event_name: str,
         pr_id: int,
         duration_seconds: int = 0,
+        ended_at: Optional[str] = None,
         trace_id: str = None,
     ) -> bool:
         """Emit event.left event."""
@@ -396,6 +397,7 @@ class BrokerService:
                 "event_name": event_name,
                 "pr_id": pr_id,
                 "duration_seconds": duration_seconds,
+                "ended_at": ended_at,
                 "trace_id": trace_id,
             },
         )

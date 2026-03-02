@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.notifications import router as notifications_router
+MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
 
@@ -15,7 +16,6 @@ def _seed_streamer(fake_db, streamer_id: int = 5001) -> None:
         "streamer_name": "StreamerOne",
         "is_online": True,
         "is_pinned": False,
-        "stream_points_override": None,
         "started_at": None,
         "priority": 1,
         "pr_slots": 2,
@@ -24,7 +24,7 @@ def _seed_streamer(fake_db, streamer_id: int = 5001) -> None:
         "stream_title": "Amazing stream",
         "stream_thumbnail_url": "https://img.test/thumb.jpg",
         "profile_image_url": "https://img.test/profile.jpg",
-        "added_at": datetime.now(timezone.utc),
+        "added_at": datetime.now(MSK),
         "added_by_id": 10,
         "assignments": [],
         "assigned_pr_id": None,

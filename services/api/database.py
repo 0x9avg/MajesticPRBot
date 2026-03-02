@@ -2500,10 +2500,11 @@ class Database:
                     if not is_probation:
                         # Main slot: enforce pr_slots limit
                         await cursor.execute(
-                            "SELECT pr_slots, pr_slots_override, priority, priority_override FROM streamers WHERE streamer_id = %s",
+                            "SELECT streamer_name, pr_slots, pr_slots_override, priority, priority_override FROM streamers WHERE streamer_id = %s",
                             (streamer_id,),
                         )
                         streamer_row = await cursor.fetchone()
+                        streamer_name = streamer_row.get("streamer_name") if streamer_row else "Unknown"
                         pr_slots = (
                             streamer_row.get("pr_slots_override") or streamer_row.get("pr_slots", 1) if streamer_row else 1
                         )
@@ -2527,10 +2528,11 @@ class Database:
                                 raise ValueError("Слот Probation уже занят")
                         # Still need streamer priority for snapshot
                         await cursor.execute(
-                            "SELECT priority, priority_override FROM streamers WHERE streamer_id = %s",
+                            "SELECT streamer_name, priority, priority_override FROM streamers WHERE streamer_id = %s",
                             (streamer_id,),
                         )
                         streamer_row = await cursor.fetchone()
+                        streamer_name = streamer_row.get("streamer_name") if streamer_row else "Unknown"
                         streamer_priority = (
                             streamer_row.get("priority", 0) if streamer_row else 0
                         )
@@ -2566,13 +2568,14 @@ class Database:
                         await cursor.execute(
                             """
                             INSERT INTO spec_sessions 
-                                (pr_id, target_type, target_id, is_probation, started_at,
+                                (pr_id, target_type, target_id, target_name, is_probation, started_at,
                                  priority_auto, rate_auto, priority_override, rate_override)
-                            VALUES (%s, 'streamer', %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s)
+                            VALUES (%s, 'streamer', %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s)
                             """,
                             (
                                 pr_id,
                                 streamer_id,
+                                streamer_name,
                                 is_probation,
                                 streamer_priority,
                                 rate_auto,
@@ -2619,6 +2622,15 @@ class Database:
             Список словарей с данными сессий
         """
         try:
+            # Fail-safe: ensure end_reason is valid for ENUM
+            allowed_reasons = {
+                "manual_unclaim", "stream_end", "category_change", 
+                "admin_closed", "event_end", "event_rejected", "unknown"
+            }
+            if end_reason not in allowed_reasons:
+                self.logger.warning(f"Invalid end_reason '{end_reason}' passed to unassign_pr_from_streamer. Fallback to 'unknown'.")
+                end_reason = "unknown"
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     # 1. Find active sessions for this streamer
@@ -3532,6 +3544,15 @@ class Database:
     async def leave_event(self, event_id: int, user_id: int, end_reason: str = "manual_unclaim") -> int:
         """Удаление пользователя из события и возврат длительности."""
         try:
+            # Fail-safe: ensure end_reason is valid for ENUM
+            allowed_reasons = {
+                "manual_unclaim", "stream_end", "category_change", 
+                "admin_closed", "event_end", "event_rejected", "unknown"
+            }
+            if end_reason not in allowed_reasons:
+                self.logger.warning(f"Invalid end_reason '{end_reason}' passed to leave_event. Fallback to 'unknown'.")
+                end_reason = "unknown"
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     self.logger.debug(f"User {user_id} attempting to leave event {event_id}. Reason: {end_reason}.")
@@ -4510,6 +4531,29 @@ class Database:
                             updates.append("rate_override = NULL")
                         # Else: priority stayed None, rate stays as is (likely NULL or auto)
 
+                    # Healing logic: if target_name is NULL but we have target_id, try to fetch it
+                    if (
+                        "target_name" not in patch
+                        and before.get("target_name") is None
+                        and next_target_type in ("streamer", "event")
+                        and next_target_id is not None
+                    ):
+                        heal_name = None
+                        if next_target_type == "streamer":
+                            await cursor.execute("SELECT streamer_name FROM streamers WHERE streamer_id = %s", (next_target_id,))
+                            row = await cursor.fetchone()
+                            if row:
+                                heal_name = row["streamer_name"]
+                        else:  # event
+                            await cursor.execute("SELECT name FROM events WHERE id = %s", (next_target_id,))
+                            row = await cursor.fetchone()
+                            if row:
+                                heal_name = row["name"]
+
+                        if heal_name:
+                            updates.append("target_name = %s")
+                            params.append(heal_name)
+
 
                     if updates:
                         params.append(session_id)
@@ -4518,16 +4562,49 @@ class Database:
                             tuple(params),
                         )
 
+                        # Auto-close spec_request events if 0 participants remain after update
+                        if next_target_type == "event" and next_target_id is not None:
+                            await cursor.execute(
+                                "SELECT event_kind FROM events WHERE id = %s",
+                                (next_target_id,),
+                            )
+                            ev = await cursor.fetchone()
+                            if ev and ev.get("event_kind") == "spec_request":
+                                await cursor.execute(
+                                    """
+                                    SELECT COUNT(*) as cnt FROM spec_sessions
+                                    WHERE target_type = 'event' AND target_id = %s
+                                      AND ended_at IS NULL AND deleted_at IS NULL
+                                    """,
+                                    (next_target_id,),
+                                )
+                                cnt_row = await cursor.fetchone()
+                                if cnt_row and cnt_row["cnt"] == 0:
+                                    await cursor.execute(
+                                        "UPDATE events SET is_active = FALSE WHERE id = %s",
+                                        (next_target_id,),
+                                    )
+                                    self.logger.debug(f"Spec request event {next_target_id} auto-marked as inactive via admin update.")
+
                     await self._recalc_session_points_delta(conn, session_id, lock=False)
 
                     await cursor.execute(
                         """
                         SELECT
-                            id, pr_id, target_type, target_id, target_name, started_at, ended_at,
-                            is_probation, priority_override, rate_override,
-                            credited_points, duration_seconds
-                        FROM spec_sessions
-                        WHERE id = %s
+                            ss.id, ss.pr_id, ss.target_type, ss.target_id,
+                            CASE
+                                WHEN ss.target_name IS NOT NULL THEN ss.target_name
+                                WHEN ss.target_type = 'streamer' THEN s.streamer_name
+                                WHEN ss.target_type = 'event' THEN e.name
+                                ELSE NULL
+                            END AS target_name,
+                            ss.started_at, ss.ended_at,
+                            ss.is_probation, ss.priority_override, ss.rate_override,
+                            ss.credited_points, ss.duration_seconds
+                        FROM spec_sessions ss
+                        LEFT JOIN streamers s ON ss.target_type = 'streamer' AND ss.target_id = s.streamer_id
+                        LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
+                        WHERE ss.id = %s
                         """,
                         (session_id,),
                     )
@@ -4579,13 +4656,51 @@ class Database:
                         """,
                         (deleted_by_id, reason or "admin_delete", session_id),
                     )
+
+                    # Auto-close spec_request events if 0 participants remain after deletion
+                    target_type = before.get("target_type")
+                    target_id = before.get("target_id")
+                    if target_type == "event" and target_id is not None:
+                        await cursor.execute(
+                            "SELECT event_kind FROM events WHERE id = %s",
+                            (target_id,),
+                        )
+                        ev = await cursor.fetchone()
+                        if ev and ev.get("event_kind") == "spec_request":
+                            await cursor.execute(
+                                """
+                                SELECT COUNT(*) as cnt FROM spec_sessions
+                                WHERE target_type = 'event' AND target_id = %s
+                                  AND ended_at IS NULL AND deleted_at IS NULL
+                                """,
+                                (target_id,),
+                            )
+                            cnt_row = await cursor.fetchone()
+                            if cnt_row and cnt_row["cnt"] == 0:
+                                await cursor.execute(
+                                    "UPDATE events SET is_active = FALSE WHERE id = %s",
+                                    (target_id,),
+                                )
+                                self.logger.debug(f"Spec request event {target_id} auto-marked as inactive via admin soft-delete.")
+
                     await self._recalc_session_points_delta(conn, session_id, lock=False)
 
                     await cursor.execute(
                         """
-                        SELECT id, pr_id, deleted_at, deleted_by_id, delete_reason, credited_points
-                        FROM spec_sessions
-                        WHERE id = %s
+                        SELECT 
+                            ss.id, ss.pr_id, ss.target_type, ss.target_id,
+                            CASE
+                                WHEN ss.target_name IS NOT NULL THEN ss.target_name
+                                WHEN ss.target_type = 'streamer' THEN s.streamer_name
+                                WHEN ss.target_type = 'event' THEN e.name
+                                ELSE NULL
+                            END AS target_name,
+                            ss.started_at, ss.ended_at,
+                            ss.deleted_at, ss.deleted_by_id, ss.delete_reason, ss.credited_points
+                        FROM spec_sessions ss
+                        LEFT JOIN streamers s ON ss.target_type = 'streamer' AND ss.target_id = s.streamer_id
+                        LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
+                        WHERE ss.id = %s
                         """,
                         (session_id,),
                     )

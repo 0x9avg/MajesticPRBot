@@ -407,7 +407,7 @@ async def update_streamer_status(
         # Case 1: Stream went OFFLINE
         if not data.is_online and old_is_online:
             should_unassign = True
-            unassign_reason = "stream_offline"
+            unassign_reason = "stream_end"
 
         # Case 2: Category changed FROM GTA while online
         elif data.is_online and old_is_online:
@@ -415,7 +415,7 @@ async def update_streamer_status(
             is_gta = new_game_id == Config.gta5_game_id
             if was_gta and not is_gta:
                 should_unassign = True
-                unassign_reason = "category_from_gta"
+                unassign_reason = "category_change"
 
         # Execute auto-unassign if needed
         if should_unassign:

@@ -312,6 +312,11 @@ class FakeDB:
                 "dashboard.view": True,
                 "streamers.view": True,
                 "logs.pr_actions.view": True,
+                "returns.view": True,
+                "returns.create": True,
+                "returns.execute": True,
+                "returns.history.view": True,
+                "returns.manage.self": True,
             },
             "employee": {
                 "spec.claim.main": True,
@@ -325,6 +330,11 @@ class FakeDB:
                 "dashboard.view": True,
                 "streamers.view": True,
                 "logs.pr_actions.view": True,
+                "returns.view": True,
+                "returns.create": True,
+                "returns.execute": True,
+                "returns.history.view": True,
+                "returns.manage.self": True,
             },
             "senior_employee": {
                 "events.create": True,
@@ -339,6 +349,11 @@ class FakeDB:
                 "dashboard.view": True,
                 "streamers.view": True,
                 "logs.pr_actions.view": True,
+                "returns.view": True,
+                "returns.create": True,
+                "returns.execute": True,
+                "returns.history.view": True,
+                "returns.manage.self": True,
             },
             "manager": {
                 "admin.users.create": True,
@@ -358,6 +373,12 @@ class FakeDB:
                 "assistants.points.manage": True,
                 "assistants.sanctions.manage": True,
                 "assistants.warnings.manage": True,
+                "returns.view": True,
+                "returns.create": True,
+                "returns.execute": True,
+                "returns.history.view": True,
+                "returns.manage.self": True,
+                "returns.manage.any": True,
             },
             "developer": {
                 "admin.users.create": True,
@@ -367,6 +388,12 @@ class FakeDB:
                 "notifications.render": True,
                 "streamers.status.update": True,
                 "spec.claim.probation": True,
+                "returns.view": True,
+                "returns.create": True,
+                "returns.execute": True,
+                "returns.history.view": True,
+                "returns.manage.self": True,
+                "returns.manage.any": True,
             },
         }
 
@@ -392,6 +419,10 @@ class FakeDB:
             "unassigned_media_count": 0,
             "events_today_count": 0,
         }
+
+        # Returns
+        self.punishment_returns: dict[int, dict[str, Any]] = {}
+        self.next_punishment_return_id = 1
 
     # ---------------------------------------------------------------------
     # Auth/user operations
@@ -572,6 +603,196 @@ class FakeDB:
         filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {"items": [], "total": 0}
+
+    # ---------------------------------------------------------------------
+    # Punishment Returns
+    # ---------------------------------------------------------------------
+
+    async def create_punishment_return(
+        self,
+        *,
+        punishment_type: str,
+        static: int,
+        server: int,
+        duration: int,
+        remove_reason: str,
+        discord_message_url: str | None,
+        removed_by_id: int,
+        removed_by_name: str,
+    ) -> dict[str, Any] | None:
+        return_id = self.next_punishment_return_id
+        self.next_punishment_return_id += 1
+        now = _now()
+        record = {
+            "id": return_id,
+            "punishment_type": punishment_type,
+            "static": int(static),
+            "server": int(server),
+            "duration": int(duration),
+            "remove_reason": remove_reason,
+            "discord_message_url": discord_message_url,
+            "removed_by_id": int(removed_by_id),
+            "removed_by_name": removed_by_name,
+            "removed_at": now,
+            "claimed_by_id": None,
+            "claimed_by_name": None,
+            "claimed_at": None,
+            "completed_by_id": None,
+            "completed_by_name": None,
+            "completed_at": None,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.punishment_returns[return_id] = record
+        return deepcopy(record)
+
+    async def get_punishment_return(self, return_id: int) -> dict[str, Any] | None:
+        record = self.punishment_returns.get(int(return_id))
+        return deepcopy(record) if record else None
+
+    async def list_punishment_returns_queue(self) -> list[dict[str, Any]]:
+        now = _now()
+
+        def sort_key(item: dict[str, Any]) -> tuple[int, datetime, int]:
+            status = str(item.get("status"))
+            removed_at = item.get("removed_at") or now
+            ready = removed_at + timedelta(hours=12) <= now
+            if status == "pending" and ready:
+                rank = 0
+            elif status == "claimed":
+                rank = 1
+            else:
+                rank = 2
+            return rank, removed_at, int(item.get("id") or 0)
+
+        rows = [
+            deepcopy(row)
+            for row in self.punishment_returns.values()
+            if row.get("status") in {"pending", "claimed"}
+        ]
+        rows.sort(key=sort_key)
+        return rows
+
+    async def claim_punishment_return(
+        self,
+        return_id: int,
+        *,
+        claimed_by_id: int,
+        claimed_by_name: str,
+    ) -> dict[str, Any] | None:
+        record = self.punishment_returns.get(int(return_id))
+        if not record or record.get("status") != "pending":
+            return None
+        removed_at = record.get("removed_at") or _now()
+        if removed_at + timedelta(hours=12) > _now():
+            return None
+        record["status"] = "claimed"
+        record["claimed_by_id"] = int(claimed_by_id)
+        record["claimed_by_name"] = claimed_by_name
+        record["claimed_at"] = _now()
+        record["updated_at"] = _now()
+        return deepcopy(record)
+
+    async def complete_punishment_return(
+        self,
+        return_id: int,
+        *,
+        completed_by_id: int,
+        completed_by_name: str,
+        claimer_only: bool = True,
+    ) -> dict[str, Any] | None:
+        record = self.punishment_returns.get(int(return_id))
+        if not record or record.get("status") != "claimed":
+            return None
+        if claimer_only and int(record.get("claimed_by_id") or 0) != int(completed_by_id):
+            return None
+        record["status"] = "completed"
+        record["completed_by_id"] = int(completed_by_id)
+        record["completed_by_name"] = completed_by_name
+        record["completed_at"] = _now()
+        record["updated_at"] = _now()
+        return deepcopy(record)
+
+    async def update_punishment_return(
+        self,
+        return_id: int,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        record = self.punishment_returns.get(int(return_id))
+        if not record:
+            return None
+        for key in [
+            "punishment_type",
+            "static",
+            "server",
+            "duration",
+            "remove_reason",
+            "discord_message_url",
+        ]:
+            if key in updates:
+                record[key] = updates[key]
+        record["updated_at"] = _now()
+        return deepcopy(record)
+
+    async def release_punishment_return(
+        self,
+        return_id: int,
+        *,
+        claimed_by_id: int,
+        claimer_only: bool = True,
+    ) -> dict[str, Any] | None:
+        record = self.punishment_returns.get(int(return_id))
+        if not record or record.get("status") != "claimed":
+            return None
+        if claimer_only and int(record.get("claimed_by_id") or 0) != int(claimed_by_id):
+            return None
+        record["status"] = "pending"
+        record["claimed_by_id"] = None
+        record["claimed_by_name"] = None
+        record["claimed_at"] = None
+        record["updated_at"] = _now()
+        return deepcopy(record)
+
+    async def delete_punishment_return(self, return_id: int) -> bool:
+        return self.punishment_returns.pop(int(return_id), None) is not None
+
+    async def get_punishment_return_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        filters = filters or {}
+        rows = [
+            deepcopy(row)
+            for row in self.punishment_returns.values()
+            if row.get("status") == "completed"
+        ]
+
+        if filters.get("static") is not None:
+            rows = [row for row in rows if int(row.get("static") or 0) == int(filters["static"])]
+        if filters.get("server") is not None:
+            rows = [row for row in rows if int(row.get("server") or 0) == int(filters["server"])]
+        if filters.get("punishment_type"):
+            rows = [row for row in rows if row.get("punishment_type") == filters["punishment_type"]]
+        if filters.get("removed_by_name"):
+            needle = str(filters["removed_by_name"]).lower()
+            rows = [row for row in rows if needle in str(row.get("removed_by_name") or "").lower()]
+        if filters.get("completed_by_name"):
+            needle = str(filters["completed_by_name"]).lower()
+            rows = [row for row in rows if needle in str(row.get("completed_by_name") or "").lower()]
+        if filters.get("date_from"):
+            rows = [row for row in rows if row.get("completed_at") and row["completed_at"] >= filters["date_from"]]
+        if filters.get("date_to"):
+            rows = [row for row in rows if row.get("completed_at") and row["completed_at"] <= filters["date_to"]]
+
+        rows.sort(key=lambda row: (row.get("completed_at") or _now(), row.get("id") or 0), reverse=True)
+        return {
+            "items": rows[offset : offset + limit],
+            "total": len(rows),
+        }
 
     # ---------------------------------------------------------------------
     # Assistants
@@ -1396,6 +1617,12 @@ def default_current_user() -> dict[str, Any]:
             "streamers.create": True,
             "streamers.update": True,
             "streamers.delete": True,
+            "returns.view": True,
+            "returns.create": True,
+            "returns.execute": True,
+            "returns.history.view": True,
+            "returns.manage.self": True,
+            "returns.manage.any": True,
             "guild.view": True,
             "guild.settings.view": True,
             "guild.settings.update": True,

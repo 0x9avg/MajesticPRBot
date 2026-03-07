@@ -114,5 +114,54 @@ export interface AdminLogRecord {
     created_at: string;
 }
 
+export type PunishmentType = 'jail' | 'mute';
+export type PunishmentReturnStatus = 'pending' | 'claimed' | 'completed';
+export type PunishmentReturnReason = 'На стрим' | 'На видео';
 
-export infterface Vacancy
+export interface PunishmentReturnQueueItem {
+    id: string;
+    punishment_type: PunishmentType;
+    static: number;
+    server: number;
+    duration: number;
+    remove_reason: PunishmentReturnReason;
+    discord_message_url: string | null;
+    removed_by_id: string;
+    removed_by_name: string;
+    removed_at: string;
+    claimed_by_id?: string | null;
+    claimed_by_name?: string | null;
+    claimed_at?: string | null;
+    completed_by_id?: string | null;
+    completed_by_name?: string | null;
+    completed_at?: string | null;
+    status: PunishmentReturnStatus;
+    status_label: string;
+    remove_command: string;
+    return_command: string;
+    can_claim: boolean;
+    can_complete: boolean;
+    can_release: boolean;
+    can_edit: boolean;
+    can_delete: boolean;
+}
+
+export interface PunishmentReturnHistoryItem extends PunishmentReturnQueueItem {}
+
+export interface PunishmentReturnCreateInput {
+    punishment_type: PunishmentType;
+    static: number;
+    server: number;
+    duration: number;
+    remove_reason: PunishmentReturnReason;
+    discord_message_url?: string | null;
+}
+
+export interface PunishmentReturnUpdateInput {
+    punishment_type?: PunishmentType;
+    static?: number;
+    server?: number;
+    duration?: number;
+    remove_reason?: PunishmentReturnReason;
+    discord_message_url?: string | null;
+}

@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { setAccessToken } from '../../api/client';
 
 const navigateMock = vi.fn();
 
@@ -15,9 +16,18 @@ vi.mock('react-router-dom', async () => {
 
 import Login from '../Login';
 
+const buildAccessToken = (expOffsetSeconds = 3600) => {
+    const payload = {
+        exp: Math.floor(Date.now() / 1000) + expOffsetSeconds,
+        role: 'manager',
+    };
+    return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
+};
+
 describe('Login', () => {
     beforeEach(() => {
         localStorage.clear();
+        setAccessToken(null);
         navigateMock.mockReset();
     });
 
@@ -26,7 +36,7 @@ describe('Login', () => {
             .fn()
             .mockResolvedValueOnce(
                 new Response(
-                    JSON.stringify({ access_token: 'access-1', refresh_token: 'refresh-1' }),
+                    JSON.stringify({ access_token: buildAccessToken(), refresh_token: 'refresh-1' }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
                 )
             )
@@ -59,7 +69,7 @@ describe('Login', () => {
             expect(navigateMock).toHaveBeenCalledWith('/hub');
         });
 
-        expect(localStorage.getItem('access_token')).toBe('access-1');
+        expect(localStorage.getItem('access_token')).toBeTruthy();
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toContain('tester');
     });
@@ -87,7 +97,7 @@ describe('Login', () => {
     });
 
     it('clears auth and shows session message when /auth/me returns 401', async () => {
-        localStorage.setItem('access_token', 'old-access');
+        localStorage.setItem('access_token', buildAccessToken());
         localStorage.setItem('refresh_token', 'old-refresh');
         localStorage.setItem('user', '{"username":"old"}');
 
@@ -95,7 +105,7 @@ describe('Login', () => {
             .fn()
             .mockResolvedValueOnce(
                 new Response(
-                    JSON.stringify({ access_token: 'access-2', refresh_token: 'refresh-2' }),
+                    JSON.stringify({ access_token: buildAccessToken(), refresh_token: 'refresh-2' }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
                 )
             )

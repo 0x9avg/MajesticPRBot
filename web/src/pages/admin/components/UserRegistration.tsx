@@ -1,11 +1,16 @@
+import React from 'react';
 import { useEffect, useState } from 'react';
 import { ShieldAlert, AlertCircle, Copy, Check, UserPlus } from 'lucide-react';
 import { getMskTodayStr } from '../../../utils/datetime';
 import { CustomSelect } from '../../../components/CustomInputs';
+import NotificationToast from '../../../components/feedback/NotificationToast';
+import { usePopupToast } from '../../../components/feedback/hooks';
 import { useOutletContext } from 'react-router-dom';
 import type { KnownRole, OutletUserContext } from '../../../types/auth';
 import { getApiErrorMessage } from '../../../types/api';
 import { apiFetch } from '../../../api/client';
+
+void React;
 
 type Role = KnownRole;
 
@@ -42,6 +47,7 @@ const getAllowedRoles = (userRole?: Role, canRegisterUsers?: boolean): Role[] =>
 
 const UserRegistration = () => {
     const { user } = useOutletContext<OutletUserContext>();
+    const { toast, showToast, closeToast } = usePopupToast(3200);
     const getTodayMskDate = () => getMskTodayStr();
     const [formData, setFormData] = useState({
         username: '',
@@ -51,7 +57,6 @@ const UserRegistration = () => {
         appointed_at: getTodayMskDate(),
     });
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
     const [createdUser, setCreatedUser] = useState<{ username: string, password: string } | null>(null);
     const [copied, setCopied] = useState(false);
 
@@ -71,25 +76,30 @@ const UserRegistration = () => {
 
     const handleCopy = () => {
         if (createdUser) {
-            navigator.clipboard.writeText(`Login: ${createdUser.username} \nPassword: ${createdUser.password} `);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
+            navigator.clipboard.writeText(`Login: ${createdUser.username} \nPassword: ${createdUser.password} `)
+                .then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                    showToast('Данные пользователя скопированы');
+                })
+                .catch(() => {
+                    showToast('Не удалось скопировать данные пользователя', 'error');
+                });
         }
     };
 
     const handleSubmit = async () => {
         try {
             setLoading(true);
-            setError(null);
 
             if (!canRegisterUsers) {
-                setError('Недостаточно прав для регистрации пользователей');
+                showToast('Недостаточно прав для регистрации пользователей', 'error');
                 return;
             }
 
             // Validate
             if (!formData.username || !formData.nickname || !formData.role || !formData.discord_id || !formData.appointed_at) {
-                setError("Заполните все поля");
+                showToast('Заполните все поля', 'error');
                 return;
             }
 
@@ -130,9 +140,9 @@ const UserRegistration = () => {
 
         } catch (err: unknown) {
             if (err instanceof Error) {
-                setError(err.message);
+                showToast(err.message, 'error');
             } else {
-                setError("Ошибка при создании пользователя");
+                showToast('Ошибка при создании пользователя', 'error');
             }
         } finally {
             setLoading(false);
@@ -193,13 +203,6 @@ const UserRegistration = () => {
                                 </div>
                             </div>
                         </div>
-                    </div>
-                )}
-
-                {error && (
-                    <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl flex items-center gap-3 mb-6">
-                        <AlertCircle className="w-5 h-5" />
-                        {error}
                     </div>
                 )}
 
@@ -287,6 +290,14 @@ const UserRegistration = () => {
                     </div>
                 </div>
             </div>
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 };

@@ -1,20 +1,22 @@
 import { useState } from 'react';
-import { Radio, Check, AlertCircle, Users } from 'lucide-react';
+import { Radio, Users } from 'lucide-react';
+import NotificationToast from '../../../components/feedback/NotificationToast';
+import { usePopupToast } from '../../../components/feedback/hooks';
 import { getApiErrorMessage } from '../../../types/api';
 import { apiFetch } from '../../../api/client';
 
 
 const MediaRegistration = () => {
+    const { toast, showToast, closeToast } = usePopupToast(3000);
     const [priority, setPriority] = useState(0);
     const [prSlots, setPrSlots] = useState(1);
     const [urlInput, setUrlInput] = useState('');
     const [allowJuniors, setAllowJuniors] = useState(true);
     const [loading, setLoading] = useState(false);
-    const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
     const handleRegister = async () => {
         if (!urlInput) {
-            setMessage({ type: 'error', text: 'Укажите ссылку на профиль' });
+            showToast('Укажите ссылку на профиль', 'error');
             return;
         }
 
@@ -23,12 +25,11 @@ const MediaRegistration = () => {
         const match = urlInput.match(twitchRegex);
 
         if (!match) {
-            setMessage({ type: 'error', text: 'Некорректная ссылка Twitch' });
+            showToast('Некорректная ссылка Twitch', 'error');
             return;
         }
 
         setLoading(true);
-        setMessage(null);
 
         try {
             const fullUrl = urlInput;
@@ -54,15 +55,15 @@ const MediaRegistration = () => {
             const responseData = data as { data?: { username?: string } };
             if (response.status === 202) {
                 const username = responseData.data?.username || 'пользователя';
-                setMessage({ type: 'success', text: `Запрос на добавление ${username} отправлен` });
+                showToast(`Запрос на добавление ${username} отправлен`);
                 setUrlInput('');
             } else {
-                setMessage({ type: 'success', text: `Медиа успешно добавлено` });
+                showToast('Медиа успешно добавлено');
                 setUrlInput('');
             }
 
         } catch (err: unknown) {
-            setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Произошла ошибка' });
+            showToast(err instanceof Error ? err.message : 'Произошла ошибка', 'error');
         } finally {
             setLoading(false);
         }
@@ -81,13 +82,6 @@ const MediaRegistration = () => {
             </div>
 
             <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-6">
-                {message && (
-                    <div className={`px-4 py-3 rounded-xl flex items-center gap-3 ${message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'} mb-6`}>
-                        {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                        {message.text}
-                    </div>
-                )}
-
                 <div className="space-y-6">
                     <div>
                         <label className="text-sm font-medium text-white/60 mb-2 block">Ссылка на профиль</label>
@@ -164,6 +158,14 @@ const MediaRegistration = () => {
                     </div>
                 </div>
             </div>
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 };

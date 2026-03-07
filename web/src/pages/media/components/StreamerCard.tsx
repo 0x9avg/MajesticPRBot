@@ -1,10 +1,13 @@
 
+import React from 'react';
 
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { ExternalLink, Users, Settings, Trash2 } from 'lucide-react';
 import type { OutletUserContext } from '../../../types/auth';
 import type { Streamer } from '../../../types/domain';
 import { hasAny } from '../../../rbac/guards';
+
+void React;
 
 interface StreamerCardProps {
     streamer: Streamer;
@@ -66,9 +69,7 @@ const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps
                         {onDelete && (
                             <button
                                 onClick={() => {
-                                    if (window.confirm(`Удалить стримера ${streamer.streamer_name}?`)) {
-                                        onDelete(streamer);
-                                    }
+                                    onDelete(streamer);
                                 }}
                                 className="p-2 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-400 transition-colors"
                             >

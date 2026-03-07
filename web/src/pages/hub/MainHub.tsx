@@ -1,12 +1,15 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { Users, Wifi, Activity, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock } from 'lucide-react';
+import { Users, Wifi, UserPlus, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock } from 'lucide-react';
 import type { OutletUserContext } from '../../types/auth';
 import type { DashboardStats, Event, EventParticipant, Streamer, StreamerAssignment } from '../../types/domain';
 import { unwrapApiData, getApiErrorMessage } from '../../types/api';
 import { formatMskToLocal } from '../../utils/datetime';
 import StreamerSettingsModal from '../media/components/StreamerSettingsModal';
 import EventSettingsModal from '../media/components/EventSettingsModal';
+import ConfirmDialog from '../../components/feedback/ConfirmDialog';
+import NotificationToast from '../../components/feedback/NotificationToast';
+import { useConfirmDialog, usePopupToast } from '../../components/feedback/hooks';
 import { apiFetch } from '../../api/client';
 import { ADMIN_SECTION_PERMISSIONS } from '../../rbac/catalog';
 import { hasAny, hasPerm } from '../../rbac/guards';
@@ -18,10 +21,13 @@ type ActivityItem =
 export function MainHub() {
     const navigate = useNavigate();
     const { user } = useOutletContext<OutletUserContext>();
+    const { toast, showToast, closeToast } = usePopupToast(3000);
+    const { confirm, dialogProps } = useConfirmDialog();
     const canManageStreamers = hasAny(user, ['streamers.update', 'streamers.delete']);
     const canManageEvents = hasAny(user, ['events.manage', 'events.update']);
     const canViewAdminSection = hasAny(user, ADMIN_SECTION_PERMISSIONS);
     const canViewBotDashboard = hasAny(user, ['monitoring.view', 'monitoring.refresh']);
+    const canViewReturns = hasAny(user, ['returns.view', 'returns.history.view']);
     const canClaimMain = hasPerm(user, 'spec.claim.main');
     const canClaimProbation = hasPerm(user, 'spec.claim.probation');
     const canUnclaimSelf = hasPerm(user, 'spec.unclaim.self');
@@ -44,7 +50,6 @@ export function MainHub() {
     const [activeEvents, setActiveEvents] = React.useState<Event[]>([]);
     const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
     const [selectedEvent, setSelectedEvent] = React.useState<Event | null>(null);
-    const [claimError, setClaimError] = React.useState<string | null>(null);
 
     // Spec request modal state
     const [isSpecRequestOpen, setIsSpecRequestOpen] = React.useState(false);
@@ -140,17 +145,14 @@ export function MainHub() {
                 body: JSON.stringify({ streamer_id: streamerId, is_probation: isProbation })
             });
             if (response.ok) {
-                setClaimError(null);
                 await fetchOnlineStreamersManual();
             } else {
                 const error = await response.json().catch(() => ({} as unknown));
-                setClaimError(getApiErrorMessage(error, 'Не удалось закрепиться'));
-                setTimeout(() => setClaimError(null), 3000);
+                showToast(getApiErrorMessage(error, 'Не удалось закрепиться'), 'error');
             }
         } catch (error) {
             console.error('Error claiming streamer:', error);
-            setClaimError('Ошибка при закреплении');
-            setTimeout(() => setClaimError(null), 3000);
+            showToast('Ошибка при закреплении', 'error');
         }
     };
 
@@ -162,17 +164,14 @@ export function MainHub() {
                 body: JSON.stringify({ streamer_id: streamerId, reason: 'manual_unclaim' })
             });
             if (response.ok) {
-                setClaimError(null);
                 await fetchOnlineStreamersManual();
             } else {
                 const error = await response.json().catch(() => ({} as unknown));
-                setClaimError(getApiErrorMessage(error, 'Не удалось открепиться'));
-                setTimeout(() => setClaimError(null), 3000);
+                showToast(getApiErrorMessage(error, 'Не удалось открепиться'), 'error');
             }
         } catch (error) {
             console.error('Error unclaiming streamer:', error);
-            setClaimError('Ошибка при откреплении');
-            setTimeout(() => setClaimError(null), 3000);
+            showToast('Ошибка при откреплении', 'error');
         }
     };
 
@@ -182,17 +181,14 @@ export function MainHub() {
                 method: 'POST',
             });
             if (response.ok) {
-                setClaimError(null);
                 await fetchActiveEventsManual();
             } else {
                 const error = await response.json().catch(() => ({} as unknown));
-                setClaimError(getApiErrorMessage(error, 'Не удалось присоединиться к событию'));
-                setTimeout(() => setClaimError(null), 3000);
+                showToast(getApiErrorMessage(error, 'Не удалось присоединиться к событию'), 'error');
             }
         } catch (error) {
             console.error('Error joining event:', error);
-            setClaimError('Ошибка при присоединении');
-            setTimeout(() => setClaimError(null), 3000);
+            showToast('Ошибка при присоединении', 'error');
         }
     };
 
@@ -202,17 +198,14 @@ export function MainHub() {
                 method: 'POST',
             });
             if (response.ok) {
-                setClaimError(null);
                 await fetchActiveEventsManual();
             } else {
                 const error = await response.json().catch(() => ({} as unknown));
-                setClaimError(getApiErrorMessage(error, 'Не удалось покинуть событие'));
-                setTimeout(() => setClaimError(null), 3000);
+                showToast(getApiErrorMessage(error, 'Не удалось покинуть событие'), 'error');
             }
         } catch (error) {
             console.error('Error leaving event:', error);
-            setClaimError('Ошибка при выходе из события');
-            setTimeout(() => setClaimError(null), 3000);
+            showToast('Ошибка при выходе из события', 'error');
         }
     };
 
@@ -268,18 +261,29 @@ export function MainHub() {
     };
 
     const handleEndEvent = async (event: Event) => {
-        if (!window.confirm(`Завершить событие "${event.name}"?`)) return;
+        const confirmed = await confirm({
+            title: 'Завершить событие?',
+            message: <>Событие <span className="text-white font-semibold">{event.name}</span> будет завершено для всех участников.</>,
+            confirmLabel: 'Завершить',
+            tone: 'danger',
+        });
+
+        if (!confirmed) return;
+
         try {
             const response = await apiFetch(`/api/events/${event.id}/end`, {
                 method: 'POST',
             });
             if (response.ok) {
                 await fetchActiveEventsManual();
+                showToast(`Событие "${event.name}" завершено`);
             } else {
                 console.error('Failed to end event', await response.text());
+                showToast(`Не удалось завершить событие "${event.name}"`, 'error');
             }
         } catch (error) {
             console.error('Failed to end event:', error);
+            showToast(`Не удалось завершить событие "${event.name}"`, 'error');
         }
     };
 
@@ -302,19 +306,37 @@ export function MainHub() {
                 setSpecRequestDesc('');
                 setSpecRequestPriority(0);
                 await fetchActiveEventsManual();
+                showToast('Запрос на мероприятие создан');
             } else {
                 const error = await response.json().catch(() => ({} as unknown));
-                setClaimError(getApiErrorMessage(error, 'Не удалось создать запрос'));
-                setTimeout(() => setClaimError(null), 3000);
+                showToast(getApiErrorMessage(error, 'Не удалось создать запрос'), 'error');
             }
         } catch (error) {
             console.error('Error creating spec request:', error);
-            setClaimError('Ошибка при создании запроса');
-            setTimeout(() => setClaimError(null), 3000);
+            showToast('Ошибка при создании запроса', 'error');
         } finally {
             setSpecRequestLoading(false);
         }
     };
+
+    const availableStreamerSlots = onlineStreamers.reduce((total, streamer) => {
+        const assignments = streamer.assignments || [];
+        const effectiveSlots = streamer.pr_slots_override ?? streamer.pr_slots;
+        return total + Math.max(effectiveSlots - assignments.length, 0);
+    }, 0);
+
+    const availableEventSlots = activeEvents.reduce((total, event) => {
+        if (event.event_kind === 'spec_request' && event.approval_status !== 'approved') {
+            return total;
+        }
+
+        const participants = event.participants || [];
+        const currentParticipants = event.current_participants ?? participants.length;
+        const totalSlots = event.pr_slots ?? event.required_pr_count ?? 1;
+        return total + Math.max(totalSlots - currentParticipants, 0);
+    }, 0);
+
+    const availableSlotsCount = availableStreamerSlots + availableEventSlots;
 
     const stats = [
         {
@@ -324,16 +346,16 @@ export function MainHub() {
             icon: Users
         },
         {
-            label: 'Медиа без закрепа',
+            label: 'Стримеров в GTA',
             value: dashboardStats.unassigned_media_count,
-            color: dashboardStats.unassigned_media_count === 0 ? 'text-white' : 'text-[#e81c5a]',
+            color: dashboardStats.unassigned_media_count > 0 ? 'text-[#9146ff]' : 'text-white',
             icon: Wifi
         },
         {
-            label: 'Мероприятий сегодня',
-            value: dashboardStats.events_today_count,
-            color: 'text-white',
-            icon: Activity
+            label: 'Требуется ассистентов',
+            value: availableSlotsCount,
+            color: availableSlotsCount > 0 ? 'text-emerald-400' : 'text-white',
+            icon: UserPlus
         },
     ];
 
@@ -358,8 +380,16 @@ export function MainHub() {
             path: '/logs',
             icon: FileText,
             color: 'from-emerald-500/20 to-emerald-600/5 hover:border-emerald-500/50'
-        }
-    ];
+        },
+        {
+            title: 'Возвраты',
+            desc: 'Очередь снятий и история перевыдач',
+            path: '/returns',
+            icon: Clock,
+            color: 'from-cyan-500/20 to-cyan-600/5 hover:border-cyan-500/50',
+            visible: canViewReturns,
+        },
+    ].filter((item) => item.visible !== false);
 
     const adminCategories = [
         {
@@ -678,12 +708,6 @@ export function MainHub() {
                         </div>
                     )}
 
-                    {/* Claim error toast */}
-                    {claimError && (
-                        <div className="mt-2 px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm animate-[fadeIn_0.2s_ease-out]">
-                            {claimError}
-                        </div>
-                    )}
                 </div>
             </div>
 
@@ -839,6 +863,16 @@ export function MainHub() {
                 onClose={() => setSelectedEvent(null)}
                 onSave={handleUpdateEvent}
             />
+
+            <ConfirmDialog {...dialogProps} />
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 }

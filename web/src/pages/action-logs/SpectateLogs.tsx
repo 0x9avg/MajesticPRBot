@@ -2,8 +2,9 @@ import React from 'react';
 import { useOutletContext, useNavigate } from 'react-router-dom';
 import { FileText, Search, Filter, Eye, ChevronLeft, ChevronRight, Clock, User } from 'lucide-react';
 import { CustomSelect, CustomDatePicker } from '../../components/CustomInputs';
+import NotificationToast from '../../components/feedback/NotificationToast';
 import DetailsModal from './components/DetailsModal';
-import NotificationToast from './components/NotificationToast';
+import { usePopupToast } from '../../components/feedback/hooks';
 import type { OutletUserContext } from '../../types/auth';
 import type { AdminLogRecord } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
@@ -27,6 +28,8 @@ export const ACTION_TRANSLATIONS: Record<string, string> = {
     'assistant.warnings.update': 'Обновление предупреждений',
     'assistant.create': 'Создан ассистент',
     'assistant.update': 'Обновлен ассистент',
+    'return.update': 'Обновлен возврат',
+    'return.delete': 'Удален возврат',
     'system.maintenance.enable': 'Включение тех. работ',
     'system.maintenance.disable': 'Выключение тех. работ',
     'rbac.matrix.update': 'Обновление прав',
@@ -164,7 +167,7 @@ export function SpectateLogs() {
     // Details Modal State
     const [selectedLog, setSelectedLog] = React.useState<AdminLogRecord | null>(null);
 
-    const [notification, setNotification] = React.useState<string | null>(null);
+    const { toast, showToast, closeToast } = usePopupToast(2000);
 
     // Initial check
     const canViewAdminLogs = user?.permissions?.['logs.admin.view'] === true;
@@ -296,34 +299,6 @@ export function SpectateLogs() {
     ];
 
     // ==================== Admin Logs Logic ====================
-    const resolveKind = React.useCallback((action: string): string => {
-        if (!action || !action.includes('.')) return 'other';
-        return action.split('.', 1)[0];
-    }, []);
-
-    const kindBadgeClass = React.useCallback((kind: string): string => {
-        switch (kind) {
-            case 'user':
-                return 'bg-sky-500/20 text-sky-300 border border-sky-400/30';
-            case 'streamer':
-                return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30';
-            case 'event':
-                return 'bg-amber-500/20 text-amber-300 border border-amber-400/30';
-            case 'assistant':
-                return 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-400/30';
-            case 'system':
-                return 'bg-rose-500/20 text-rose-300 border border-rose-400/30';
-            case 'rbac':
-                return 'bg-indigo-500/20 text-indigo-300 border border-indigo-400/30';
-            case 'spec':
-                return 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/30';
-            case 'guild':
-                return 'bg-lime-500/20 text-lime-300 border border-lime-400/30';
-            default:
-                return 'bg-white/10 text-white/70 border border-white/10';
-        }
-    }, []);
-
     const fetchAdminLogs = React.useCallback(async (page: number) => {
         setAdminLoading(true);
         try {
@@ -405,10 +380,13 @@ export function SpectateLogs() {
 
         const textToCopy = `[ ${date} ] [ ${actorName} | ${actorRole} ] [ ${log.action} ]\n\`\`\`md\n${details}\n\`\`\``;
 
-        navigator.clipboard.writeText(textToCopy).then(() => {
-            setNotification(`Вы успешно скопировали лог #${log.id}`);
-            setTimeout(() => setNotification(null), 2000);
-        });
+        navigator.clipboard.writeText(textToCopy)
+            .then(() => {
+                showToast(`Вы успешно скопировали лог #${log.id}`);
+            })
+            .catch(() => {
+                showToast(`Не удалось скопировать лог #${log.id}`, 'error');
+            });
     };
 
     const actionOptions = [
@@ -420,6 +398,8 @@ export function SpectateLogs() {
         { value: 'assistant.spec_points.adjust.permanent', label: 'assistant.spec_points.adjust.permanent' },
         { value: 'assistant.spec_time.add', label: 'assistant.spec_time.add' },
         { value: 'assistant.spec_time.subtract', label: 'assistant.spec_time.subtract' },
+        { value: 'return.update', label: 'return.update' },
+        { value: 'return.delete', label: 'return.delete' },
         { value: 'system.maintenance.enable', label: 'system.maintenance.enable' },
         { value: 'system.maintenance.disable', label: 'system.maintenance.disable' },
         { value: 'rbac.matrix.update', label: 'rbac.matrix.update' },
@@ -431,6 +411,7 @@ export function SpectateLogs() {
         { value: 'streamer', label: 'streamer.*' },
         { value: 'event', label: 'event.*' },
         { value: 'assistant', label: 'assistant.*' },
+        { value: 'return', label: 'return.*' },
         { value: 'system', label: 'system.*' },
         { value: 'rbac', label: 'rbac.*' },
         { value: 'spec', label: 'spec.*' },
@@ -735,7 +716,6 @@ export function SpectateLogs() {
                     )}
                 </div>
             )}
-            {notification && <NotificationToast message={notification} />}
             {
                 activeTab === 'admins' && canViewAdminLogs && (
                     <div className="space-y-4">
@@ -988,8 +968,6 @@ export function SpectateLogs() {
                                 </button>
                             </div>
                         )}
-                        {notification && <NotificationToast message={notification} />}
-
                         <DetailsModal
                             isOpen={!!selectedLog}
                             onClose={() => setSelectedLog(null)}
@@ -999,6 +977,13 @@ export function SpectateLogs() {
                     </div>
                 )
             }
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div >
     );
 }

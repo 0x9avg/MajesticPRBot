@@ -1,20 +1,24 @@
+import React from 'react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Lock, User, Eye, EyeOff } from 'lucide-react'
+import NotificationToast from '../components/feedback/NotificationToast'
+import { usePopupToast } from '../components/feedback/hooks'
 import { getApiErrorMessage } from '../types/api'
 import { apiFetch, setAccessToken } from '../api/client'
 
+void React
+
 export default function Login() {
+    const { toast, showToast, closeToast } = usePopupToast(3200)
     const [username, setUsername] = useState('')
     const [password, setPassword] = useState('')
     const [showPassword, setShowPassword] = useState(false)
-    const [error, setError] = useState('')
     const [loading, setLoading] = useState(false)
     const navigate = useNavigate()
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault()
-        setError('')
         setLoading(true)
 
         try {
@@ -54,7 +58,7 @@ export default function Login() {
 
             navigate('/hub')
         } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : 'Ошибка авторизации')
+            showToast(err instanceof Error ? err.message : 'Ошибка авторизации', 'error')
         } finally {
             setLoading(false)
         }
@@ -73,10 +77,6 @@ export default function Login() {
                     <h1 className="text-3xl font-bold text-center mb-2 bg-gradient-to-r from-[#3b82f6] to-[#e81c5a] bg-clip-text text-transparent select-none">PR control panel</h1>
                     <p className="text-white/60 text-center mb-8 text-sm select-none">Панель управления</p>
                 </div>
-
-                {error && (
-                    <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-sm text-center">{error}</div>
-                )}
 
                 <form className="space-y-6" onSubmit={handleLogin}>
                     <div className="mb-4">
@@ -136,6 +136,14 @@ export default function Login() {
                     </button>
                 </form>
             </div>
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     )
 }

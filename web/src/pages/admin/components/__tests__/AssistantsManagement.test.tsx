@@ -105,8 +105,8 @@ describe('AssistantsManagement', () => {
             expect(screen.getByText('Выберите стримера')).toBeInTheDocument();
         });
 
-        const typeSelect = screen.getAllByRole('combobox')[2];
-        await user.selectOptions(typeSelect, 'event');
+        await user.click(screen.getAllByText('Стример')[0]);
+        await user.click(screen.getByText('Событие'));
 
         await waitFor(() => {
             expect(screen.getByText('Выберите событие')).toBeInTheDocument();
@@ -124,8 +124,8 @@ describe('AssistantsManagement', () => {
             expect(screen.getByText('Выберите стримера')).toBeInTheDocument();
         });
 
-        const typeSelect = screen.getAllByRole('combobox')[2];
-        await user.selectOptions(typeSelect, 'manual');
+        await user.click(screen.getAllByText('Стример')[0]);
+        await user.click(screen.getByText('Manual'));
 
         await user.click(screen.getByRole('button', { name: 'Добавить ручную сессию' }));
 

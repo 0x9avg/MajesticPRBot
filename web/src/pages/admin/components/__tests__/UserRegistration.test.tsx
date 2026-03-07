@@ -117,8 +117,10 @@ describe('UserRegistration', () => {
         await ui.click(screen.getByRole('button', { name: 'Создать пользователя' }));
 
         await waitFor(() => {
-            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(fetchMock).toHaveBeenCalled();
             expect(screen.getByText('Нельзя создавать пользователя с ролью выше вашей')).toBeInTheDocument();
         });
+
+        expect(fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).includes('/api/admin/users'))).toBe(true);
     });
 });

@@ -1,7 +1,10 @@
+import React from 'react';
 import { Navigate, useOutletContext } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import type { OutletUserContext } from '../../types/auth';
 import { hasAll, hasAny, type PermissionKey } from '../../rbac/guards';
+
+void React;
 
 interface PermissionRouteProps {
     requireAny?: PermissionKey[];

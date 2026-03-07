@@ -8,6 +8,7 @@ import MainHub from './pages/hub/MainHub'
 import MediaList from './pages/media/MediaList'
 import PRStats from './pages/stats/PRStats'
 import SpectateLogs from './pages/action-logs/SpectateLogs'
+import PunishmentReturns from './pages/returns/PunishmentReturns'
 import CreateEvent from './pages/admin/components/CreateEvent'
 import AdminPanel from './pages/admin/AdminPanel'
 import BotDashboard from './pages/dashboard/BotDashboard'
@@ -30,6 +31,14 @@ function App() {
                         <Route path="/media/:id" element={<MediaProfile />} />
                         <Route path="/assistants" element={<PRStats />} />
                         <Route path="/logs" element={<SpectateLogs />} />
+                        <Route
+                            path="/returns"
+                            element={
+                                <PermissionRoute requireAny={['returns.view', 'returns.history.view']}>
+                                    <PunishmentReturns />
+                                </PermissionRoute>
+                            }
+                        />
                         <Route
                             path="/events/new"
                             element={

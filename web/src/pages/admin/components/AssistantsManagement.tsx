@@ -1,10 +1,16 @@
+import React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
 import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
+import NotificationToast from '../../../components/feedback/NotificationToast';
+import { useConfirmDialog, usePopupToast } from '../../../components/feedback/hooks';
 import type { Assistant, Event, Streamer } from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
 import { parseMskDate, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
+
+void React;
 
 export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
 
@@ -104,15 +110,23 @@ const ensureOptionExists = (
 };
 
 const AssistantsManagement = () => {
+    const { toast, showToast, closeToast } = usePopupToast(3000);
+    const { confirm, dialogProps } = useConfirmDialog();
     const [assistants, setAssistants] = useState<Assistant[]>([]);
     const [selectedPrId, setSelectedPrId] = useState<string | null>(null);
     const [copiedId, setCopiedId] = useState(false);
 
     const handleCopyId = () => {
         if (!selectedPrId) return;
-        void navigator.clipboard.writeText(selectedPrId);
-        setCopiedId(true);
-        setTimeout(() => setCopiedId(false), 1500);
+        navigator.clipboard.writeText(selectedPrId)
+            .then(() => {
+                setCopiedId(true);
+                setTimeout(() => setCopiedId(false), 1500);
+                showToast('PR ID скопирован');
+            })
+            .catch(() => {
+                showToast('Не удалось скопировать PR ID', 'error');
+            });
     };
     const [selectedAssistant, setSelectedAssistant] = useState<Assistant | null>(null);
     const [sessions, setSessions] = useState<AssistantSessionRecord[]>([]);
@@ -127,7 +141,7 @@ const AssistantsManagement = () => {
     const [search, setSearch] = useState('');
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState(false);
-    const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [sessionModeWarning, setSessionModeWarning] = useState<string | null>(null);
     const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
     const [sessionEdit, setSessionEdit] = useState({
         target_type: 'streamer',
@@ -267,6 +281,7 @@ const AssistantsManagement = () => {
             const json = await response.json() as unknown;
             const data = unwrapApiData<AssistantSessionRecord[]>(json);
             setSessions(Array.isArray(data) ? data : []);
+            setSessionModeWarning(null);
             return;
         }
 
@@ -300,10 +315,7 @@ const AssistantsManagement = () => {
                     } satisfies AssistantSessionRecord))
                     : [];
                 setSessions(normalized);
-                setMessage({
-                    type: 'error',
-                    text: 'Сессии загружены в режиме read-only. Для админ-редактирования выполните повторный вход.',
-                });
+                setSessionModeWarning('Сессии загружены в режиме read-only. Для админ-редактирования выполните повторный вход.');
                 return;
             }
         }
@@ -326,12 +338,13 @@ const AssistantsManagement = () => {
         }
         if (sessionsResult.status === 'rejected') {
             setSessions([]);
-            setMessage({
-                type: 'error',
-                text: sessionsResult.reason instanceof Error
+            setSessionModeWarning(null);
+            showToast(
+                sessionsResult.reason instanceof Error
                     ? sessionsResult.reason.message
                     : 'Не удалось загрузить сессии ассистента',
-            });
+                'error',
+            );
         }
     };
 
@@ -341,7 +354,7 @@ const AssistantsManagement = () => {
                 setLoading(true);
                 await Promise.all([fetchAssistants(), fetchSessionTargetOptions()]);
             } catch (error: unknown) {
-                setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка загрузки' });
+                showToast(error instanceof Error ? error.message : 'Ошибка загрузки', 'error');
             } finally {
                 setLoading(false);
             }
@@ -356,7 +369,7 @@ const AssistantsManagement = () => {
                 setBusy(true);
                 await refreshSelectedAssistant(selectedPrId);
             } catch (error: unknown) {
-                setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка загрузки данных ассистента' });
+                showToast(error instanceof Error ? error.message : 'Ошибка загрузки данных ассистента', 'error');
             } finally {
                 setBusy(false);
             }
@@ -371,7 +384,6 @@ const AssistantsManagement = () => {
     ) => {
         if (!selectedPrId) return;
         setBusy(true);
-        setMessage(null);
         try {
             const response = await apiFetch(endpoint, {
                 method,
@@ -385,12 +397,9 @@ const AssistantsManagement = () => {
                 throw new Error((json as { detail?: string }).detail || 'Операция не выполнена');
             }
             await refreshSelectedAssistant(selectedPrId);
-            setMessage({ type: 'success', text: 'Изменения сохранены' });
+            showToast('Изменения сохранены');
         } catch (error: unknown) {
-            setMessage({
-                type: 'error',
-                text: error instanceof Error ? error.message : 'Операция не выполнена',
-            });
+            showToast(error instanceof Error ? error.message : 'Операция не выполнена', 'error');
         } finally {
             setBusy(false);
         }
@@ -400,7 +409,7 @@ const AssistantsManagement = () => {
         if (!selectedPrId) return;
         const delta = toNumberOrUndefined(pointsForm.delta);
         if (delta === undefined || delta === 0) {
-            setMessage({ type: 'error', text: 'Укажите изменение баллов (не 0)' });
+            showToast('Укажите изменение баллов (не 0)', 'error');
             return;
         }
         await runMutation(`/api/assistants/${selectedPrId}/points/adjust`, 'POST', {
@@ -415,7 +424,7 @@ const AssistantsManagement = () => {
         const penaltyPoints = toNumberOrUndefined(sanctionsForm.penalty_points);
         const penaltyPercent = toNumberOrUndefined(sanctionsForm.penalty_percent);
         if (penaltyPoints === undefined && penaltyPercent === undefined) {
-            setMessage({ type: 'error', text: 'Укажите хотя бы одно поле санкций' });
+            showToast('Укажите хотя бы одно поле санкций', 'error');
             return;
         }
         await runMutation(`/api/assistants/${selectedPrId}/sanctions`, 'PATCH', {
@@ -427,7 +436,7 @@ const AssistantsManagement = () => {
     const handleWarningsUpdate = async () => {
         if (!selectedPrId || !selectedAssistant) return;
         if (!warningsForm.target_state) {
-            setMessage({ type: 'error', text: 'Выберите итоговое состояние выговоров' });
+            showToast('Выберите итоговое состояние выговоров', 'error');
             return;
         }
 
@@ -442,7 +451,7 @@ const AssistantsManagement = () => {
         const oralDelta = targetOral - currentOral;
 
         if (strictDelta === 0 && oralDelta === 0) {
-            setMessage({ type: 'error', text: 'Состояние не изменилось (дельта 0)' });
+            showToast('Состояние не изменилось (дельта 0)', 'error');
             return;
         }
 
@@ -458,30 +467,30 @@ const AssistantsManagement = () => {
         const startedAtIso = parseLocalDateTimeToIso(manualSessionForm.started_at);
         const endedAtIso = parseLocalDateTimeToIso(manualSessionForm.ended_at);
         if (!startedAtIso || !endedAtIso) {
-            setMessage({ type: 'error', text: 'Укажите корректные начало и конец сессии' });
+            showToast('Укажите корректные начало и конец сессии', 'error');
             return;
         }
         if (new Date(endedAtIso).getTime() <= new Date(startedAtIso).getTime()) {
-            setMessage({ type: 'error', text: 'Конец сессии должен быть позже начала' });
+            showToast('Конец сессии должен быть позже начала', 'error');
             return;
         }
         const targetType = manualSessionForm.target_type;
         const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
         if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
-            setMessage({ type: 'error', text: optionsError || 'Справочники стримеров/событий пока недоступны' });
+            showToast(optionsError || 'Справочники стримеров/событий пока недоступны', 'error');
             return;
         }
         if (targetType !== 'manual' && targetOptions.length === 0) {
-            setMessage({ type: 'error', text: targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров' });
+            showToast(targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров', 'error');
             return;
         }
         if (manualSessionForm.target_type !== 'manual' && !manualSessionForm.target_id.trim()) {
-            setMessage({ type: 'error', text: 'Выберите цель спека' });
+            showToast('Выберите цель спека', 'error');
             return;
         }
         const parsedTargetId = toNumberOrUndefined(manualSessionForm.target_id);
         if (manualSessionForm.target_type !== 'manual' && parsedTargetId === undefined) {
-            setMessage({ type: 'error', text: 'Некорректная цель спека' });
+            showToast('Некорректная цель спека', 'error');
             return;
         }
         if (manualSessionForm.target_type === 'manual') {
@@ -514,30 +523,30 @@ const AssistantsManagement = () => {
         const startedAtIso = parseLocalDateTimeToIso(sessionEdit.started_at);
         const endedAtIso = parseLocalDateTimeToIso(sessionEdit.ended_at);
         if (!startedAtIso || !endedAtIso) {
-            setMessage({ type: 'error', text: 'Укажите корректные начало и конец сессии' });
+            showToast('Укажите корректные начало и конец сессии', 'error');
             return;
         }
         if (new Date(endedAtIso).getTime() <= new Date(startedAtIso).getTime()) {
-            setMessage({ type: 'error', text: 'Конец сессии должен быть позже начала' });
+            showToast('Конец сессии должен быть позже начала', 'error');
             return;
         }
         const targetType = sessionEdit.target_type;
         const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
         if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
-            setMessage({ type: 'error', text: optionsError || 'Справочники стримеров/событий пока недоступны' });
+            showToast(optionsError || 'Справочники стримеров/событий пока недоступны', 'error');
             return;
         }
         if (targetType !== 'manual' && targetOptions.length === 0) {
-            setMessage({ type: 'error', text: targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров' });
+            showToast(targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров', 'error');
             return;
         }
         if (sessionEdit.target_type !== 'manual' && !sessionEdit.target_id.trim()) {
-            setMessage({ type: 'error', text: 'Выберите цель спека' });
+            showToast('Выберите цель спека', 'error');
             return;
         }
         const parsedTargetId = toNumberOrUndefined(sessionEdit.target_id);
         if (sessionEdit.target_type !== 'manual' && parsedTargetId === undefined) {
-            setMessage({ type: 'error', text: 'Некорректная цель спека' });
+            showToast('Некорректная цель спека', 'error');
             return;
         }
         if (sessionEdit.target_type === 'manual') {
@@ -582,7 +591,6 @@ const AssistantsManagement = () => {
     const handleRoleChange = async (newRole: string) => {
         if (!selectedPrId || !selectedAssistant) return;
         setBusy(true);
-        setMessage(null);
         try {
             const response = await apiFetch('/api/assistants', {
                 method: 'POST',
@@ -601,9 +609,9 @@ const AssistantsManagement = () => {
                 throw new Error((json as { detail?: string }).detail || 'Не удалось сменить роль');
             }
             await refreshSelectedAssistant(selectedPrId);
-            setMessage({ type: 'success', text: `Роль изменена на ${newRole}` });
+            showToast(`Роль изменена на ${newRole}`);
         } catch (error: unknown) {
-            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка смены роли' });
+            showToast(error instanceof Error ? error.message : 'Ошибка смены роли', 'error');
         } finally {
             setBusy(false);
         }
@@ -611,10 +619,14 @@ const AssistantsManagement = () => {
 
     const handleDeleteAssistant = async () => {
         if (!selectedPrId || !selectedAssistant) return;
-        const confirmed = window.confirm(`Удалить ассистента ${selectedAssistant.nickname}? Это действие нельзя отменить.`);
+        const confirmed = await confirm({
+            title: 'Удалить ассистента?',
+            message: <>Ассистент <span className="text-white font-semibold">{selectedAssistant.nickname}</span> будет удален без возможности восстановления.</>,
+            confirmLabel: 'Удалить',
+            tone: 'danger',
+        });
         if (!confirmed) return;
         setBusy(true);
-        setMessage(null);
         try {
             const response = await apiFetch(`/api/assistants/${selectedPrId}`, {
                 method: 'DELETE',
@@ -627,9 +639,10 @@ const AssistantsManagement = () => {
             setSelectedAssistant(null);
             setSessions([]);
             await fetchAssistants();
-            setMessage({ type: 'success', text: `Ассистент удален` });
+            setSessionModeWarning(null);
+            showToast('Ассистент удален');
         } catch (error: unknown) {
-            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Ошибка удаления ассистента' });
+            showToast(error instanceof Error ? error.message : 'Ошибка удаления ассистента', 'error');
         } finally {
             setBusy(false);
         }
@@ -647,17 +660,17 @@ const AssistantsManagement = () => {
                 </div>
             </div>
 
-            {message && (
-                <div className={`px-4 py-3 rounded-xl flex items-center gap-3 ${message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-300' : 'bg-red-500/10 border border-red-500/20 text-red-300'}`}>
-                    {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                    {message.text}
-                </div>
-            )}
-
             {optionsError && (
                 <div className="px-4 py-3 rounded-xl flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200">
                     <AlertCircle className="w-5 h-5" />
                     {optionsError}. Для `manual`-спека форма продолжит работать.
+                </div>
+            )}
+
+            {sessionModeWarning && (
+                <div className="px-4 py-3 rounded-xl flex items-center gap-3 bg-amber-500/10 border border-amber-500/20 text-amber-200">
+                    <AlertCircle className="w-5 h-5" />
+                    {sessionModeWarning}
                 </div>
             )}
 
@@ -1208,6 +1221,16 @@ const AssistantsManagement = () => {
                     )}
                 </div>
             </div>
+
+            <ConfirmDialog {...dialogProps} />
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 };

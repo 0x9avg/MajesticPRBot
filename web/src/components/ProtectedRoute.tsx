@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
+import { useState, useEffect } from 'react';
 import { Navigate, Outlet, useOutletContext } from 'react-router-dom';
 import type { UserContext } from '../types/auth';
 import { hydrateAccessTokenFromStorage, tryRefresh } from '../api/client';
+
+void React;
 
 interface ProtectedRouteProps {
     allowedRoles?: string[];

@@ -1,6 +1,9 @@
 import React from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { Activity } from 'lucide-react';
+import ConfirmDialog from '../../components/feedback/ConfirmDialog';
+import NotificationToast from '../../components/feedback/NotificationToast';
+import { useConfirmDialog, usePopupToast } from '../../components/feedback/hooks';
 import StreamerCard from './components/StreamerCard';
 import StreamerSettingsModal from './components/StreamerSettingsModal';
 import type { OutletUserContext } from '../../types/auth';
@@ -10,6 +13,8 @@ import { apiFetch } from '../../api/client';
 
 export function MediaList() {
     useOutletContext<OutletUserContext>();
+    const { toast, showToast, closeToast } = usePopupToast(3000);
+    const { confirm, dialogProps } = useConfirmDialog();
     const [activeTab, setActiveTab] = React.useState<'all' | 'stats'>('all');
     const [allStreamers, setAllStreamers] = React.useState<Streamer[]>([]);
     const [loading, setLoading] = React.useState(true);
@@ -60,24 +65,39 @@ export function MediaList() {
             });
             if (response.ok) {
                 await fetchAllStreamers();
+                showToast('Настройки стримера сохранены');
+            } else {
+                showToast('Не удалось сохранить настройки стримера', 'error');
             }
         } catch (error) {
             console.error('Failed to update streamer:', error);
+            showToast('Не удалось сохранить настройки стримера', 'error');
         }
     };
 
     const handleDeleteStreamer = async (streamer: Streamer) => {
+        const confirmed = await confirm({
+            title: 'Удалить стримера?',
+            message: <>Стример <span className="text-white font-semibold">{streamer.streamer_name}</span> будет удален из общего списка.</>,
+            confirmLabel: 'Удалить',
+            tone: 'danger',
+        });
+        if (!confirmed) return;
+
         try {
             const response = await apiFetch(`/api/streamers/${streamer.streamer_id}`, {
                 method: 'DELETE',
             });
             if (response.ok) {
                 await fetchAllStreamers();
+                showToast(`Стример ${streamer.streamer_name} удален`);
             } else {
                 console.error('Failed to delete streamer');
+                showToast(`Не удалось удалить стримера ${streamer.streamer_name}`, 'error');
             }
         } catch (error) {
             console.error('Failed to delete streamer:', error);
+            showToast(`Не удалось удалить стримера ${streamer.streamer_name}`, 'error');
         }
     };
 
@@ -147,6 +167,16 @@ export function MediaList() {
                 onSave={handleUpdateStreamer}
                 mode="global"
             />
+
+            <ConfirmDialog {...dialogProps} />
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 }

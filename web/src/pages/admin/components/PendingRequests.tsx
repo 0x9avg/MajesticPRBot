@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { Check, X, Pencil, Clock, Save, RotateCcw } from 'lucide-react';
 import { unwrapApiData, getApiErrorMessage } from '../../../types/api';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
+import NotificationToast from '../../../components/feedback/NotificationToast';
+import { useConfirmDialog, usePopupToast } from '../../../components/feedback/hooks';
 import { formatMskToLocal } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
 
@@ -49,10 +52,11 @@ function formatDatetime(dt: string | null): string {
 
 export default function PendingRequests() {
     const navigate = useNavigate();
+    const { toast, showToast, closeToast } = usePopupToast(3200);
+    const { confirm, dialogProps } = useConfirmDialog();
     const [requests, setRequests] = React.useState<PendingRequest[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [actionLoading, setActionLoading] = React.useState<number | null>(null);
-    const [error, setError] = React.useState<string | null>(null);
     const [editingId, setEditingId] = React.useState<number | null>(null);
     const [editForm, setEditForm] = React.useState<{ name: string; description: string; priority: number; start_time: string; end_time: string }>({
         name: '', description: '', priority: 0, start_time: '', end_time: '',
@@ -102,7 +106,6 @@ export default function PendingRequests() {
 
     const handleSave = async (id: number) => {
         setActionLoading(id);
-        setError(null);
         try {
             const body: Record<string, unknown> = {
                 name: editForm.name,
@@ -123,13 +126,14 @@ export default function PendingRequests() {
             if (response.ok) {
                 setEditingId(null);
                 await fetchRequests();
+                showToast('Запрос обновлен');
             } else {
                 const err = await response.json().catch(() => ({} as unknown));
-                setError(getApiErrorMessage(err, 'Не удалось сохранить изменения'));
+                showToast(getApiErrorMessage(err, 'Не удалось сохранить изменения'), 'error');
             }
         } catch (e) {
             console.error('Error saving:', e);
-            setError('Ошибка при сохранении');
+            showToast('Ошибка при сохранении', 'error');
         } finally {
             setActionLoading(null);
         }
@@ -137,7 +141,6 @@ export default function PendingRequests() {
 
     const handleApprove = async (id: number) => {
         setActionLoading(id);
-        setError(null);
         try {
             const response = await apiFetch(`/api/events/${id}/approve`, {
                 method: 'POST',
@@ -145,35 +148,42 @@ export default function PendingRequests() {
             if (response.ok) {
                 setEditingId(null);
                 await fetchRequests();
+                showToast('Запрос одобрен');
             } else {
                 const err = await response.json().catch(() => ({} as unknown));
-                setError(getApiErrorMessage(err, 'Не удалось одобрить'));
+                showToast(getApiErrorMessage(err, 'Не удалось одобрить'), 'error');
             }
         } catch (e) {
             console.error('Error approving:', e);
-            setError('Ошибка при одобрении');
+            showToast('Ошибка при одобрении', 'error');
         } finally {
             setActionLoading(null);
         }
     };
 
     const handleReject = async (id: number) => {
-        if (!window.confirm('Отклонить этот запрос? Сессия будет завершена без зачисления баллов.')) return;
+        const confirmed = await confirm({
+            title: 'Отклонить запрос?',
+            message: 'Сессия будет завершена без зачисления баллов.',
+            confirmLabel: 'Отклонить',
+            tone: 'danger',
+        });
+        if (!confirmed) return;
         setActionLoading(id);
-        setError(null);
         try {
             const response = await apiFetch(`/api/events/${id}/reject`, {
                 method: 'POST',
             });
             if (response.ok) {
                 await fetchRequests();
+                showToast('Запрос отклонен');
             } else {
                 const err = await response.json().catch(() => ({} as unknown));
-                setError(getApiErrorMessage(err, 'Не удалось отклонить'));
+                showToast(getApiErrorMessage(err, 'Не удалось отклонить'), 'error');
             }
         } catch (e) {
             console.error('Error rejecting:', e);
-            setError('Ошибка при отклонении');
+            showToast('Ошибка при отклонении', 'error');
         } finally {
             setActionLoading(null);
         }
@@ -204,12 +214,6 @@ export default function PendingRequests() {
                     </span>
                 )}
             </h2>
-
-            {error && (
-                <div className="mb-4 px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-                    {error}
-                </div>
-            )}
 
             {requests.length === 0 ? (
                 <div className="text-white/40 text-center py-12 bg-white/5 rounded-2xl border border-white/5">
@@ -392,6 +396,16 @@ export default function PendingRequests() {
                 </div>
             )
             }
+
+            <ConfirmDialog {...dialogProps} />
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div >
     );
 }

@@ -1,12 +1,15 @@
 
 import { useState } from 'react';
-import { CalendarPlus, Check, AlertCircle } from 'lucide-react';
+import { CalendarPlus } from 'lucide-react';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import NotificationToast from '../../../components/feedback/NotificationToast';
+import { usePopupToast } from '../../../components/feedback/hooks';
 import { getApiErrorMessage } from '../../../types/api';
 import { getMskNow, getMskTodayStr } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
 
 const CreateEvent = () => {
+    const { toast, showToast, closeToast } = usePopupToast(3000);
     const [priority, setPriority] = useState(0);
     const [prSlots, setPrSlots] = useState(1);
     const [eventName, setEventName] = useState('');
@@ -18,16 +21,14 @@ const CreateEvent = () => {
         return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
     });
     const [loading, setLoading] = useState(false);
-    const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
     const handleCreateEvent = async () => {
         if (!eventName || !description) {
-            setMessage({ type: 'error', text: 'Заполните все обязательные поля' });
+            showToast('Заполните все обязательные поля', 'error');
             return;
         }
 
         setLoading(true);
-        setMessage(null);
 
         try {
             // Combine date and time if provided
@@ -38,7 +39,7 @@ const CreateEvent = () => {
                 const startDate = new Date(startTime + '+03:00');
                 const mskNow = getMskNow();
                 if (startDate.getTime() < mskNow.getTime() - 60000) { // 1 min buffer
-                    setMessage({ type: 'error', text: 'Дата и время начала не могут быть в прошлом' });
+                    showToast('Дата и время начала не могут быть в прошлом', 'error');
                     setLoading(false);
                     return;
                 }
@@ -65,7 +66,7 @@ const CreateEvent = () => {
                 throw new Error(getApiErrorMessage(data, 'Ошибка при создании события'));
             }
 
-            setMessage({ type: 'success', text: 'Событие успешно создано' });
+            showToast('Событие успешно создано');
             // Reset form
             setEventName('');
             setDescription('');
@@ -75,7 +76,7 @@ const CreateEvent = () => {
             setPrSlots(1);
 
         } catch (err: unknown) {
-            setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Произошла ошибка' });
+            showToast(err instanceof Error ? err.message : 'Произошла ошибка', 'error');
         } finally {
             setLoading(false);
         }
@@ -94,13 +95,6 @@ const CreateEvent = () => {
             </div>
 
             <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-6">
-                {message && (
-                    <div className={`px-4 py-3 rounded-xl flex items-center gap-3 ${message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'} mb-6`}>
-                        {message.type === 'success' ? <Check className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                        {message.text}
-                    </div>
-                )}
-
                 <div className="grid grid-cols-2 gap-8">
                     <div className="space-y-6">
                         <div>
@@ -183,6 +177,14 @@ const CreateEvent = () => {
                     </button>
                 </div>
             </div>
+
+            {toast && (
+                <NotificationToast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={closeToast}
+                />
+            )}
         </div>
     );
 }

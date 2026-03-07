@@ -1,3 +1,4 @@
+import React from 'react';
 import { useNavigate, Outlet } from 'react-router-dom';
 import { LogOut, User } from 'lucide-react';
 import { useState, useEffect } from 'react';
@@ -5,6 +6,8 @@ import type { Assistant } from '../types/domain';
 import type { UserContext } from '../types/auth';
 import { unwrapApiData } from '../types/api';
 import { apiFetch, setAccessToken, getAccessToken, onLogout } from '../api/client';
+
+void React;
 
 export interface MainLayoutOutletContext {
     user: UserContext | null;

@@ -26,6 +26,8 @@ const makeUser = (role: UserContext['role']): UserContext => ({
     role,
     require_password_change: false,
     permissions: {
+        'returns.view': true,
+        'returns.history.view': true,
         ...(role === 'manager' || role === 'developer'
             ? {
                 'admin.users.create': true,
@@ -66,7 +68,17 @@ const createFetchMock = () => {
             return new Response(
                 JSON.stringify({
                     status: 'success',
-                    data: { streamers: [] },
+                    data: {
+                        streamers: [
+                            {
+                                streamer_id: 'streamer-1',
+                                streamer_name: 'Alpha',
+                                priority: 2,
+                                pr_slots: 2,
+                                assignments: [{ pr_id: '2002', nickname: 'Helper' }],
+                            },
+                        ],
+                    },
                 }),
                 { status: 200, headers: { 'Content-Type': 'application/json' } }
             );
@@ -102,9 +114,9 @@ describe('MainHub', () => {
 
         await waitFor(() => {
             expect(fetchMock).toHaveBeenCalled();
-            expect(screen.getByText('5')).toBeInTheDocument();
-            expect(screen.getByText('2')).toBeInTheDocument();
-            expect(screen.getByText('1')).toBeInTheDocument();
+            expect(screen.getByText('Кол-во занятых PR').parentElement).toHaveTextContent('5');
+            expect(screen.getByText('Стримеров в GTA').parentElement).toHaveTextContent('2');
+            expect(screen.getByText('Требуется ассистентов').parentElement).toHaveTextContent('1');
         });
     });
 
@@ -140,5 +152,8 @@ describe('MainHub', () => {
 
         await ui.click(screen.getByText('Таблица PR Ассистентов'));
         expect(navigateMock).toHaveBeenCalledWith('/assistants');
+
+        await ui.click(screen.getByText('Возвраты'));
+        expect(navigateMock).toHaveBeenCalledWith('/returns');
     });
 });

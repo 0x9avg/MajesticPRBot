@@ -14,6 +14,10 @@ API_ROOT = Path(__file__).resolve().parents[1]
 if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
 import dependencies  # noqa: E402
 from routes.admin import router as admin_router  # noqa: E402
 MSK = timezone(timedelta(hours=3))
@@ -100,7 +104,12 @@ class FakeBroker:
         )
 
     async def emit_spec_claimed(
-        self, streamer_id: int, streamer_name: str, pr_id: int, trace_id: str
+        self,
+        streamer_id: int,
+        streamer_name: str,
+        pr_id: int,
+        trace_id: str,
+        data: dict[str, Any] | None = None,
     ) -> None:
         self.calls.append(
             (
@@ -109,6 +118,7 @@ class FakeBroker:
                     "streamer_id": streamer_id,
                     "streamer_name": streamer_name,
                     "pr_id": pr_id,
+                    "data": data or {},
                     "trace_id": trace_id,
                 },
             )
@@ -178,6 +188,9 @@ class FakeBroker:
 
 
 class FakeAuth:
+    secret_key = "test-secret"
+    algorithm = "HS256"
+
     def hash_password(self, password: str) -> str:
         return f"hashed::{password}"
 
@@ -186,8 +199,17 @@ class FakeAuth:
             return hashed_password == f"hashed::{plain_password}"
         return plain_password == hashed_password
 
-    def create_refresh_token(self, user_id: int) -> tuple[str, datetime]:
-        return f"refresh-{user_id}", datetime.now(MSK) + timedelta(days=7)
+    @staticmethod
+    def hash_token(token: str) -> str:
+        return f"hash::{token}"
+
+    @staticmethod
+    def generate_family_id() -> str:
+        return "family-test"
+
+    def create_refresh_token(self, user_id: int) -> tuple[str, str, datetime]:
+        raw = f"refresh-{user_id}"
+        return raw, self.hash_token(raw), datetime.now(MSK) + timedelta(days=7)
 
     def create_access_token(
         self,
@@ -199,10 +221,37 @@ class FakeAuth:
     ) -> str:
         return f"access-{user_id}-{username}-{role}-sid{sid}"
 
+    def verify_access_token(self, token: str) -> dict[str, Any] | None:
+        if token == "invalid" or not token.startswith("access-"):
+            return None
+        try:
+            # access-{user_id}-{username}-{role}-sid{sid}
+            payload = token.replace("access-", "", 1)
+            left, sid_part = payload.rsplit("-sid", 1)
+            user_id_str, username, role = left.split("-", 2)
+            return {
+                "type": "access",
+                "user_id": int(user_id_str),
+                "username": username,
+                "role": role,
+                "sid": int(sid_part),
+            }
+        except Exception:
+            return None
+
     def verify_token(self, token: str) -> dict[str, Any]:
-        if token == "invalid":
+        if token == "valid-token":
+            return {
+                "type": "access",
+                "user_id": 1,
+                "username": "tester",
+                "role": "manager",
+                "sid": 1,
+            }
+        payload = self.verify_access_token(token)
+        if payload is None:
             raise ValueError("Invalid token")
-        return {"user_id": 1, "username": "tester"}
+        return payload
 
 
 def _now() -> datetime:
@@ -250,14 +299,74 @@ class FakeDB:
         self.assistant_sessions_by_id: dict[int, list[dict[str, Any]]] = {}
         self.manual_sessions: list[dict[str, Any]] = []
         self.role_permissions: dict[str, dict[str, bool]] = {
-            "junior_employee": {"can_spec_probation": True},
-            "employee": {"can_spec_probation": False},
-            "senior_employee": {"can_spec_probation": False},
-            "manager": {"can_register_users": True, "can_view_admin_logs": True},
+            "junior_employee": {
+                "spec.claim.probation": True,
+                "spec.claim.main": True,
+                "spec.view_claimable": True,
+                "spec.unclaim.self": True,
+                "events.view": True,
+                "events.join.self": True,
+                "events.leave.self": True,
+                "events.spec.request": True,
+                "assistants.view": True,
+                "dashboard.view": True,
+                "streamers.view": True,
+                "logs.pr_actions.view": True,
+            },
+            "employee": {
+                "spec.claim.main": True,
+                "spec.view_claimable": True,
+                "spec.unclaim.self": True,
+                "events.view": True,
+                "events.join.self": True,
+                "events.leave.self": True,
+                "events.spec.request": True,
+                "assistants.view": True,
+                "dashboard.view": True,
+                "streamers.view": True,
+                "logs.pr_actions.view": True,
+            },
+            "senior_employee": {
+                "events.create": True,
+                "spec.claim.main": True,
+                "spec.view_claimable": True,
+                "spec.unclaim.self": True,
+                "events.view": True,
+                "events.join.self": True,
+                "events.leave.self": True,
+                "events.spec.request": True,
+                "assistants.view": True,
+                "dashboard.view": True,
+                "streamers.view": True,
+                "logs.pr_actions.view": True,
+            },
+            "manager": {
+                "admin.users.create": True,
+                "logs.admin.view": True,
+                "events.create": True,
+                "events.manage": True,
+                "events.update": True,
+                "events.spec.manage": True,
+                "events.leave.any": True,
+                "spec.unclaim.any": True,
+                "assistants.create": True,
+                "assistants.update": True,
+                "assistants.delete": True,
+                "assistants.logs.view": True,
+                "assistants.sessions.view": True,
+                "assistants.sessions.manage": True,
+                "assistants.points.manage": True,
+                "assistants.sanctions.manage": True,
+                "assistants.warnings.manage": True,
+            },
             "developer": {
-                "can_register_users": True,
-                "can_spec_probation": True,
-                "can_view_admin_logs": True,
+                "admin.users.create": True,
+                "logs.admin.view": True,
+                "monitoring.view": True,
+                "monitoring.refresh": True,
+                "notifications.render": True,
+                "streamers.status.update": True,
+                "spec.claim.probation": True,
             },
         }
 
@@ -299,7 +408,6 @@ class FakeDB:
         user_id = self.next_user_id
         self.next_user_id += 1
         user = {
-            "id": user_id,
             "discord_id": discord_id,
             "username": username,
             "password_hash": password_hash,
@@ -315,8 +423,8 @@ class FakeDB:
         }
         self.users_by_username[username] = user
         self.users_by_discord[discord_id] = user
-        self.users_by_id[user_id] = user
-        return user_id
+        self.users_by_id[discord_id] = user
+        return discord_id
 
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         return self.users_by_username.get(username)
@@ -345,7 +453,8 @@ class FakeDB:
     async def create_session(
         self,
         user_id: int,
-        refresh_token: str,
+        refresh_token_hash: str,
+        family_id: str,
         expires_at: datetime,
         client_ip: str | None,
         user_agent: str | None,
@@ -355,7 +464,8 @@ class FakeDB:
             {
                 "id": session_id,
                 "user_id": user_id,
-                "refresh_token": refresh_token,
+                "refresh_token_hash": refresh_token_hash,
+                "family_id": family_id,
                 "expires_at": expires_at,
                 "client_ip": client_ip,
                 "user_agent": user_agent,
@@ -1155,7 +1265,7 @@ class FakeDB:
             self.guild_settings = {
                 "notification_channel_id": None,
                 "monitoring_channel_id": None,
-                "monitoring_message_ids": [],
+                "monitoring_message_id": None,
                 "monitoring_filter_gta": False,
                 "pr_actions_channel_id": None,
                 "control_panel_channel_id": None,
@@ -1250,9 +1360,51 @@ def default_current_user() -> dict[str, Any]:
         "username": "creator",
         "nickname": "Creator",
         "role": "manager",
+        "principal_type": "user",
         "discord_id": 1001,
         "require_password_change": False,
-        "permissions": {"can_register_users": True, "can_view_admin_logs": True},
+        "permissions": {
+            "dashboard.view": True,
+            "streamers.view": True,
+            "admin.users.create": True,
+            "logs.admin.view": True,
+            "logs.pr_actions.view": True,
+            "assistants.view": True,
+            "assistants.create": True,
+            "assistants.update": True,
+            "assistants.delete": True,
+            "assistants.sessions.view": True,
+            "assistants.sessions.manage": True,
+            "assistants.logs.view": True,
+            "assistants.points.manage": True,
+            "assistants.sanctions.manage": True,
+            "assistants.warnings.manage": True,
+            "spec.view_claimable": True,
+            "spec.view_self_sessions": True,
+            "spec.claim.main": True,
+            "spec.claim.probation": True,
+            "spec.unclaim.self": True,
+            "spec.unclaim.any": True,
+            "events.view": True,
+            "events.join.self": True,
+            "events.leave.self": True,
+            "events.create": True,
+            "events.manage": True,
+            "events.update": True,
+            "events.spec.manage": True,
+            "events.leave.any": True,
+            "streamers.create": True,
+            "streamers.update": True,
+            "streamers.delete": True,
+            "guild.view": True,
+            "guild.settings.view": True,
+            "guild.settings.update": True,
+            "guild.templates.view": True,
+            "guild.templates.update": True,
+            "guild.rates.view": True,
+            "guild.rates.update": True,
+            "notifications.render": True,
+        },
     }
 
 
@@ -1292,6 +1444,7 @@ def build_api_app(
 
         # Use async dependency overrides to avoid anyio threadpool hangs in this env.
         app.dependency_overrides[dependencies.get_current_user] = _override_current_user
+        app.dependency_overrides[dependencies.get_current_principal] = _override_current_user
         app.dependency_overrides[dependencies.get_db] = _override_db
         app.dependency_overrides[dependencies.get_auth] = _override_auth
 
@@ -1338,9 +1491,51 @@ def set_current_user(app: FastAPI):
             "username": "creator",
             "nickname": "Creator",
             "role": "manager",
+            "principal_type": "user",
             "discord_id": 1001,
             "require_password_change": False,
-            "permissions": {"can_register_users": True, "can_view_admin_logs": True},
+            "permissions": {
+                "dashboard.view": True,
+                "streamers.view": True,
+                "admin.users.create": True,
+                "logs.admin.view": True,
+                "logs.pr_actions.view": True,
+                "assistants.view": True,
+                "assistants.create": True,
+                "assistants.update": True,
+                "assistants.delete": True,
+                "assistants.sessions.view": True,
+                "assistants.sessions.manage": True,
+                "assistants.logs.view": True,
+                "assistants.points.manage": True,
+                "assistants.sanctions.manage": True,
+                "assistants.warnings.manage": True,
+                "spec.view_claimable": True,
+                "spec.view_self_sessions": True,
+                "spec.claim.main": True,
+                "spec.claim.probation": True,
+                "spec.unclaim.self": True,
+                "spec.unclaim.any": True,
+                "events.view": True,
+                "events.join.self": True,
+                "events.leave.self": True,
+                "events.create": True,
+                "events.manage": True,
+                "events.update": True,
+                "events.spec.manage": True,
+                "events.leave.any": True,
+                "streamers.create": True,
+                "streamers.update": True,
+                "streamers.delete": True,
+                "guild.view": True,
+                "guild.settings.view": True,
+                "guild.settings.update": True,
+                "guild.templates.view": True,
+                "guild.templates.update": True,
+                "guild.rates.view": True,
+                "guild.rates.update": True,
+                "notifications.render": True,
+            },
         }
         base_user.update(overrides)
         app.state.test_current_user = base_user

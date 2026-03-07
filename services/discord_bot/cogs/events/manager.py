@@ -20,6 +20,10 @@ from disnake import MessageInteraction
 from disnake.ext import commands, tasks
 from utils import parse_to_unix
 
+EVENTS_SECTION_PERMS = ["events.create", "events.manage"]
+EVENTS_CREATE_PERMS = ["events.create"]
+EVENTS_MANAGE_PERMS = ["events.manage"]
+
 # =============================================================================
 # Events Embed
 # =============================================================================
@@ -114,6 +118,12 @@ class EventCreateModal(disnake.ui.Modal):
         super().__init__(title="Создание события", components=components)
 
     async def callback(self, interaction: disnake.ModalInteraction):
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=EVENTS_CREATE_PERMS,
+            error_message="❌ Нет прав на создание событий.",
+        ):
+            return
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         try:
@@ -180,7 +190,6 @@ class EventCreateModal(disnake.ui.Modal):
                 name=name,
                 description=description,
                 required_pr_count=pr_slots,
-                created_by=interaction.user.id,
                 start_time=start_dt.isoformat() if start_dt else None,
                 pr_slots=pr_slots,
                 priority=priority,
@@ -222,8 +231,14 @@ class EventCreateModal(disnake.ui.Modal):
                         if channel:
                             try:
                                 msg = await channel.fetch_message(int(cp_message_id))
-                                embed = await get_events_embed(self.bot.api_client)
-                                await msg.edit(embed=embed, view=EventsView(self.bot))
+                                from cogs.admin.core import (
+                                    AdminControlPanelView,
+                                    get_main_embed,
+                                )
+                                await msg.edit(
+                                    embed=get_main_embed(),
+                                    view=AdminControlPanelView(self.bot),
+                                )
                                 self.bot.logger.info(
                                     f"✓ Updated control panel message in {channel.name}"
                                 )
@@ -237,9 +252,6 @@ class EventCreateModal(disnake.ui.Modal):
                                 )
             except Exception as e:
                 self.bot.logger.error(f"Control panel refresh error: {e}")
-
-            # Refresh monitoring
-            await self.bot.api_client.refresh_monitoring()
 
         except Exception as e:
             self.bot.logger.error(f"Event creation error: {e}", exc_info=True)
@@ -277,6 +289,12 @@ class EventEndSelect(disnake.ui.StringSelect):
         )
 
     async def callback(self, interaction: MessageInteraction):
+        if not await interaction.bot.ensure_user_permissions(
+            interaction,
+            require_any=EVENTS_MANAGE_PERMS,
+            error_message="❌ Нет прав на управление событиями.",
+        ):
+            return
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         event_id = int(self.values[0])
@@ -313,12 +331,13 @@ class EventEndSelect(disnake.ui.StringSelect):
                         if channel:
                             try:
                                 msg = await channel.fetch_message(int(cp_message_id))
-
-                                embed = await get_events_embed(
-                                    interaction.bot.api_client
+                                from cogs.admin.core import (
+                                    AdminControlPanelView,
+                                    get_main_embed,
                                 )
                                 await msg.edit(
-                                    embed=embed, view=EventsView(interaction.bot)
+                                    embed=get_main_embed(),
+                                    view=AdminControlPanelView(interaction.bot),
                                 )
                                 interaction.bot.logger.info(
                                     f"✓ Updated control panel message in {channel.name}"
@@ -329,9 +348,6 @@ class EventEndSelect(disnake.ui.StringSelect):
                                 )
             except Exception as e:
                 interaction.bot.logger.error(f"Failed to refresh persistent panel: {e}")
-
-            # Refresh monitoring
-            await interaction.bot.api_client.refresh_monitoring()
 
         except Exception as e:
             interaction.bot.logger.error(f"End event error: {e}")
@@ -348,9 +364,18 @@ class EventsView(disnake.ui.View):
 
     bot: "DiscordBot"
 
-    def __init__(self, bot: "DiscordBot"):
+    def __init__(self, bot: "DiscordBot", permissions: dict[str, bool] | None = None):
         super().__init__(timeout=None)
         self.bot = bot
+        permissions_map = permissions or {}
+
+        def has_any(required: list[str]) -> bool:
+            return any(bool(permissions_map.get(key, False)) for key in required)
+
+        if not has_any(EVENTS_CREATE_PERMS):
+            self.remove_item(self.create_button)
+        if not has_any(EVENTS_MANAGE_PERMS):
+            self.remove_item(self.end_button)
 
     @disnake.ui.button(
         label="Создать",
@@ -403,10 +428,12 @@ class EventsView(disnake.ui.View):
         from cogs.admin.core import AdminMainView, get_main_embed
 
         if not interaction.response.is_done():
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=True)
+
+        permissions = await self.bot.get_user_permissions(interaction.user.id)
 
         await interaction.edit_original_response(
-            embed=get_main_embed(), view=AdminMainView(self.bot)
+            embed=get_main_embed(), view=AdminMainView(self.bot, permissions)
         )
 
 
@@ -431,10 +458,21 @@ class EventsManager(commands.Cog):
         if interaction.component.custom_id != "admin_events":
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=EVENTS_SECTION_PERMS,
+            error_message="❌ Нет доступа к разделу событий.",
+        ):
+            return
+
         if not interaction.response.is_done():
-            await interaction.response.defer()
+            await interaction.response.defer(ephemeral=True)
+        permissions = await self.bot.get_user_permissions(interaction.user.id)
         embed = await get_events_embed(self.api)
-        await interaction.edit_original_response(embed=embed, view=EventsView(self.bot))
+        await interaction.edit_original_response(
+            embed=embed,
+            view=EventsView(self.bot, permissions),
+        )
 
 
 

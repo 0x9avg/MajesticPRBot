@@ -17,6 +17,9 @@ class Config(BaseSettings):
     """Discord Bot Service configuration using pydantic-settings."""
 
     version: ClassVar[str] = "2.0.0 (Microservices)"
+    env: str = Field(
+        default="development", validation_alias="ENV"
+    )  # development, production
 
     # ==========================================================================
     # Discord Settings
@@ -29,6 +32,7 @@ class Config(BaseSettings):
     # ==========================================================================
     api_base_url: str = Field(default="http://localhost:8000", alias="API_BASE_URL")
     api_timeout: int = Field(default=30, alias="API_TIMEOUT")
+    service_token: str = Field(default="", alias="SERVICE_TOKEN")
 
     # ==========================================================================
     # RabbitMQ Settings
@@ -64,6 +68,7 @@ class Config(BaseSettings):
     required_env_vars: ClassVar[List[str]] = [
         "DISCORD_TOKEN",
         "GUILD_ID",
+        "SERVICE_TOKEN",
     ]
 
     model_config = {
@@ -80,6 +85,8 @@ class Config(BaseSettings):
             missing.append("DISCORD_TOKEN")
         if self.guild_id == "0":
             missing.append("GUILD_ID")
+        if not self.service_token:
+            missing.append("SERVICE_TOKEN")
         return missing if missing else None
 
     def get_log_level(self) -> int:

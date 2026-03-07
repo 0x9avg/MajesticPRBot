@@ -4,7 +4,7 @@ HTTP client for communicating with the central API service.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import aiohttp
 
@@ -23,19 +23,25 @@ class APIClient:
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
+        api_token: Optional[str] = None,
         timeout: int = 30,
         logger: Optional[logging.Logger] = None,
     ):
         self.base_url = base_url.rstrip("/")
+        self.api_token = api_token
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.logger = logger or logging.getLogger(__name__)
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            headers = {"Content-Type": "application/json"}
+            if self.api_token:
+                headers["Authorization"] = f"Bearer {self.api_token}"
+            
             self._session = aiohttp.ClientSession(
                 timeout=self.timeout,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
         return self._session
 
@@ -131,7 +137,6 @@ class APIClient:
         is_online: bool = False,
         started_at: str = None,
         priority: int = 0,
-        added_by_id: int = 0,
         game_id: int = None,
         game_name: str = None,
         stream_title: str = None,
@@ -147,7 +152,6 @@ class APIClient:
             "streamer_name": streamer_name,
             "is_online": is_online,
             "priority": priority,
-            "added_by_id": added_by_id,
         }
         if started_at:
             data["started_at"] = started_at

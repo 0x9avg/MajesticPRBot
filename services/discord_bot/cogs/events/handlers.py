@@ -5,6 +5,9 @@ from disnake import MessageInteraction
 from disnake.ext import commands
 from utils import format_spec_duration, send_pr_action_log
 
+EVENT_JOIN_PERMS = ["events.join.self"]
+EVENT_LEAVE_PERMS = ["events.leave.self"]
+
 
 class EventsHandlers(commands.Cog):
     """Event button handlers for join/leave."""
@@ -128,6 +131,13 @@ class EventsHandlers(commands.Cog):
 
     async def _handle_event_join(self, interaction: MessageInteraction, event_id: int):
         """Handle user joining an event."""
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=EVENT_JOIN_PERMS,
+            error_message="❌ Нет прав на присоединение к событиям.",
+        ):
+            return
+
         user_id = interaction.user.id
 
         try:
@@ -190,6 +200,13 @@ class EventsHandlers(commands.Cog):
 
     async def _handle_event_leave(self, interaction: MessageInteraction, event_id: int):
         """Handle user leaving an event."""
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=EVENT_LEAVE_PERMS,
+            error_message="❌ Нет прав на выход из событий.",
+        ):
+            return
+
         user_id = interaction.user.id
 
         try:

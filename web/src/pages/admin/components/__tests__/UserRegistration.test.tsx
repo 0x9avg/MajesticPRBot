@@ -44,7 +44,7 @@ const makeUser = (
     role,
     require_password_change: false,
     permissions: {
-        can_register_users: canRegisterUsers,
+        'admin.users.create': canRegisterUsers,
     },
 });
 
@@ -83,7 +83,7 @@ describe('UserRegistration', () => {
         expect(screen.getByText('Разработчик')).toBeInTheDocument();
     });
 
-    it('disables form when user has no can_register_users permission', () => {
+    it('disables form when user has no admin.users.create permission', () => {
         mockedUser = makeUser('manager', false);
         render(<UserRegistration />);
 

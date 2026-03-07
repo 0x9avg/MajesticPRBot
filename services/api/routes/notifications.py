@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from database import Database
 
 from config import Config
+from dependencies import require_permission
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -24,9 +25,6 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 def get_db(request: Request):
     """Get database from app state."""
     return request.app.state.database
-
-
-
 
 
 def format_template(
@@ -52,6 +50,7 @@ async def render_notification(
     event_type: str,
     streamer_id: int = Query(..., description="Streamer ID"),
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("notifications.render")),
 ):
     """
     Render a notification message for the given event type and streamer.
@@ -136,27 +135,6 @@ async def render_notification(
                 "notification_channel_id": settings.get("notification_channel_id"),
             },
             message=f"Notification rendered for {event_type}",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.get("/channel")
-async def get_notification_channel(
-    request: Request,
-    db: "Database" = Depends(get_db),
-):
-    """Get the configured notification channel ID."""
-    trace_id = get_trace_id(request)
-
-    settings = await db.get_guild()
-    if not settings:
-        raise HTTPException(status_code=404, detail="Guild settings not found")
-
-    return JSONResponse(
-        content=success_envelope(
-            data={"notification_channel_id": settings.get("notification_channel_id")},
-            message="Notification channel",
             trace_id=trace_id,
         )
     )

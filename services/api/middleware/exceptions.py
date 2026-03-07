@@ -29,12 +29,26 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     """
     trace_id = get_trace_id_safe(request)
 
+    # Preserve structured FastAPI error contract for auth/RBAC flows:
+    # dependencies raise HTTPException(detail={"code": "...", "message": "..."})
+    # and frontend relies on detail.code for silent refresh and logout behavior.
+    if isinstance(exc.detail, dict):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers or None,
+        )
+
     if exc.status_code == 404:
         content = not_found_envelope(message=str(exc.detail), trace_id=trace_id)
     else:
         content = error_envelope(message=str(exc.detail), trace_id=trace_id)
 
-    return JSONResponse(status_code=exc.status_code, content=content)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=exc.headers or None,
+    )
 
 
 async def validation_exception_handler(

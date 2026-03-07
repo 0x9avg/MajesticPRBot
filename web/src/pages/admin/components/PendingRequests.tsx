@@ -1,8 +1,10 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Check, X, Pencil, Clock, Save, RotateCcw } from 'lucide-react';
 import { unwrapApiData, getApiErrorMessage } from '../../../types/api';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import { formatMskToLocal } from '../../../utils/datetime';
+import { apiFetch } from '../../../api/client';
 
 /** Split 'YYYY-MM-DDTHH:mm' into { date: 'YYYY-MM-DD', time: 'HH:mm' } */
 const splitDateTime = (combined: string) => {
@@ -46,6 +48,7 @@ function formatDatetime(dt: string | null): string {
 }
 
 export default function PendingRequests() {
+    const navigate = useNavigate();
     const [requests, setRequests] = React.useState<PendingRequest[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [actionLoading, setActionLoading] = React.useState<number | null>(null);
@@ -57,10 +60,7 @@ export default function PendingRequests() {
 
     const fetchRequests = async () => {
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch('/api/events/pending', {
-                headers: { 'Authorization': `Bearer ${token}` },
-            });
+            const response = await apiFetch('/api/events/pending');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<PendingRequest[]>(json);
@@ -104,7 +104,6 @@ export default function PendingRequests() {
         setActionLoading(id);
         setError(null);
         try {
-            const token = localStorage.getItem('access_token');
             const body: Record<string, unknown> = {
                 name: editForm.name,
                 description: editForm.description,
@@ -116,9 +115,9 @@ export default function PendingRequests() {
             if (editForm.end_time) {
                 body.end_time = editForm.end_time.length === 16 ? editForm.end_time + ':00' : editForm.end_time;
             }
-            const response = await fetch(`/api/events/${id}/pending`, {
+            const response = await apiFetch(`/api/events/${id}/pending`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
             if (response.ok) {
@@ -140,10 +139,8 @@ export default function PendingRequests() {
         setActionLoading(id);
         setError(null);
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${id}/approve`, {
+            const response = await apiFetch(`/api/events/${id}/approve`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
             });
             if (response.ok) {
                 setEditingId(null);
@@ -165,10 +162,8 @@ export default function PendingRequests() {
         setActionLoading(id);
         setError(null);
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${id}/reject`, {
+            const response = await apiFetch(`/api/events/${id}/reject`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
             });
             if (response.ok) {
                 await fetchRequests();
@@ -242,7 +237,11 @@ export default function PendingRequests() {
                                 return (
                                     <tr key={req.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                                         <td className="px-4 py-3">
-                                            <span className="text-blue-400 font-semibold">
+                                            <span
+                                                className="text-blue-400 font-semibold cursor-pointer hover:text-blue-300 transition-colors"
+                                                onClick={() => navigate(`/assistants/${req.requested_by}`)}
+                                                title="Перейти в профиль"
+                                            >
                                                 @{req.requester_nickname || req.requested_by}
                                             </span>
                                         </td>

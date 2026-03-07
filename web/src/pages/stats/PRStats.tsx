@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import type { Assistant } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
+import { apiFetch } from '../../api/client';
 
 type SortKey =
     | 'nickname'
@@ -32,7 +33,7 @@ export function PRStats() {
 
     const fetchAssistants = async () => {
         try {
-            const response = await fetch('/api/assistants');
+            const response = await apiFetch('/api/assistants');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
@@ -187,7 +188,7 @@ export function PRStats() {
         if (strict >= 1 && oral >= 1) return 'bg-red-500/15 text-red-300 border-red-500/30';
         if (strict >= 1) return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
         if (oral >= 1) return 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30';
-        return 'bg-green-500/15 text-green-300 border-green-500/30';
+        return 'bg-white/5 text-white/50 border-white/10';
     };
 
     const formatHours = (value: number | undefined) =>
@@ -278,7 +279,7 @@ export function PRStats() {
             <div className="flex items-center justify-between">
                 <h2 className="text-3xl font-bold flex items-center gap-2">
                     <span className="w-1 h-8 bg-[#3b82f6] rounded-full inline-block"></span>
-                    Таблица пиаров
+                    Таблица PR Ассистентов
                 </h2>
                 <div className="text-white/60">
                     Всего: <span className="text-[#3b82f6] font-bold">{assistants.length}</span>
@@ -311,9 +312,9 @@ export function PRStats() {
                                 {renderHeader('Ср. ч/день', 'avg_spec_hours_per_day_30d')}
                                 {renderHeader('Общие баллы', 'total_points')}
                                 {renderHeader('После санк.', 'display_points')}
-                                {renderHeader('Выговоры', 'warnings')}
                                 {renderHeader('Штраф. баллы', 'penalty_points')}
                                 {renderHeader('Штраф, %', 'penalty_percent')}
+                                {renderHeader('Выговоры', 'warnings')}
                             </tr>
                         </thead>
                         <tbody>
@@ -368,11 +369,6 @@ export function PRStats() {
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
-                                            <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getWarningsBadgeClass(assistant)}`}>
-                                                {assistant.warnings_display || '0/2 0/2'}
-                                            </span>
-                                        </td>
-                                        <td className="p-3 whitespace-nowrap">
                                             <span
                                                 className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getRelativePenaltyClass(
                                                     Number(assistant.penalty_points || 0),
@@ -390,6 +386,11 @@ export function PRStats() {
                                                 )}`}
                                             >
                                                 {Number(assistant.penalty_percent || 0)}%
+                                            </span>
+                                        </td>
+                                        <td className="p-3 whitespace-nowrap">
+                                            <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getWarningsBadgeClass(assistant)}`}>
+                                                {assistant.warnings_display || '0/2 0/2'}
                                             </span>
                                         </td>
                                     </tr>

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Lock, User, Eye, EyeOff } from 'lucide-react'
 import { getApiErrorMessage } from '../types/api'
+import { apiFetch, setAccessToken } from '../api/client'
 
 export default function Login() {
     const [username, setUsername] = useState('')
@@ -17,8 +18,8 @@ export default function Login() {
         setLoading(true)
 
         try {
-            // Step 1: Login
-            const response = await fetch('/api/auth/login', {
+            // Step 1: Login (refresh token comes as HttpOnly cookie automatically)
+            const response = await apiFetch('/api/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password })
@@ -29,19 +30,18 @@ export default function Login() {
                 throw new Error(getApiErrorMessage(data, 'Ошибка авторизации'))
             }
 
-            const { access_token, refresh_token } = await response.json()
-            localStorage.setItem('access_token', access_token)
-            localStorage.setItem('refresh_token', refresh_token)
+            const payload = await response.json() as { access_token: string }
+            const access_token = payload.access_token
+            // Store access token in memory (client.ts also mirrors to localStorage for ProtectedRoute)
+            setAccessToken(access_token)
+            // Refresh token is HttpOnly cookie; clear any stale legacy localStorage value.
+            localStorage.removeItem('refresh_token')
 
             // Step 2: Get user info
-            const userResponse = await fetch('/api/auth/me', {
-                headers: {
-                    'Authorization': `Bearer ${access_token}`
-                }
-            })
+            const userResponse = await apiFetch('/api/auth/me')
 
             if (userResponse.status === 401) {
-                localStorage.removeItem('access_token')
+                setAccessToken(null)
                 localStorage.removeItem('refresh_token')
                 localStorage.removeItem('user')
                 throw new Error('Сессия недействительна. Выполните вход снова.')

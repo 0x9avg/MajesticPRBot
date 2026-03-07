@@ -29,6 +29,8 @@ class StreamerCreate(BaseModel):
     2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` + optional stream data
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     twitch_url: Optional[str] = Field(
         None, description="Twitch channel URL or username"
     )
@@ -48,7 +50,6 @@ class StreamerCreate(BaseModel):
     priority: int = Field(default=0, ge=0, le=3)
     pr_slots: int = Field(default=1, ge=1, description="Number of PR assistant slots")
     allow_juniors: bool = Field(default=True, description="Allow junior employees to claim this streamer")
-    added_by_id: Snowflake = Field(default=0)
 
     @field_validator("twitch_url", mode="before")
     @classmethod

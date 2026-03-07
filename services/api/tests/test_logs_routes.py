@@ -18,9 +18,10 @@ async def test_get_admin_logs_requires_permission(build_api_app) -> None:
         "username": "viewer",
         "nickname": "Viewer",
         "role": "employee",
+        "principal_type": "user",
         "discord_id": 1001,
         "require_password_change": False,
-        "permissions": {"can_view_admin_logs": False},
+        "permissions": {"logs.admin.view": False},
     }
 
     async with await _client(build_api_app, current_user=current_user) as client:
@@ -66,9 +67,10 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
         "username": "manager",
         "nickname": "Manager",
         "role": "manager",
+        "principal_type": "user",
         "discord_id": 500,
         "require_password_change": False,
-        "permissions": {"can_view_admin_logs": True},
+        "permissions": {"logs.admin.view": True},
     }
 
     async with await _client(build_api_app, current_user=current_user) as client:
@@ -84,6 +86,6 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
         )
 
     assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-    assert data[0]["actor_name"] == "Bob"
+    payload = response.json()["data"]
+    assert len(payload["items"]) == 2
+    assert payload["items"][0]["actor_name"] == "Bob"

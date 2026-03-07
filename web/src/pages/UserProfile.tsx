@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import type { Assistant, AssistantLog } from '../types/domain';
 import { unwrapApiData } from '../types/api';
 import { formatMskToLocal } from '../utils/datetime';
+import { apiFetch } from '../api/client';
 
 export default function UserProfile() {
     const navigate = useNavigate();
@@ -14,7 +15,7 @@ export default function UserProfile() {
     const [error, setError] = useState<string | null>(null);
 
     const fetchAssistantData = async (targetId: string | number) => {
-        const assistantRes = await fetch(`/api/assistants/${targetId}`);
+        const assistantRes = await apiFetch(`/api/assistants/${targetId}`);
         if (!assistantRes.ok) {
             return null;
         }
@@ -23,7 +24,7 @@ export default function UserProfile() {
     };
 
     const fetchAssistantLogs = async (prId: string | number) => {
-        const logsRes = await fetch(`/api/assistants/${prId}/logs`);
+        const logsRes = await apiFetch(`/api/assistants/${prId}/logs`);
         if (!logsRes.ok) {
             return [];
         }
@@ -35,28 +36,7 @@ export default function UserProfile() {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const token = localStorage.getItem('access_token');
-                if (!token) {
-                    navigate('/login');
-                    return;
-                }
-
-                // 1. Check Auth (we always need to be logged in)
-                const authRes = await fetch('/api/auth/me', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-
-                if (authRes.status === 401) {
-                    localStorage.removeItem('access_token');
-                    localStorage.removeItem('refresh_token');
-                    localStorage.removeItem('user');
-                    navigate('/login');
-                    return;
-                }
-
-                if (!authRes.ok) throw new Error('Failed to load user info');
-
-                // 2. Target ID must be present in the new route design (/assistants/:id)
+                // Target ID must be present in the new route design (/assistants/:id)
                 const targetId = id;
                 if (!targetId) {
                     setError('ID профиля не указан в URL.');
@@ -74,7 +54,7 @@ export default function UserProfile() {
 
                 if (assistantData) {
                     setUser(assistantData);
-                    // 3. Fetch Logs
+                    // 2. Fetch Logs
                     const assistantLogs = await fetchAssistantLogs(assistantData.pr_id);
                     setLogs(assistantLogs);
                 } else {
@@ -245,7 +225,7 @@ export default function UserProfile() {
                             <StatCard
                                 label="Выговоры"
                                 value={user.warnings_display ?? '0/2 0/2'}
-                                color="text-rose-400"
+                                color={(user.warnings_display ?? '0/2 0/2') === '0/2 0/2' ? 'text-white/50' : 'text-rose-400'}
                                 icon={Shield}
                             />
 

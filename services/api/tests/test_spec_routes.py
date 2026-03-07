@@ -44,11 +44,11 @@ async def test_claim_streamer_success(build_api_app, fake_db, fake_broker) -> No
     async with await _client(build_api_app) as client:
         response = await client.post(
             "/api/spec/claim",
-            json={"streamer_id": 3001, "pr_id": 101, "is_probation": False},
+            json={"streamer_id": 3001, "is_probation": False},
         )
 
     assert response.status_code == 200
-    assert fake_db.pr_current_streamer[101]["streamer_id"] == 3001
+    assert fake_db.pr_current_streamer[1001]["streamer_id"] == 3001
     assert any(call[0] == "spec.claimed" for call in fake_broker.calls)
 
 
@@ -59,7 +59,7 @@ async def test_claim_streamer_validation_errors(build_api_app, fake_db) -> None:
     fake_db.streamers_by_id[3003]["assignments"] = [
         {"pr_id": 500, "nickname": "user500", "is_probation": False}
     ]
-    fake_db.pr_current_streamer[999] = {
+    fake_db.pr_current_streamer[1001] = {
         "streamer_id": 3003,
         "streamer_name": "occupied",
         "assigned_at": datetime.now(MSK),
@@ -68,19 +68,19 @@ async def test_claim_streamer_validation_errors(build_api_app, fake_db) -> None:
     async with await _client(build_api_app) as client:
         missing = await client.post(
             "/api/spec/claim",
-            json={"streamer_id": 9999, "pr_id": 1, "is_probation": False},
+            json={"streamer_id": 9999, "is_probation": False},
         )
         offline = await client.post(
             "/api/spec/claim",
-            json={"streamer_id": 3002, "pr_id": 1, "is_probation": False},
+            json={"streamer_id": 3002, "is_probation": False},
         )
         already_assigned = await client.post(
             "/api/spec/claim",
-            json={"streamer_id": 3001, "pr_id": 999, "is_probation": False},
+            json={"streamer_id": 3001, "is_probation": False},
         )
         slot_taken = await client.post(
             "/api/spec/claim",
-            json={"streamer_id": 3003, "pr_id": 123, "is_probation": False},
+            json={"streamer_id": 3003, "is_probation": False},
         )
 
     assert missing.status_code == 404
@@ -94,9 +94,9 @@ async def test_unclaim_streamer_success_and_errors(
 ) -> None:
     _seed_streamer(fake_db, 3004, "to_unclaim", True)
     fake_db.streamers_by_id[3004]["assignments"] = [
-        {"pr_id": 111, "nickname": "user111", "is_probation": False}
+        {"pr_id": 1001, "nickname": "creator", "is_probation": False}
     ]
-    fake_db.pr_current_streamer[111] = {
+    fake_db.pr_current_streamer[1001] = {
         "streamer_id": 3004,
         "streamer_name": "to_unclaim",
         "assigned_at": datetime.now(MSK),
@@ -105,20 +105,20 @@ async def test_unclaim_streamer_success_and_errors(
     async with await _client(build_api_app) as client:
         missing_streamer = await client.post(
             "/api/spec/unclaim",
-            json={"streamer_id": 9999, "pr_id": 111, "reason": "manual_unclaim"},
-        )
-        bad_pr = await client.post(
-            "/api/spec/unclaim",
-            json={"streamer_id": 3004, "pr_id": 5555, "reason": "manual_unclaim"},
+            json={"streamer_id": 9999, "reason": "manual_unclaim"},
         )
         ok = await client.post(
             "/api/spec/unclaim",
-            json={"streamer_id": 3004, "pr_id": 111, "reason": "manual_unclaim"},
+            json={"streamer_id": 3004, "reason": "manual_unclaim"},
+        )
+        second_try = await client.post(
+            "/api/spec/unclaim",
+            json={"streamer_id": 3004, "reason": "manual_unclaim"},
         )
 
     assert missing_streamer.status_code == 404
-    assert bad_pr.status_code == 400
     assert ok.status_code == 200
+    assert second_try.status_code == 400
     assert any(call[0] == "spec.unclaimed" for call in fake_broker.calls)
 
 
@@ -194,8 +194,8 @@ async def test_get_claimable_streamers_by_role_permissions(
     }
 
     async with await _client(build_api_app) as client:
-        employee_view = await client.get("/api/spec/claimable?user_id=6001")
-        junior_view = await client.get("/api/spec/claimable?user_id=6002")
+        employee_view = await client.get("/api/spec/claimable/6001")
+        junior_view = await client.get("/api/spec/claimable/6002")
 
     assert employee_view.status_code == 200
     employee_ids = {s["streamer_id"] for s in employee_view.json()["data"]["streamers"]}

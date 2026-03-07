@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, X, Calendar as CalendarIcon, Check, Clock } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, X, Calendar as CalendarIcon, Check, Clock, Search } from 'lucide-react';
 import { getMskTodayStr, getMskNow, formatMskToLocal } from '../utils/datetime';
 
 // ==========================================
@@ -16,17 +16,33 @@ interface CustomSelectProps {
 
 export const CustomSelect = ({ value, onChange, options, placeholder = "Select...", icon, multiple = false }: CustomSelectProps) => {
     const [isOpen, setIsOpen] = useState(false);
+    const [search, setSearch] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
+    const searchRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
                 setIsOpen(false);
+                setSearch('');
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    // Autofocus search when opens, clear when closes
+    useEffect(() => {
+        if (isOpen) {
+            setTimeout(() => searchRef.current?.focus(), 50);
+        } else {
+            setSearch('');
+        }
+    }, [isOpen]);
+
+    const filteredOptions = search.trim()
+        ? options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()))
+        : options;
 
     const getDisplayLabel = () => {
         if (multiple && Array.isArray(value)) {
@@ -40,9 +56,8 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
     const handleSelect = (optionValue: string) => {
         if (multiple) {
             const currentValues = Array.isArray(value) ? value : [];
-            // Handle "All" selection (empty value usually means reset)
             if (optionValue === "") {
-                onChange([]); // or [""] if backend expects that, but empty usually means all
+                onChange([]);
             } else {
                 if (currentValues.includes(optionValue)) {
                     onChange(currentValues.filter(v => v !== optionValue));
@@ -50,10 +65,10 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
                     onChange([...currentValues, optionValue]);
                 }
             }
-            // Don't close on selection for multi-select
         } else {
             onChange(optionValue);
             setIsOpen(false);
+            setSearch('');
         }
     };
 
@@ -68,35 +83,148 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
         <div className="relative" ref={containerRef}>
             <div
                 className={`
-                    w-full bg-black/20 border border-white/5 rounded-lg py-2 pl-9 pr-3 text-sm text-white 
-                    cursor-pointer flex items-center justify-between hover:bg-black/30 transition-colors
-                    ${isOpen ? 'border-blue-500/50 ring-1 ring-blue-500/20' : ''}
+                    w-full bg-[#2a2a2a] border border-white/10 rounded-lg py-2 pl-3 pr-3 text-sm text-white 
+                    cursor-pointer flex items-center justify-between hover:border-white/20 hover:bg-[#323232] transition-colors
+                    ${isOpen ? 'border-purple-500/50 ring-1 ring-purple-500/20' : ''}
                 `}
                 onClick={() => setIsOpen(!isOpen)}
             >
                 {icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-white/20">{icon}</div>}
-                <span className={(multiple ? (Array.isArray(value) && value.length > 0) : value) ? 'text-white' : 'text-white/40'}>
+                <span className={`block truncate ${multiple && Array.isArray(value) && value.length === 0 ? 'text-white/40' : !value ? 'text-white/40' : 'text-white'} ${icon ? 'ml-6' : ''}`}>
                     {getDisplayLabel()}
                 </span>
-                <ChevronDown className={`w-4 h-4 text-white/40 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                <ChevronDown className={`w-4 h-4 text-white/40 transition-transform ${isOpen ? 'rotate-180' : ''} shrink-0 ml-2`} />
             </div>
 
             {isOpen && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-[#1e1e1e] border border-white/10 rounded-lg shadow-xl z-50 overflow-hidden animate-[fadeIn_0.1s_ease-out]">
-                    <div className="max-h-60 overflow-y-auto custom-scrollbar p-1">
-                        {options.map((option) => {
+                <div className="absolute top-full left-0 right-0 mt-2 bg-[#1e1e1e] border border-white/10 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.5)] z-50 overflow-hidden animate-[fadeIn_0.1s_ease-out]">
+                    {/* Search input */}
+                    <div className="p-2 border-b border-white/5">
+                        <div className="flex items-center gap-2 bg-[#2a2a2a] rounded-lg px-3 py-1.5">
+                            <Search className="w-3.5 h-3.5 text-white/30 shrink-0" />
+                            <input
+                                ref={searchRef}
+                                type="text"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                onClick={(e) => e.stopPropagation()}
+                                placeholder="Поиск..."
+                                className="flex-1 bg-transparent text-sm text-white placeholder:text-white/30 outline-none"
+                            />
+                            {search && (
+                                <button onClick={(e) => { e.stopPropagation(); setSearch(''); }} className="text-white/30 hover:text-white/70 transition-colors">
+                                    <X className="w-3 h-3" />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    <div className="max-h-52 overflow-y-auto custom-scrollbar p-1.5 space-y-0.5">
+                        {filteredOptions.length === 0 ? (
+                            <div className="px-3 py-4 text-center text-sm text-white/30">Ничего не найдено</div>
+                        ) : filteredOptions.map((option) => {
                             const selected = isSelected(option.value);
                             return (
                                 <div
                                     key={option.value}
                                     onClick={() => handleSelect(option.value)}
                                     className={`
-                                        px-3 py-2 rounded-md text-sm cursor-pointer flex items-center justify-between
-                                        ${selected ? 'bg-blue-500/10 text-blue-400' : 'text-white/70 hover:bg-white/5 hover:text-white'}
+                                        px-3 py-2 rounded-lg text-sm cursor-pointer flex items-center justify-between transition-colors
+                                        ${selected
+                                            ? 'bg-purple-500/10 text-purple-300'
+                                            : 'text-white/70 hover:bg-white/5 hover:text-white'}
                                     `}
                                 >
-                                    {option.label}
-                                    {selected && <Check className="w-3 h-3" />}
+                                    <span className="truncate">{option.label}</span>
+                                    {selected && <Check className="w-4 h-4 shrink-0 ml-2" />}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ==========================================
+// Custom Dropdown (Premium Select) Component
+// ==========================================
+export interface DropdownOption {
+    value: string;
+    label: string | React.ReactNode;
+    colorClass?: string;
+    searchMatchString?: string; // used for filtering if label is ReactNode
+}
+
+interface CustomDropdownProps {
+    value: string;
+    onChange: (value: string) => void;
+    options: DropdownOption[];
+    placeholder?: string;
+    icon?: React.ReactNode;
+    disabled?: boolean;
+    className?: string;
+}
+
+export const CustomDropdown = ({ value, onChange, options, placeholder = "Выберите...", icon, disabled = false, className = '' }: CustomDropdownProps) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const selectedOption = options.find(opt => opt.value === value);
+
+    return (
+        <div className={`relative ${className}`} ref={containerRef}>
+            <div
+                className={`
+                    w-full bg-[#2a2a2a] border border-white/10 rounded-lg py-2 px-3 text-sm 
+                    flex items-center justify-between transition-all
+                    ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-white/30 hover:bg-[#323232]'}
+                    ${isOpen ? 'border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.15)] bg-[#323232]' : ''}
+                `}
+                onClick={() => !disabled && setIsOpen(!isOpen)}
+            >
+                <div className="flex items-center gap-2 overflow-hidden">
+                    {icon && <div className="text-white/40 shrink-0">{icon}</div>}
+                    <div className={`truncate font-medium ${selectedOption ? (selectedOption.colorClass || 'text-white') : 'text-white/40 font-normal'}`}>
+                        {selectedOption ? selectedOption.label : placeholder}
+                    </div>
+                </div>
+                <ChevronDown className={`w-4 h-4 text-white/40 transition-transform duration-200 shrink-0 ml-2 ${isOpen ? 'rotate-180 text-purple-400' : ''}`} />
+            </div>
+
+            {isOpen && (
+                <div className="absolute top-[calc(100%+8px)] left-0 right-0 bg-[#1e1e1e] border border-white/10 rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.5)] z-50 overflow-hidden animate-[fadeIn_0.15s_ease-out] transform origin-top">
+                    <div className="max-h-[280px] overflow-y-auto custom-scrollbar p-1.5 space-y-0.5">
+                        {options.map((option) => {
+                            const isSelected = value === option.value;
+                            return (
+                                <div
+                                    key={option.value}
+                                    onClick={() => {
+                                        onChange(option.value);
+                                        setIsOpen(false);
+                                    }}
+                                    className={`
+                                        px-3 py-2.5 rounded-lg text-sm cursor-pointer flex items-center justify-between transition-all
+                                        ${isSelected
+                                            ? 'bg-purple-500/10 border border-purple-500/20'
+                                            : 'border border-transparent hover:bg-white/5 hover:border-white/10'}
+                                    `}
+                                >
+                                    <div className={`font-medium ${option.colorClass || (isSelected ? 'text-purple-300' : 'text-white/80')}`}>
+                                        {option.label}
+                                    </div>
+                                    {isSelected && <Check className={`w-4 h-4 shrink-0 ml-2 ${option.colorClass || 'text-purple-400'}`} />}
                                 </div>
                             );
                         })}
@@ -210,18 +338,20 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
         <div className="relative" ref={containerRef}>
             <div
                 className={`
-                    bg-black/20 border border-white/5 rounded-lg py-2 pl-3 pr-3 text-sm flex items-center gap-2 cursor-pointer hover:bg-black/30 transition-colors
-                     ${isOpen ? 'border-blue-500/50 ring-1 ring-blue-500/20' : ''}
+                    w-full bg-black/20 border border-white/5 rounded-xl p-3 text-white flex items-center justify-between cursor-pointer hover:bg-black/30 transition-colors
+                    ${isOpen ? 'border-blue-500/50 ring-1 ring-blue-500/20' : ''}
                 `}
                 onClick={() => setIsOpen(!isOpen)}
             >
-                <CalendarIcon className="w-4 h-4 text-white/40" />
-                <span className={value ? 'text-white' : 'text-white/40'}>
-                    {value ? formatMskToLocal(value, { day: '2-digit', month: '2-digit', year: 'numeric', hour: undefined, minute: undefined } as any) : placeholder}
-                </span>
-                {value && (
+                <div className="flex items-center gap-2 overflow-hidden">
+                    <CalendarIcon className="w-4 h-4 text-white/40 shrink-0" />
+                    <span className={value ? 'text-white' : 'text-white/40'}>
+                        {value ? formatMskToLocal(value, { day: '2-digit', month: '2-digit', year: 'numeric', hour: undefined, minute: undefined } as any) : placeholder}
+                    </span>
+                </div>
+                {value ? (
                     <div
-                        className="ml-auto p-1 hover:bg-white/10 rounded-full"
+                        className="p-1 hover:bg-white/10 rounded-full shrink-0"
                         onClick={(e) => {
                             e.stopPropagation();
                             onChange("");
@@ -229,6 +359,8 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
                     >
                         <X className="w-3 h-3 text-white/40 hover:text-white" />
                     </div>
+                ) : (
+                    <CalendarIcon className="w-4 h-4 text-white/40 shrink-0" />
                 )}
             </div>
 

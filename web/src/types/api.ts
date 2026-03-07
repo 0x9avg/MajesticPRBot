@@ -24,7 +24,10 @@ export const unwrapApiData = <T>(value: unknown): T => {
 };
 
 type ErrorWithDetail = {
-    detail?: string;
+    detail?: string | {
+        code?: string;
+        message?: string;
+    };
     message?: string;
     errors?: ApiFieldError[];
 };
@@ -38,8 +41,15 @@ export const getApiErrorMessage = (
     }
 
     const data = payload as ErrorWithDetail;
+    const detail = data.detail;
+    const detailMessage = detail && typeof detail === 'object'
+        ? detail.message
+        : undefined;
+    const detailString = typeof detail === 'string' ? detail : undefined;
+
     return (
-        data.detail ||
+        detailMessage ||
+        detailString ||
         data.message ||
         data.errors?.[0]?.reason ||
         fallback

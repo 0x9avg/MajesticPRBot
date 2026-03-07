@@ -105,18 +105,8 @@ async def test_render_notification_without_claim_button_for_non_gta(
     assert response.json()["data"]["component_spec"]["show_claim_button"] is False
 
 
-async def test_get_notification_channel(build_api_app, fake_db) -> None:
-    async with await _client(build_api_app) as client:
-        missing = await client.get("/api/notifications/channel")
-
-    assert missing.status_code == 404
-
-    fake_db.guild_settings = {
-        "notification_channel_id": 999,
-        "notification_templates": {},
-    }
+async def test_notification_channel_endpoint_removed(build_api_app, fake_db) -> None:
     async with await _client(build_api_app) as client:
         response = await client.get("/api/notifications/channel")
 
-    assert response.status_code == 200
-    assert response.json()["data"]["notification_channel_id"] == 999
+    assert response.status_code == 404

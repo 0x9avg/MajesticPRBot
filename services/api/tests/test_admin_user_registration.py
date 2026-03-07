@@ -42,7 +42,7 @@ async def post_create_user(app, payload: dict):
 )
 async def test_manager_hierarchy_rules(app, fake_db, set_current_user, role, expected_status):
     set_current_user(
-        role="manager", permissions={"can_register_users": True}, nickname="Manager"
+        role="manager", permissions={"admin.users.create": True}, nickname="Manager"
     )
     payload = user_payload(
         username=f"user_{role}",
@@ -67,7 +67,7 @@ async def test_manager_hierarchy_rules(app, fake_db, set_current_user, role, exp
 
 async def test_developer_can_create_all_roles(app, set_current_user):
     set_current_user(
-        role="developer", permissions={"can_register_users": True}, nickname="Dev"
+        role="developer", permissions={"admin.users.create": True}, nickname="Dev"
     )
 
     all_roles = [
@@ -92,29 +92,29 @@ async def test_developer_can_create_all_roles(app, set_current_user):
 
 async def test_user_without_register_permission_gets_403(app, set_current_user):
     set_current_user(
-        role="manager", permissions={"can_register_users": False}, nickname="NoPerm"
+        role="manager", permissions={"admin.users.create": False}, nickname="NoPerm"
     )
 
     payload = user_payload(username="blocked_user", role="employee", discord_id=3001)
     response = await post_create_user(app, payload)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Недостаточно прав для регистрации пользователей"
+    assert "admin.users.create" in response.json()["detail"]
 
 
 async def test_non_admin_role_cannot_access_admin_users_endpoint(app, set_current_user):
     set_current_user(
-        role="employee", permissions={"can_register_users": True}, nickname="Employee"
+        role="employee", permissions={}, nickname="Employee"
     )
     payload = user_payload(username="blocked_by_role", role="employee", discord_id=3002)
     response = await post_create_user(app, payload)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Недостаточно прав для доступа к админ-панели"
+    assert "admin.users.create" in response.json()["detail"]
 
 
 async def test_duplicate_username_returns_400(app, fake_db, set_current_user):
-    set_current_user(role="manager", permissions={"can_register_users": True})
+    set_current_user(role="manager", permissions={"admin.users.create": True})
     fake_db.users_by_username["existing_login"] = {
         "id": 10,
         "discord_id": 5001,
@@ -131,7 +131,7 @@ async def test_duplicate_username_returns_400(app, fake_db, set_current_user):
 
 
 async def test_duplicate_discord_id_in_web_auth_returns_400(app, fake_db, set_current_user):
-    set_current_user(role="manager", permissions={"can_register_users": True})
+    set_current_user(role="manager", permissions={"admin.users.create": True})
     fake_db.users_by_discord[777001] = {
         "id": 10,
         "discord_id": 777001,
@@ -150,7 +150,7 @@ async def test_duplicate_discord_id_in_web_auth_returns_400(app, fake_db, set_cu
 async def test_duplicate_discord_id_in_assistants_returns_400(
     app, fake_db, set_current_user
 ):
-    set_current_user(role="manager", permissions={"can_register_users": True})
+    set_current_user(role="manager", permissions={"admin.users.create": True})
     fake_db.assistants_by_id[888001] = {
         "pr_id": 888001,
         "nickname": "Existing Assistant",
@@ -167,7 +167,7 @@ async def test_duplicate_discord_id_in_assistants_returns_400(
 
 
 async def test_db_duplicate_race_is_mapped_to_400(app, fake_db, set_current_user):
-    set_current_user(role="manager", permissions={"can_register_users": True})
+    set_current_user(role="manager", permissions={"admin.users.create": True})
     fake_db.raise_on_create_user = Exception(
         "Duplicate entry '9001' for key 'web_auth.discord_id'"
     )
@@ -181,7 +181,7 @@ async def test_db_duplicate_race_is_mapped_to_400(app, fake_db, set_current_user
 
 async def test_success_case_writes_admin_log(app, fake_db, set_current_user):
     set_current_user(
-        role="manager", permissions={"can_register_users": True}, nickname="Boss"
+        role="manager", permissions={"admin.users.create": True}, nickname="Boss"
     )
     payload = user_payload(
         username="successful_user",
@@ -207,7 +207,7 @@ async def test_create_user_with_appointed_at(
     app, fake_db, set_current_user
 ):
     set_current_user(
-        role="manager", permissions={"can_register_users": True}, nickname="Boss"
+        role="manager", permissions={"admin.users.create": True}, nickname="Boss"
     )
     response = await post_create_user(
         app,

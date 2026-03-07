@@ -19,11 +19,15 @@ logger = Config.setup_logging("API")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown."""
-    import time
-
     # Startup
     app.state._start_time = time.time()
-    logger.info(f"Starting {Config.app_name}...")
+
+    # Fail-fast: block insecure defaults in production
+    Config.validate_production_security()
+    # Hard cutover: service token contract must be valid before touching DB.
+    Config.validate_service_tokens_contract()
+
+    logger.info(f"Starting {Config.app_name} (env={Config.env})...")
 
     # Initialize database
     from database import Database
@@ -52,7 +56,12 @@ async def lifespan(app: FastAPI):
     # Initialize Auth service
     from services.auth import AuthService
 
-    app.state.auth = AuthService(secret_key=Config.jwt_secret)
+    app.state.auth = AuthService(
+        secret_key=Config.jwt_secret,
+        algorithm=Config.jwt_algorithm,
+        access_token_expire_minutes=Config.access_token_expire_minutes,
+        refresh_token_expire_days=Config.refresh_token_expire_days,
+    )
     logger.info("✓ Auth service initialized")
 
     logger.info(f"✓ {Config.app_name} started on {Config.api_host}:{Config.api_port}")

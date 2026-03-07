@@ -25,6 +25,7 @@ async def main():
     # Initialize API client
     api_client = APIClient(
         base_url=Config.api_base_url,
+        api_token=Config.service_token,
         timeout=Config.api_timeout,
         logger=Config.setup_logging("APIClient"),
     )

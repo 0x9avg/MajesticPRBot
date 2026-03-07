@@ -170,7 +170,6 @@ class BrokerConsumer:
                             else None
                         ),
                         priority=added_by.get("priority", 0),
-                        added_by_id=added_by.get("added_by_id", 0),
                         game_id=stream_info.get("game_id"),
                         game_name=stream_info.get("game_name"),
                         stream_title=stream_info.get("title"),

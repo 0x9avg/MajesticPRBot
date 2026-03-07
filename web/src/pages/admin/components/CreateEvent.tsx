@@ -4,6 +4,7 @@ import { CalendarPlus, Check, AlertCircle } from 'lucide-react';
 import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import { getApiErrorMessage } from '../../../types/api';
 import { getMskNow, getMskTodayStr } from '../../../utils/datetime';
+import { apiFetch } from '../../../api/client';
 
 const CreateEvent = () => {
     const [priority, setPriority] = useState(0);
@@ -29,10 +30,6 @@ const CreateEvent = () => {
         setMessage(null);
 
         try {
-            const token = localStorage.getItem('access_token');
-            const stored = localStorage.getItem('user');
-            const user = (stored ? JSON.parse(stored) : {}) as { discord_id?: string | number };
-
             // Combine date and time if provided
             let startTime = null;
             if (date && time) {
@@ -47,11 +44,10 @@ const CreateEvent = () => {
                 }
             }
 
-            const response = await fetch('/api/events', {
+            const response = await apiFetch('/api/events', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify({
                     name: eventName,
@@ -59,8 +55,7 @@ const CreateEvent = () => {
                     priority: priority,
                     pr_slots: prSlots,
                     required_pr_count: prSlots, // Use pr_slots as required count
-                    start_time: startTime,
-                    created_by: user.discord_id || 0
+                    start_time: startTime
                 })
             });
 

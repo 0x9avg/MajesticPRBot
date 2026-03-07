@@ -5,6 +5,7 @@
 
 import logging
 import os
+import sys
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from typing import List
@@ -28,6 +29,9 @@ class Settings(BaseSettings):
     app_name: str = "PRMajesticBot API"
     api_host: str = Field(default="0.0.0.0", validation_alias="API_HOST")
     api_port: int = Field(default=8000, validation_alias="API_PORT")
+    env: str = Field(
+        default="development", validation_alias="ENV"
+    )  # development, production
 
     # ==========================================================================
     # Database Settings
@@ -44,7 +48,7 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="changeme", validation_alias="JWT_SECRET_KEY")
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
+    refresh_token_expire_days: int = 30
 
     # ==========================================================================
     # RabbitMQ Settings
@@ -83,6 +87,99 @@ class Settings(BaseSettings):
     max_login_attempts: int = 5
     login_attempt_window: int = 300  # seconds
     account_lockout_duration: int = 900  # seconds
+
+    # Service tokens for bots (comma-separated list of pre-shared secrets)
+    # Strict format:
+    # - "discord_service:<token>,twitch_service:<token>"
+    # - only named entries are accepted
+    service_tokens: str = Field(default="", validation_alias="SERVICE_TOKENS")
+    required_service_principals: tuple[str, ...] = ("discord_service", "twitch_service")
+
+    @property
+    def service_token_list(self) -> List[str]:
+        """Return only token values from SERVICE_TOKENS."""
+        return list(self.service_token_map.values())
+
+    @property
+    def service_token_map(self) -> dict[str, str]:
+        """Parse SERVICE_TOKENS into a strict name->token mapping."""
+        return self._parse_service_token_map_strict()
+
+    def _parse_service_token_map_strict(self) -> dict[str, str]:
+        """
+        Parse SERVICE_TOKENS strictly.
+
+        Allowed format:
+            SERVICE_TOKENS=discord_service:<token>,twitch_service:<token>
+
+        Rules:
+        - unnamed entries are forbidden
+        - empty names/tokens are forbidden
+        - duplicate names are forbidden
+        - duplicate token values are forbidden
+        - required service principals must be present
+        """
+        raw = (self.service_tokens or "").strip()
+        if not raw:
+            raise ValueError(
+                "SERVICE_TOKENS is required and must be in format "
+                "'discord_service:<token>,twitch_service:<token>'."
+            )
+
+        mapping: dict[str, str] = {}
+        seen_values: set[str] = set()
+        for item in [part.strip() for part in raw.split(",") if part.strip()]:
+            if ":" not in item:
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS entry '{item}'. Named format "
+                    "'<service_name>:<token>' is required."
+                )
+
+            name, token = item.split(":", 1)
+            key = name.strip()
+            value = token.strip()
+
+            if not key:
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS entry '{item}': service name is empty."
+                )
+            if not value:
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS entry '{item}': token is empty."
+                )
+            if key in mapping:
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS: duplicate service name '{key}'."
+                )
+            if value in seen_values:
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS: duplicate token value for service '{key}'."
+                )
+
+            mapping[key] = value
+            seen_values.add(value)
+
+        missing = [
+            name for name in self.required_service_principals if name not in mapping
+        ]
+        if missing:
+            raise ValueError(
+                "SERVICE_TOKENS is missing required principals: " + ", ".join(missing)
+            )
+
+        return mapping
+
+    def validate_service_tokens_contract(self) -> None:
+        """Fail-fast validation for strict SERVICE_TOKENS contract."""
+        self._parse_service_token_map_strict()
+
+    # ==========================================================================
+    # Cookie Settings for Refresh Token
+    # ==========================================================================
+    cookie_secure: bool = Field(default=False, validation_alias="COOKIE_SECURE")
+    cookie_samesite: str = "lax"
+    cookie_path: str = "/api/auth"
+    cookie_domain: str = Field(default="", validation_alias="COOKIE_DOMAIN")
 
     # ==========================================================================
     # Guild Settings (Single-tenant mode)
@@ -128,6 +225,40 @@ class Settings(BaseSettings):
     log_backup_count: int = 5
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     log_date_format: str = "%Y-%m-%d %H:%M:%S"
+
+    # ==========================================================================
+    # Insecure Default Constants (for fail-fast checks)
+    # ==========================================================================
+    _INSECURE_JWT_SECRETS = frozenset({"changeme", "secret", "test", ""})
+    _INSECURE_DB_PASSWORDS = frozenset({"root", "password", "test", ""})
+
+    def validate_production_security(self) -> None:
+        """Fail-fast: block startup in production with insecure defaults."""
+        if self.env.lower() != "production":
+            return
+
+        errors: list[str] = []
+
+        if self.jwt_secret in self._INSECURE_JWT_SECRETS:
+            errors.append(
+                "JWT_SECRET_KEY is set to an insecure default. "
+                "Set a strong secret in production."
+            )
+        if len(self.jwt_secret) < 32:
+            errors.append(
+                f"JWT_SECRET_KEY is too short ({len(self.jwt_secret)} chars). "
+                "Use at least 32 characters in production."
+            )
+        if self.db_password in self._INSECURE_DB_PASSWORDS:
+            errors.append(
+                "DB_PASSWORD is set to an insecure default. "
+                "Use a strong password in production."
+            )
+
+        if errors:
+            for e in errors:
+                print(f"FATAL SECURITY ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
     def get_log_level(self) -> int:
         """Get logging level from environment."""

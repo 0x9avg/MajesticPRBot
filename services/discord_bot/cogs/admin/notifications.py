@@ -25,6 +25,8 @@ EVENT_TYPES = {
     "category_from_gta": "🚫 Уход с GTA 5",
 }
 
+NOTIFICATIONS_SECTION_PERMS = ["guild.templates.view", "guild.templates.update"]
+NOTIFICATIONS_UPDATE_PERMS = ["guild.templates.update"]
 
 
 
@@ -131,10 +133,23 @@ class NotificationsView(disnake.ui.View):
 
     bot: "DiscordBot"
 
-    def __init__(self, bot: "DiscordBot"):
+    def __init__(self, bot: "DiscordBot", permissions: dict[str, bool] | None = None):
         super().__init__(timeout=None)
         self.bot = bot
-        self.add_item(TemplateSelect())
+        permissions_map = permissions or {}
+
+        if any(bool(permissions_map.get(key, False)) for key in NOTIFICATIONS_UPDATE_PERMS):
+            self.add_item(TemplateSelect())
+        else:
+            self.add_item(
+                disnake.ui.Button(
+                    label="Только просмотр",
+                    custom_id="admin_notif_readonly",
+                    style=disnake.ButtonStyle.secondary,
+                    disabled=True,
+                    row=0,
+                )
+            )
 
         # Back button only
         self.add_item(
@@ -174,6 +189,13 @@ class AdminNotifications(commands.Cog):
         ):
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=NOTIFICATIONS_SECTION_PERMS,
+            error_message="❌ Нет доступа к разделу уведомлений.",
+        ):
+            return
+
         # 2. SAFE DEFER
         try:
             if not interaction.response.is_done():
@@ -185,9 +207,10 @@ class AdminNotifications(commands.Cog):
         # 3. EXECUTE
         try:
             if custom_id == "admin_notifications":
+                permissions = await self.bot.get_user_permissions(interaction.user.id)
                 await interaction.edit_original_response(
                     embed=get_notifications_embed(),
-                    view=NotificationsView(self.bot),
+                    view=NotificationsView(self.bot, permissions),
                 )
 
         except Exception as e:
@@ -207,6 +230,13 @@ class AdminNotifications(commands.Cog):
         custom_id = interaction.component.custom_id or ""
 
         if custom_id != "admin_notif_template_select":
+            return
+
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=NOTIFICATIONS_UPDATE_PERMS,
+            error_message="❌ Нет прав на редактирование шаблонов уведомлений.",
+        ):
             return
 
         # Select opens MODAL -> NO DEFER

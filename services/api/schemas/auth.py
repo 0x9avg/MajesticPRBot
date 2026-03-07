@@ -12,10 +12,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class TokenResponse(BaseModel):
+class LoginResponse(BaseModel):
+    """Login response — only access_token in body, refresh in HttpOnly cookie."""
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
+
+
+# Legacy alias for backward compatibility with imports
+TokenResponse = LoginResponse
 
 
 class UserResponse(BaseModel):

@@ -239,3 +239,4 @@ services/*/venv/
 services/*/logs/
 db_schema.txt
 streamers.json
+streamers_all_table.json

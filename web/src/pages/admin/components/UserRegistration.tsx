@@ -5,6 +5,7 @@ import { CustomSelect } from '../../../components/CustomInputs';
 import { useOutletContext } from 'react-router-dom';
 import type { KnownRole, OutletUserContext } from '../../../types/auth';
 import { getApiErrorMessage } from '../../../types/api';
+import { apiFetch } from '../../../api/client';
 
 type Role = KnownRole;
 
@@ -55,7 +56,7 @@ const UserRegistration = () => {
     const [copied, setCopied] = useState(false);
 
     const currentUserRole = user?.role as KnownRole | undefined;
-    const canRegisterUsers = !!user?.permissions?.can_register_users;
+    const canRegisterUsers = user?.permissions?.['admin.users.create'] === true;
     const allowedRoles = getAllowedRoles(currentUserRole, canRegisterUsers);
     const roleOptions = allowedRoles.map((role) => ({
         value: role,
@@ -93,12 +94,10 @@ const UserRegistration = () => {
             }
 
             // API Call
-            const token = localStorage.getItem('access_token');
-            const response = await fetch('/api/admin/users', {
+            const response = await apiFetch('/api/admin/users', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token} `
                 },
                 body: JSON.stringify({
                     username: formData.username,
@@ -281,7 +280,7 @@ const UserRegistration = () => {
                         <button
                             onClick={handleSubmit}
                             disabled={loading || !canRegisterUsers}
-                            className={`px - 8 py - 3 bg - blue - 500 hover: bg - blue - 600 text - white font - bold rounded - xl shadow - lg shadow - blue - 500 / 20 transition - all ${loading ? 'opacity-50 cursor-not-allowed' : ''} `}
+                            className={`px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/20 transition-all ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             {loading ? 'Создание...' : 'Создать пользователя'}
                         </button>

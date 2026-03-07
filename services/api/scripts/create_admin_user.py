@@ -50,7 +50,7 @@ async def create_admin(username, password, nickname, role, discord_id):
             return
 
         # Create user in web_auth
-        user_id = await db.create_user(
+        created_discord_id = await db.create_user(
             discord_id=discord_id,
             username=username,
             password_hash=password_hash,
@@ -73,7 +73,7 @@ async def create_admin(username, password, nickname, role, discord_id):
                 await conn.commit()
 
         logger.info("=" * 50)
-        logger.info(f"✅ УСПЕХ! Пользователь создан c ID: {user_id}")
+        logger.info(f"✅ УСПЕХ! Пользователь создан c Discord ID: {created_discord_id}")
         logger.info(f"Логин: {username}")
         logger.info(f"Пароль: {password}")
         logger.info(f"Discord ID: {discord_id}")

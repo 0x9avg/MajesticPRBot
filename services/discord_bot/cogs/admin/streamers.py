@@ -15,6 +15,12 @@ from disnake import MessageInteraction
 from disnake.ext import commands
 from utils import handle_interaction_error, safe_defer
 
+STREAMERS_SECTION_PERMS = ["streamers.create", "streamers.update", "streamers.delete"]
+STREAMERS_ADD_PERMS = ["streamers.create"]
+STREAMERS_EDIT_PERMS = ["streamers.update"]
+STREAMERS_DELETE_PERMS = ["streamers.delete"]
+STREAMERS_LIST_PERMS = ["streamers.view"]
+
 # =============================================================================
 # Streamers Embed
 # =============================================================================
@@ -88,7 +94,7 @@ class AddStreamerModal(disnake.ui.Modal):
                 username = url.strip()
 
             await self.bot.api_client.add_streamer(
-                twitch_url=username, priority=priority, added_by_id=interaction.user.id
+                twitch_url=username, priority=priority
             )
             await interaction.edit_original_message(
                 content=f"✅ Стример **{username}** добавлен!"
@@ -268,50 +274,57 @@ class StreamersView(disnake.ui.View):
 
     bot: "DiscordBot"
 
-    def __init__(self, bot: "DiscordBot"):
+    def __init__(self, bot: "DiscordBot", permissions: dict[str, bool] | None = None):
         super().__init__(timeout=None)
         self.bot = bot
+        permissions_map = permissions or {}
 
-        # Add buttons
-        self.add_item(
-            disnake.ui.Button(
-                label="Добавить",
-                custom_id="admin_str_add",
-                style=disnake.ButtonStyle.success,
-                emoji="➕",
-                row=0,
-            )
-        )
+        def has_any(required: list[str]) -> bool:
+            return any(bool(permissions_map.get(key, False)) for key in required)
 
-        self.add_item(
-            disnake.ui.Button(
-                label="Удалить",
-                custom_id="admin_str_del",
-                style=disnake.ButtonStyle.danger,
-                emoji="🗑️",
-                row=0,
+        if has_any(STREAMERS_ADD_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="Добавить",
+                    custom_id="admin_str_add",
+                    style=disnake.ButtonStyle.success,
+                    emoji="➕",
+                    row=0,
+                )
             )
-        )
 
-        self.add_item(
-            disnake.ui.Button(
-                label="Редактировать",
-                custom_id="admin_str_edit",
-                style=disnake.ButtonStyle.secondary,
-                emoji="✏️",
-                row=1,
+        if has_any(STREAMERS_DELETE_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="Удалить",
+                    custom_id="admin_str_del",
+                    style=disnake.ButtonStyle.danger,
+                    emoji="🗑️",
+                    row=0,
+                )
             )
-        )
 
-        self.add_item(
-            disnake.ui.Button(
-                label="Список",
-                custom_id="admin_str_list",
-                style=disnake.ButtonStyle.primary,
-                emoji="📋",
-                row=1,
+        if has_any(STREAMERS_EDIT_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="Редактировать",
+                    custom_id="admin_str_edit",
+                    style=disnake.ButtonStyle.secondary,
+                    emoji="✏️",
+                    row=1,
+                )
             )
-        )
+
+        if has_any(STREAMERS_LIST_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="Список",
+                    custom_id="admin_str_list",
+                    style=disnake.ButtonStyle.primary,
+                    emoji="📋",
+                    row=1,
+                )
+            )
 
         self.add_item(
             disnake.ui.Button(
@@ -350,6 +363,13 @@ class AdminStreamers(commands.Cog):
         ):
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=STREAMERS_SECTION_PERMS,
+            error_message="❌ Нет доступа к разделу управления стримерами.",
+        ):
+            return
+
         # 2. SAFE DEFER (Exception for Modals)
         if custom_id not in ("admin_str_add", "admin_str_edit", "admin_str_del"):
             try:
@@ -361,31 +381,62 @@ class AdminStreamers(commands.Cog):
         # 3. EXECUTE
         try:
             if custom_id == "admin_streamers":
+                permissions = await self.bot.get_user_permissions(interaction.user.id)
                 embed = await get_streamers_embed(self.api)
                 if interaction.response.is_done():
                     await interaction.edit_original_response(
-                        embed=embed, view=StreamersView(self.bot)
+                        embed=embed, view=StreamersView(self.bot, permissions)
                     )
 
             elif custom_id == "admin_str_add":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=STREAMERS_ADD_PERMS,
+                    error_message="❌ Нет прав на добавление стримеров.",
+                ):
+                    return
                 # OPEN MODAL - DIRECT RESPONSE
                 await interaction.response.send_modal(AddStreamerModal(self.bot))
 
             elif custom_id == "admin_str_edit":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=STREAMERS_EDIT_PERMS,
+                    error_message="❌ Нет прав на редактирование стримеров.",
+                ):
+                    return
                 # OPEN MODAL for nickname input
                 await interaction.response.send_modal(EditStreamerByNameModal(self.bot))
 
             elif custom_id == "admin_str_del":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=STREAMERS_DELETE_PERMS,
+                    error_message="❌ Нет прав на удаление стримеров.",
+                ):
+                    return
                 # OPEN MODAL for nickname input
                 await interaction.response.send_modal(
                     DeleteStreamerByNameModal(self.bot)
                 )
 
             elif custom_id == "admin_str_list":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=STREAMERS_LIST_PERMS,
+                    error_message="❌ Нет прав на просмотр списка стримеров.",
+                ):
+                    return
                 # Show page 0 in new message
                 await self._show_streamer_list(interaction, page=0, new_message=True)
 
             elif custom_id.startswith("admin_str_list_page_"):
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=STREAMERS_LIST_PERMS,
+                    error_message="❌ Нет прав на просмотр списка стримеров.",
+                ):
+                    return
                 # Pagination buttons
                 page = int(custom_id.split("_")[-1])
                 await self._show_streamer_list(interaction, page=page)

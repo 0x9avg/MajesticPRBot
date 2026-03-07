@@ -25,23 +25,66 @@ const makeUser = (role: UserContext['role']): UserContext => ({
     nickname: 'Tester',
     role,
     require_password_change: false,
-    permissions: { can_register_users: role === 'manager' || role === 'developer' },
+    permissions: {
+        ...(role === 'manager' || role === 'developer'
+            ? {
+                'admin.users.create': true,
+                'events.create': true,
+                'streamers.create': true,
+                'streamers.update': true,
+                'streamers.delete': true,
+            }
+            : {}),
+        ...(role === 'developer'
+            ? {
+                'monitoring.view': true,
+                'monitoring.refresh': true,
+            }
+            : {}),
+    },
 });
 
-const mockStatsResponse = () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-        new Response(
-            JSON.stringify({
-                status: 'success',
-                data: {
-                    assigned_pr_count: 5,
-                    unassigned_media_count: 2,
-                    events_today_count: 1,
-                },
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
-    );
+const createFetchMock = () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url.includes('/api/stats/dashboard')) {
+            return new Response(
+                JSON.stringify({
+                    status: 'success',
+                    data: {
+                        assigned_pr_count: 5,
+                        unassigned_media_count: 2,
+                        events_today_count: 1,
+                    },
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+        }
+
+        if (url.includes('/api/streamers?online_only=true&gta_only=true')) {
+            return new Response(
+                JSON.stringify({
+                    status: 'success',
+                    data: { streamers: [] },
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+        }
+
+        if (url.includes('/api/events/active')) {
+            return new Response(
+                JSON.stringify({
+                    status: 'success',
+                    data: [],
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+        }
+
+        return new Response('{}', { status: 404 });
+    });
+
     vi.stubGlobal('fetch', fetchMock);
     return fetchMock;
 };
@@ -53,12 +96,12 @@ describe('MainHub', () => {
     });
 
     it('loads and renders dashboard stats', async () => {
-        const fetchMock = mockStatsResponse();
+        const fetchMock = createFetchMock();
 
         render(<MainHub />);
 
         await waitFor(() => {
-            expect(fetchMock).toHaveBeenCalledWith('/api/stats/dashboard');
+            expect(fetchMock).toHaveBeenCalled();
             expect(screen.getByText('5')).toBeInTheDocument();
             expect(screen.getByText('2')).toBeInTheDocument();
             expect(screen.getByText('1')).toBeInTheDocument();
@@ -66,14 +109,18 @@ describe('MainHub', () => {
     });
 
     it('shows admin section for manager and hides it for employee', async () => {
-        mockStatsResponse();
+        createFetchMock();
 
         const { rerender } = render(<MainHub />);
 
         await waitFor(() => {
             expect(screen.getByText('Админ-панель')).toBeInTheDocument();
-            expect(screen.getByText('Bot Dashboard')).toBeInTheDocument();
         });
+        expect(screen.queryByText('Bot Dashboard')).not.toBeInTheDocument();
+
+        mockedUser = makeUser('developer');
+        rerender(<MainHub />);
+        expect(screen.getByText('Bot Dashboard')).toBeInTheDocument();
 
         mockedUser = makeUser('employee');
         rerender(<MainHub />);
@@ -83,7 +130,7 @@ describe('MainHub', () => {
     });
 
     it('navigates when menu cards are clicked', async () => {
-        mockStatsResponse();
+        createFetchMock();
 
         const ui = userEvent.setup();
         render(<MainHub />);
@@ -91,7 +138,7 @@ describe('MainHub', () => {
         await ui.click(screen.getByText('Медиа'));
         expect(navigateMock).toHaveBeenCalledWith('/media');
 
-        await ui.click(screen.getByText('Таблица пиаров'));
+        await ui.click(screen.getByText('Таблица PR Ассистентов'));
         expect(navigateMock).toHaveBeenCalledWith('/assistants');
     });
 });

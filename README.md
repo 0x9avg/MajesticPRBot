@@ -32,6 +32,11 @@
 - `services/discord_bot/.env`
 - `services/twitch_bot/.env`
 
+Критичный auth-контракт для сервисов:
+- В API должен быть задан `SERVICE_TOKENS` строго в формате `discord_service:<token>,twitch_service:<token>`.
+- `services/discord_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `discord_service:<token>`.
+- `services/twitch_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `twitch_service:<token>`.
+
 ### 2. Запуск Сервисов (Ручной режим)
 
 Вам потребуется открыть 4 терминала.

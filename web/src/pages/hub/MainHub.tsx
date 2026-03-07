@@ -7,6 +7,9 @@ import { unwrapApiData, getApiErrorMessage } from '../../types/api';
 import { formatMskToLocal } from '../../utils/datetime';
 import StreamerSettingsModal from '../media/components/StreamerSettingsModal';
 import EventSettingsModal from '../media/components/EventSettingsModal';
+import { apiFetch } from '../../api/client';
+import { ADMIN_SECTION_PERMISSIONS } from '../../rbac/catalog';
+import { hasAny, hasPerm } from '../../rbac/guards';
 
 type ActivityItem =
     | ({ type: 'event' } & Event)
@@ -15,7 +18,16 @@ type ActivityItem =
 export function MainHub() {
     const navigate = useNavigate();
     const { user } = useOutletContext<OutletUserContext>();
-    const userRole = user?.role;
+    const canManageStreamers = hasAny(user, ['streamers.update', 'streamers.delete']);
+    const canManageEvents = hasAny(user, ['events.manage', 'events.update']);
+    const canViewAdminSection = hasAny(user, ADMIN_SECTION_PERMISSIONS);
+    const canViewBotDashboard = hasAny(user, ['monitoring.view', 'monitoring.refresh']);
+    const canClaimMain = hasPerm(user, 'spec.claim.main');
+    const canClaimProbation = hasPerm(user, 'spec.claim.probation');
+    const canUnclaimSelf = hasPerm(user, 'spec.unclaim.self');
+    const canJoinEvents = hasPerm(user, 'events.join.self');
+    const canLeaveEvents = hasPerm(user, 'events.leave.self');
+    const canRequestSpec = hasPerm(user, 'events.spec.request');
 
     // Collapsible states
     const [isMenuOpen, setIsMenuOpen] = React.useState(true);
@@ -44,7 +56,7 @@ export function MainHub() {
     React.useEffect(() => {
         const fetchStats = async () => {
             try {
-                const response = await fetch('/api/stats/dashboard');
+                const response = await apiFetch('/api/stats/dashboard');
                 if (response.ok) {
                     const json = await response.json() as unknown;
                     const data = unwrapApiData<DashboardStats>(json);
@@ -57,7 +69,7 @@ export function MainHub() {
 
         const fetchOnlineStreamers = async () => {
             try {
-                const response = await fetch('/api/streamers?online_only=true&gta_only=true');
+                const response = await apiFetch('/api/streamers?online_only=true&gta_only=true');
                 if (response.ok) {
                     const json = await response.json() as unknown;
                     const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
@@ -71,7 +83,7 @@ export function MainHub() {
 
         const fetchActiveEvents = async () => {
             try {
-                const response = await fetch('/api/events/active');
+                const response = await apiFetch('/api/events/active');
                 if (response.ok) {
                     const json = await response.json() as unknown;
                     const data = unwrapApiData<Event[]>(json);
@@ -95,7 +107,7 @@ export function MainHub() {
 
     const fetchOnlineStreamersManual = async () => {
         try {
-            const response = await fetch('/api/streamers?online_only=true&gta_only=true');
+            const response = await apiFetch('/api/streamers?online_only=true&gta_only=true');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
@@ -109,7 +121,7 @@ export function MainHub() {
 
     const fetchActiveEventsManual = async () => {
         try {
-            const response = await fetch('/api/events/active');
+            const response = await apiFetch('/api/events/active');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<Event[]>(json);
@@ -121,13 +133,11 @@ export function MainHub() {
     };
 
     const handleClaimStreamer = async (streamerId: string, isProbation: boolean) => {
-        if (!user?.discord_id) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch('/api/spec/claim', {
+            const response = await apiFetch('/api/spec/claim', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ streamer_id: streamerId, pr_id: user.discord_id, is_probation: isProbation })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ streamer_id: streamerId, is_probation: isProbation })
             });
             if (response.ok) {
                 setClaimError(null);
@@ -145,13 +155,11 @@ export function MainHub() {
     };
 
     const handleUnclaimStreamer = async (streamerId: string) => {
-        if (!user?.discord_id) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch('/api/spec/unclaim', {
+            const response = await apiFetch('/api/spec/unclaim', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ streamer_id: streamerId, pr_id: user.discord_id, reason: 'manual_unclaim' })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ streamer_id: streamerId, reason: 'manual_unclaim' })
             });
             if (response.ok) {
                 setClaimError(null);
@@ -169,13 +177,9 @@ export function MainHub() {
     };
 
     const handleJoinEvent = async (eventId: number | string) => {
-        if (!user?.discord_id) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${eventId}/join`, {
+            const response = await apiFetch(`/api/events/${eventId}/join`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ user_id: user.discord_id })
             });
             if (response.ok) {
                 setClaimError(null);
@@ -193,13 +197,9 @@ export function MainHub() {
     };
 
     const handleLeaveEvent = async (eventId: number | string) => {
-        if (!user?.discord_id) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${eventId}/leave`, {
+            const response = await apiFetch(`/api/events/${eventId}/leave`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ user_id: user.discord_id })
             });
             if (response.ok) {
                 setClaimError(null);
@@ -226,10 +226,9 @@ export function MainHub() {
     }) => {
         if (!selectedStreamer) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
+            const response = await apiFetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(updates)
             });
             if (response.ok) {
@@ -249,15 +248,14 @@ export function MainHub() {
     }) => {
         if (!selectedEvent) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${selectedEvent.id}`, {
+            const response = await apiFetch(`/api/events/${selectedEvent.id}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(updates)
             });
             if (response.ok) {
                 // Refresh active events
-                const evtResponse = await fetch('/api/events/active');
+                const evtResponse = await apiFetch('/api/events/active');
                 if (evtResponse.ok) {
                     const json = await evtResponse.json() as unknown;
                     const data = unwrapApiData<Event[]>(json);
@@ -272,10 +270,8 @@ export function MainHub() {
     const handleEndEvent = async (event: Event) => {
         if (!window.confirm(`Завершить событие "${event.name}"?`)) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/events/${event.id}/end`, {
+            const response = await apiFetch(`/api/events/${event.id}/end`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` }
             });
             if (response.ok) {
                 await fetchActiveEventsManual();
@@ -291,10 +287,9 @@ export function MainHub() {
         if (!specRequestName.trim()) return;
         setSpecRequestLoading(true);
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch('/api/events/spec-request', {
+            const response = await apiFetch('/api/events/spec-request', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: specRequestName.trim(),
                     description: specRequestDesc.trim(),
@@ -351,7 +346,7 @@ export function MainHub() {
             color: 'from-blue-500/20 to-blue-600/5 hover:border-blue-500/50'
         },
         {
-            title: 'Таблица пиаров',
+            title: 'Таблица PR Ассистентов',
             desc: 'Статистика работы сотрудников',
             path: '/assistants',
             icon: Users,
@@ -372,16 +367,18 @@ export function MainHub() {
             desc: 'Управление доступом и настройками',
             path: '/admin',
             icon: ShieldAlert,
-            color: 'from-red-500/20 to-red-600/5 hover:border-red-500/50 text-red-400'
+            color: 'from-red-500/20 to-red-600/5 hover:border-red-500/50 text-red-400',
+            visible: canViewAdminSection,
         },
         {
             title: 'Bot Dashboard',
             desc: 'Состояние и логи бота',
             path: '/bot',
             icon: Bot,
-            color: 'from-gray-500/20 to-gray-600/5 hover:border-gray-500/50'
+            color: 'from-gray-500/20 to-gray-600/5 hover:border-gray-500/50',
+            visible: canViewBotDashboard,
         },
-    ];
+    ].filter((item) => item.visible);
 
     // Combine events and streamers into activities
     const activities: ActivityItem[] = [
@@ -434,7 +431,7 @@ export function MainHub() {
                     <span className="text-sm font-normal text-white/40 ml-2">
                         {activities.length > 0 ? `${activities.length}` : ''}
                     </span>
-                    {!isGlobalClaimed && (
+                    {!isGlobalClaimed && canRequestSpec && (
                         <button
                             onClick={(e) => { e.stopPropagation(); setIsSpecRequestOpen(true); }}
                             className="ml-4 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs font-semibold hover:bg-amber-500/20 transition-colors text-amber-400 whitespace-nowrap"
@@ -519,14 +516,14 @@ export function MainHub() {
                                                         )}
                                                     </div>
                                                     <div className="flex items-center gap-1.5 ml-2 shrink-0">
-                                                        {isUserParticipant ? (
+                                                        {isUserParticipant && canLeaveEvents ? (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); void handleLeaveEvent(event.id); }}
                                                                 className="px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-semibold hover:bg-red-500/20 transition-colors text-red-400 whitespace-nowrap"
                                                             >
                                                                 Открепиться
                                                             </button>
-                                                        ) : !isGlobalClaimed && event.event_kind !== 'spec_request' && (
+                                                        ) : !isUserParticipant && !isGlobalClaimed && event.event_kind !== 'spec_request' && canJoinEvents && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); void handleJoinEvent(event.id); }}
                                                                 className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/80 whitespace-nowrap"
@@ -534,7 +531,7 @@ export function MainHub() {
                                                                 Закрепиться
                                                             </button>
                                                         )}
-                                                        {(userRole === 'manager' || userRole === 'developer') && (
+                                                        {canManageEvents && (
                                                             <>
                                                                 <button
                                                                     onClick={(e) => { e.stopPropagation(); setSelectedEvent(event); }}
@@ -637,14 +634,14 @@ export function MainHub() {
                                                         )}
                                                     </div>
                                                     <div className="flex items-center gap-1.5 ml-2 shrink-0">
-                                                        {isUserClaimed ? (
+                                                        {isUserClaimed && canUnclaimSelf ? (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); void handleUnclaimStreamer(streamer.streamer_id); }}
                                                                 className="px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-semibold hover:bg-red-500/20 transition-colors text-red-400 whitespace-nowrap"
                                                             >
                                                                 Открепиться
                                                             </button>
-                                                        ) : hasSlots && !isGlobalClaimed && (
+                                                        ) : hasSlots && !isGlobalClaimed && canClaimMain && (
                                                             <>
                                                                 <button
                                                                     onClick={(e) => { e.stopPropagation(); void handleClaimStreamer(streamer.streamer_id, false); }}
@@ -652,7 +649,7 @@ export function MainHub() {
                                                                 >
                                                                     Закрепиться
                                                                 </button>
-                                                                {user?.permissions?.can_spec_probation && streamer.allow_juniors !== false && (
+                                                                {canClaimProbation && streamer.allow_juniors !== false && (
                                                                     <button
                                                                         onClick={(e) => { e.stopPropagation(); void handleClaimStreamer(streamer.streamer_id, true); }}
                                                                         className="px-3 py-1.5 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition-colors text-white/60 whitespace-nowrap"
@@ -662,7 +659,7 @@ export function MainHub() {
                                                                 )}
                                                             </>
                                                         )}
-                                                        {(userRole === 'manager' || userRole === 'developer') && (
+                                                        {canManageStreamers && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); setSelectedStreamer(streamer); }}
                                                                 className="p-1.5 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
@@ -725,7 +722,7 @@ export function MainHub() {
                 </div>
             </div>
 
-            {(userRole === 'manager' || userRole === 'developer') && (
+            {adminCategories.length > 0 && (
                 <div className="select-none">
                     <h2
                         className="text-2xl font-bold mb-6 flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from database import Database
 
-from dependencies import get_current_user
+from dependencies import require_permission
 from services.rbac import can_create_role
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,6 +41,21 @@ def get_db(request: Request):
     return request.app.state.database
 
 
+def _has_permission(principal: dict, key: str) -> bool:
+    permissions = principal.get("permissions") or {}
+    return bool(permissions.get(key, False))
+
+
+def _resolve_user_pr_id(principal: dict) -> int:
+    discord_id = principal.get("discord_id")
+    if discord_id is None:
+        raise HTTPException(status_code=400, detail="User has no discord_id")
+    try:
+        return int(discord_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid discord_id")
+
+
 def ensure_admin_role(current_user: dict):
     """Allow only manager/developer for sensitive assistant operations."""
     if not is_admin_role(current_user.get("role")):
@@ -54,6 +69,7 @@ def ensure_admin_role(current_user: dict):
 async def get_all_assistants(
     request: Request,
     db: "Database" = Depends(get_db),
+    user: dict = Depends(require_permission("assistants.view")),
 ):
     """Get all PR staff members with their statistics."""
     trace_id = get_trace_id(request)
@@ -66,9 +82,14 @@ async def get_all_assistants(
     # Convert to Pydantic models for serialization
     assistants = [AssistantFull.model_validate(a) for a in assistants_data]
 
+    data_out = [a.model_dump(mode="json") for a in assistants]
+    for d in data_out:
+        if d.get("pr_id"):
+            d["pr_id"] = str(d["pr_id"])
+
     return JSONResponse(
         content=success_envelope(
-            data=[a.model_dump(mode="json") for a in assistants],
+            data=data_out,
             message=f"Found {len(assistants)} assistants",
             trace_id=trace_id,
         )
@@ -80,6 +101,7 @@ async def get_assistant(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
+    user: dict = Depends(require_permission("assistants.view")),
 ):
     """Get a specific assistant by PR ID."""
     trace_id = get_trace_id(request)
@@ -97,9 +119,13 @@ async def get_assistant(
 
     assistant = AssistantFull.model_validate(assistant_data)
 
+    data_out = assistant.model_dump(mode="json")
+    if data_out.get("pr_id"):
+        data_out["pr_id"] = str(data_out["pr_id"])
+
     return JSONResponse(
         content=success_envelope(
-            data=assistant.model_dump(mode="json"),
+            data=data_out,
             message="Assistant found",
             trace_id=trace_id,
         )
@@ -110,7 +136,7 @@ async def get_assistant(
 async def create_or_update_assistant(
     request: Request,
     assistant: AssistantCreate,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.create")),
     db: "Database" = Depends(get_db),
 ):
     """Create or update a PR staff member."""
@@ -126,16 +152,15 @@ async def create_or_update_assistant(
     ]
     if assistant.role not in valid_roles:
         raise HTTPException(
-            status_code=400,
-            detail=f"Невалидная роль '{assistant.role}'"
+            status_code=400, detail=f"Невалидная роль '{assistant.role}'"
         )
 
     user_role = user.get("role", "")
-    
+
     if not can_create_role(user_role, assistant.role):
         raise HTTPException(
             status_code=403,
-            detail=f"Недостаточно прав для назначения роли '{assistant.role}'"
+            detail=f"Недостаточно прав для назначения роли '{assistant.role}'",
         )
 
     await db.create_or_update_assistant(
@@ -165,6 +190,7 @@ async def update_assignment(
     pr_id: int,
     assignment: AssistantAssignment,
     db: "Database" = Depends(get_db),
+    user: dict = Depends(require_permission("assistants.update")),
 ):
     """Update assistant assignment to a streamer or event."""
     trace_id = get_trace_id(request)
@@ -220,6 +246,7 @@ async def delete_assistant(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
+    user: dict = Depends(require_permission("assistants.delete")),
 ):
     """Delete an assistant."""
     trace_id = get_trace_id(request)
@@ -247,8 +274,23 @@ async def get_assistant_logs(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
+    principal: dict = Depends(require_permission("assistants.view")),
 ):
     """Get activity logs for a specific assistant."""
+    if principal.get("principal_type") != "service":
+        own_id = _resolve_user_pr_id(principal)
+        if own_id != pr_id and not _has_permission(principal, "assistants.logs.view"):
+            raise HTTPException(
+                status_code=403,
+                detail="Недостаточно прав для просмотра чужих логов",
+            )
+    elif not _has_permission(principal, "assistants.logs.view"):
+        # Service principals have no "own" assistant identity; require explicit logs scope.
+        raise HTTPException(
+            status_code=403,
+            detail="Недостаточно прав: требуется 'assistants.logs.view'",
+        )
+
     trace_id = get_trace_id(request)
     logs = await db.get_assistant_logs(pr_id)
 
@@ -267,11 +309,10 @@ async def get_assistant_sessions(
     pr_id: int,
     limit: int = 50,
     include_deleted: bool = False,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.sessions.view")),
     db: "Database" = Depends(get_db),
 ):
     """Get assistant sessions with admin-editable fields."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
     if not assistant:
@@ -298,21 +339,15 @@ async def get_assistant_capabilities(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
+    user: dict = Depends(require_permission("assistants.view")),
 ):
     """Get assistant capabilities/permissions from role_permissions table (RBAC)."""
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
 
     if not assistant:
-        # Return default (no permissions) for unknown users
-        default_perms = {
-            "can_view_dashboard": False,
-            "can_spec_probation": False,
-            "can_manage_events": False,
-            "can_manage_streamers": False,
-            "can_execute_commands": False,
-            "can_view_logs": False,
-        }
+        # Return empty permission map for unknown users
+        default_perms: dict[str, bool] = {}
         return JSONResponse(
             content=success_envelope(
                 data=default_perms,
@@ -333,17 +368,15 @@ async def get_assistant_capabilities(
     )
 
 
-
 @router.post("/{pr_id}/session")
 async def create_manual_session(
     request: Request,
     pr_id: int,
     data: "ManualSpecSession",
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.sessions.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Create a manual spec session (Admin feature for corrections)."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
 
@@ -379,7 +412,9 @@ async def create_manual_session(
                 "is_probation": data.is_probation,
                 "target_name": data.target_name,
                 "target_type": data.target_type,
-                "target_id": str(data.target_id) if data.target_id is not None else None,
+                "target_id": (
+                    str(data.target_id) if data.target_id is not None else None
+                ),
             },
             "meta": {
                 "request_path": str(request.url.path),
@@ -411,11 +446,10 @@ async def adjust_assistant_points(
     request: Request,
     pr_id: int,
     data: AssistantPointsAdjustRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.points.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Admin-only manual points adjustment (manual component only)."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
     if not assistant:
@@ -468,11 +502,10 @@ async def patch_assistant_sanctions(
     request: Request,
     pr_id: int,
     data: AssistantSanctionsUpdateRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.sanctions.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Admin-only sanctions update."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
     if not assistant:
@@ -526,11 +559,10 @@ async def update_assistant_warnings(
     request: Request,
     pr_id: int,
     data: AssistantWarningsUpdateRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.warnings.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Admin-only warnings update (oral/strict as units)."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(pr_id)
     if not assistant:
@@ -542,9 +574,7 @@ async def update_assistant_warnings(
         strict_delta=data.strict_delta,
     )
     if not result:
-        raise HTTPException(
-            status_code=400, detail="Изменение выговоров не применено"
-        )
+        raise HTTPException(status_code=400, detail="Изменение выговоров не применено")
 
     await db.log_admin_action_v2(
         actor_name=user.get("nickname", user.get("username", "unknown")),
@@ -590,11 +620,10 @@ async def patch_assistant_session(
     pr_id: int,
     session_id: int,
     data: AssistantSessionPatchRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.sessions.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Admin-only session patch with delta points recalculation."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     patch = data.model_dump(exclude_unset=True)
     if not patch:
@@ -619,7 +648,7 @@ async def patch_assistant_session(
             target_id = after.get("target_id")
             target_name = after.get("target_name")
             duration = after.get("duration_seconds") or 0
-            
+
             if target_type == "streamer" and target_id is not None:
                 await broker.emit_spec_unclaimed(
                     streamer_id=int(target_id),
@@ -631,7 +660,11 @@ async def patch_assistant_session(
                 )
             elif target_type == "event" and target_id is not None:
                 ended_dt = after.get("ended_at")
-                ended_str = ended_dt.isoformat() if hasattr(ended_dt, "isoformat") else str(ended_dt)
+                ended_str = (
+                    ended_dt.isoformat()
+                    if hasattr(ended_dt, "isoformat")
+                    else str(ended_dt)
+                )
                 await broker.emit_event_left(
                     event_id=int(target_id),
                     event_name=target_name or "Unknown",
@@ -680,11 +713,10 @@ async def delete_assistant_session(
     request: Request,
     pr_id: int,
     session_id: int,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("assistants.sessions.manage")),
     db: "Database" = Depends(get_db),
 ):
     """Admin-only soft delete of a spec session."""
-    ensure_admin_role(user)
     trace_id = get_trace_id(request)
     result = await db.soft_delete_assistant_session(
         pr_id=pr_id,

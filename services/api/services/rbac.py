@@ -25,9 +25,9 @@ def is_admin_role(role: str | None) -> bool:
 
 
 def can_register_users(current_user: dict[str, Any]) -> bool:
-    """Check can_register_users permission on current user."""
+    """Compatibility helper: check user-creation permission."""
     permissions = current_user.get("permissions") or {}
-    return bool(permissions.get("can_register_users", False))
+    return bool(permissions.get("admin.users.create", False))
 
 
 def can_create_role(creator_role: str, target_role: str) -> bool:

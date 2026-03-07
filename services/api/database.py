@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -78,6 +79,97 @@ class Database:
         self.db_password = db_password
         self.db_name = db_name
         self.logger = logger
+
+    # =========================================================================
+    # Schema Introspection Helpers
+    # =========================================================================
+
+    async def _table_exists(self, cursor, table_name: str) -> bool:
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+            """,
+            (table_name,),
+        )
+        row = await cursor.fetchone() or {}
+        return int(row.get("cnt", 0)) > 0
+
+    async def _list_columns(self, cursor, table_name: str) -> set[str]:
+        await cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+            """,
+            (table_name,),
+        )
+        rows = await cursor.fetchall() or []
+        return {str(row.get("column_name")) for row in rows if row.get("column_name")}
+
+    async def _column_exists(self, cursor, table_name: str, column_name: str) -> bool:
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (table_name, column_name),
+        )
+        row = await cursor.fetchone() or {}
+        return int(row.get("cnt", 0)) > 0
+
+    async def _get_primary_key_columns(self, cursor, table_name: str) -> list[str]:
+        await cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.key_column_usage
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+              AND constraint_name = 'PRIMARY'
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        )
+        rows = await cursor.fetchall() or []
+        return [str(row.get("column_name")) for row in rows if row.get("column_name")]
+
+    async def _index_exists(self, cursor, table_name: str, index_name: str) -> bool:
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.statistics
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+              AND index_name = %s
+            """,
+            (table_name, index_name),
+        )
+        row = await cursor.fetchone() or {}
+        return int(row.get("cnt", 0)) > 0
+
+    async def _column_is_auto_increment(
+        self, cursor, table_name: str, column_name: str
+    ) -> bool:
+        await cursor.execute(
+            """
+            SELECT extra
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = %s
+              AND column_name = %s
+            LIMIT 1
+            """,
+            (table_name, column_name),
+        )
+        row = await cursor.fetchone() or {}
+        extra = str(row.get("extra", "")).lower()
+        return "auto_increment" in extra
 
     # =========================================================================
     # Connection Management
@@ -215,7 +307,7 @@ class Database:
                             id INT PRIMARY KEY DEFAULT 1,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
-                            monitoring_message_ids JSON,
+                            monitoring_message_ids BIGINT UNSIGNED,
                             pr_actions_channel_id BIGINT UNSIGNED,
                             control_panel_channel_id BIGINT UNSIGNED,
                             control_panel_message_id BIGINT UNSIGNED,
@@ -561,8 +653,7 @@ class Database:
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS web_auth (
-                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            discord_id BIGINT UNSIGNED UNIQUE NOT NULL,
+                            discord_id BIGINT UNSIGNED PRIMARY KEY,
                             username VARCHAR(50) UNIQUE NOT NULL,
                             password_hash VARCHAR(255) NOT NULL,
                             is_active BOOLEAN DEFAULT TRUE,
@@ -587,26 +678,71 @@ class Database:
                         """
                         CREATE TABLE IF NOT EXISTS sessions (
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            user_id INT UNSIGNED NOT NULL, 
-                            refresh_token VARCHAR(255) UNIQUE NOT NULL,
+                            user_id BIGINT UNSIGNED NOT NULL, 
+                            refresh_token_hash VARCHAR(64) NOT NULL,
+                            family_id VARCHAR(32) NOT NULL,
+                            replaced_by_hash VARCHAR(64) NULL,
                             expires_at TIMESTAMP NOT NULL,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             revoked BOOLEAN DEFAULT FALSE,
                             revoked_at TIMESTAMP NULL,
                             ip_address VARCHAR(45),
+                            last_ip VARCHAR(45) NULL,
                             user_agent TEXT,
+                            device_label VARCHAR(128) NULL,
                             INDEX idx_user_id (user_id),
-                            INDEX idx_refresh_token (refresh_token)
+                            INDEX idx_refresh_token_hash (refresh_token_hash),
+                            INDEX idx_family_id (family_id)
                         )
                         """
                     )
+
+                    # ----------------------------------------------------------
+                    # Session table migration (legacy -> new schema)
+                    # ----------------------------------------------------------
+                    session_migration_columns = {
+                        "family_id": "ALTER TABLE sessions ADD COLUMN family_id VARCHAR(32) NOT NULL DEFAULT ''",
+                        "refresh_token_hash": "ALTER TABLE sessions ADD COLUMN refresh_token_hash VARCHAR(64) NOT NULL DEFAULT ''",
+                        "replaced_by_hash": "ALTER TABLE sessions ADD COLUMN replaced_by_hash VARCHAR(64) NULL",
+                        "last_ip": "ALTER TABLE sessions ADD COLUMN last_ip VARCHAR(45) NULL",
+                        "device_label": "ALTER TABLE sessions ADD COLUMN device_label VARCHAR(128) NULL",
+                    }
+                    for col_name, alter_sql in session_migration_columns.items():
+                        try:
+                            await cursor.execute(alter_sql)
+                        except Exception:
+                            pass  # Column already exists
+
+                    # Add index on family_id if missing
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE sessions ADD INDEX idx_family_id (family_id)"
+                        )
+                    except Exception:
+                        pass
+
+                    # Add index on refresh_token_hash if missing
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE sessions ADD INDEX idx_refresh_token_hash (refresh_token_hash)"
+                        )
+                    except Exception:
+                        pass
+
+                    # Relax legacy columns to avoid NOT NULL errors during inserts if they still exist
+                    try:
+                        await cursor.execute(
+                            "ALTER TABLE sessions MODIFY COLUMN refresh_token VARCHAR(512) NULL"
+                        )
+                    except Exception:
+                        pass
 
                     # Auth Logs (System)
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS auth_logs (
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            user_id INT UNSIGNED,
+                            user_id BIGINT UNSIGNED,
                             username VARCHAR(50),
                             action ENUM('login_success', 'login_failed', 'logout', 'token_refresh', 'password_change') NOT NULL,
                             ip_address VARCHAR(45),
@@ -618,6 +754,11 @@ class Database:
                         """
                     )
 
+                    # ----------------------------------------------------------
+                    # web_auth PK Migration (id -> discord_id), guarded fail-fast
+                    # ----------------------------------------------------------
+                    await self._migrate_web_auth_pk_to_discord_id(cursor)
+
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS role_permissions (
@@ -627,6 +768,21 @@ class Database:
                         )
                         """
                     )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS service_principals (
+                            name VARCHAR(100) PRIMARY KEY,
+                            token_hash VARCHAR(64) NOT NULL UNIQUE,
+                            permissions JSON NOT NULL,
+                            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+
+                    # service_principals hash-only migration, guarded fail-fast
+                    await self._migrate_service_principals_hash_only(cursor)
 
                     await cursor.execute(
                         """
@@ -895,6 +1051,7 @@ class Database:
                     await conn.commit()
 
                     await self._init_default_permissions(conn)
+                    await self._init_default_service_principals(conn)
                     await self._ensure_singleton_settings(conn)
 
                     self.logger.info("Database initialized successfully (V2 Final)")
@@ -902,70 +1059,658 @@ class Database:
             self.logger.error(f"Failed to initialize database: {e}", exc_info=True)
             raise
 
+    async def _migrate_web_auth_pk_to_discord_id(self, cursor) -> None:
+        """
+        Guarded migration for legacy web_auth(id PK) -> web_auth(discord_id PK).
+
+        The sequence is intentionally fail-fast to avoid partial boot with broken auth.
+        """
+        if not await self._table_exists(cursor, "web_auth"):
+            return
+
+        has_id = await self._column_exists(cursor, "web_auth", "id")
+        has_discord_id = await self._column_exists(cursor, "web_auth", "discord_id")
+        if not has_discord_id:
+            raise RuntimeError(
+                "web_auth migration precondition failed: column 'discord_id' is missing. "
+                "Manual intervention required."
+            )
+
+        # Always normalize dependent column types for modern IDs.
+        await cursor.execute("ALTER TABLE sessions MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL")
+        await cursor.execute("ALTER TABLE auth_logs MODIFY COLUMN user_id BIGINT UNSIGNED")
+
+        if not has_id:
+            return
+
+        await cursor.execute("SELECT COUNT(*) AS cnt FROM web_auth WHERE discord_id IS NULL")
+        row = await cursor.fetchone() or {}
+        if int(row.get("cnt", 0)) > 0:
+            raise RuntimeError(
+                "web_auth migration precondition failed: NULL discord_id found. "
+                "Manual intervention required."
+            )
+
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM (
+                SELECT discord_id
+                FROM web_auth
+                GROUP BY discord_id
+                HAVING COUNT(*) > 1
+            ) AS dup
+            """
+        )
+        dup_row = await cursor.fetchone() or {}
+        if int(dup_row.get("cnt", 0)) > 0:
+            raise RuntimeError(
+                "web_auth migration precondition failed: duplicate discord_id values detected. "
+                "Manual intervention required."
+            )
+
+        self.logger.info("Starting guarded web_auth PK migration (id -> discord_id)...")
+
+        # Rewrite FK-like references before dropping legacy key.
+        await cursor.execute(
+            "UPDATE sessions s JOIN web_auth w ON s.user_id = w.id SET s.user_id = w.discord_id"
+        )
+        await cursor.execute(
+            "UPDATE auth_logs l JOIN web_auth w ON l.user_id = w.id SET l.user_id = w.discord_id"
+        )
+
+        pk_cols = await self._get_primary_key_columns(cursor, "web_auth")
+        if pk_cols not in ([], ["id"], ["discord_id"]):
+            raise RuntimeError(
+                f"web_auth migration precondition failed: unexpected PK shape {pk_cols}. "
+                "Manual intervention required."
+            )
+
+        if await self._column_is_auto_increment(cursor, "web_auth", "id"):
+            if not await self._index_exists(cursor, "web_auth", "uq_web_auth_id_tmp"):
+                await cursor.execute(
+                    "ALTER TABLE web_auth ADD UNIQUE INDEX uq_web_auth_id_tmp (id)"
+                )
+
+        if pk_cols == ["id"]:
+            await cursor.execute("ALTER TABLE web_auth DROP PRIMARY KEY")
+            await cursor.execute("ALTER TABLE web_auth ADD PRIMARY KEY (discord_id)")
+        elif pk_cols == []:
+            await cursor.execute("ALTER TABLE web_auth ADD PRIMARY KEY (discord_id)")
+
+        if await self._column_is_auto_increment(cursor, "web_auth", "id"):
+            await cursor.execute("ALTER TABLE web_auth MODIFY COLUMN id INT UNSIGNED NOT NULL")
+
+        if await self._index_exists(cursor, "web_auth", "uq_web_auth_id_tmp"):
+            await cursor.execute("ALTER TABLE web_auth DROP INDEX uq_web_auth_id_tmp")
+
+        await cursor.execute("ALTER TABLE web_auth DROP COLUMN id")
+        self.logger.info("Migrated web_auth PK successfully.")
+
+    @staticmethod
+    def _plan_service_principal_token_hash_dedup(
+        rows: list[Dict[str, Any]],
+        configured_names: set[str],
+    ) -> tuple[list[dict[str, str]], int]:
+        """
+        Build deterministic dedup updates for conflicting service_principals.token_hash rows.
+
+        For each duplicate token_hash group:
+        - keeper priority: configured service name, otherwise lexicographically smallest name
+        - all non-keepers are moved to a unique legacy shadow hash and should be deactivated
+        """
+        grouped: dict[str, list[dict[str, str]]] = {}
+        used_hashes: set[str] = set()
+
+        for raw in rows or []:
+            token_hash = str(raw.get("token_hash") or "").strip()
+            name = str(raw.get("name") or "").strip()
+            if not token_hash or not name:
+                continue
+            used_hashes.add(token_hash)
+            grouped.setdefault(token_hash, []).append({"name": name, "token_hash": token_hash})
+
+        updates: list[dict[str, str]] = []
+        conflict_groups = 0
+        for token_hash in sorted(grouped.keys()):
+            group = grouped[token_hash]
+            if len(group) <= 1:
+                continue
+
+            conflict_groups += 1
+            configured_candidates = sorted(
+                row["name"] for row in group if row["name"] in configured_names
+            )
+            keeper_name = (
+                configured_candidates[0]
+                if configured_candidates
+                else min(row["name"] for row in group)
+            )
+
+            attempt = 1
+            for row in sorted(group, key=lambda item: item["name"]):
+                if row["name"] == keeper_name:
+                    continue
+
+                shadow_hash = hashlib.sha256(
+                    f"legacy:{token_hash}:{row['name']}:{attempt}".encode("utf-8")
+                ).hexdigest()
+                while shadow_hash in used_hashes:
+                    attempt += 1
+                    shadow_hash = hashlib.sha256(
+                        f"legacy:{token_hash}:{row['name']}:{attempt}".encode("utf-8")
+                    ).hexdigest()
+
+                used_hashes.add(shadow_hash)
+                updates.append(
+                    {
+                        "name": row["name"],
+                        "new_hash": shadow_hash,
+                        "old_hash": token_hash,
+                    }
+                )
+                attempt += 1
+
+        return updates, conflict_groups
+
+    async def _migrate_service_principals_hash_only(self, cursor) -> None:
+        """
+        Guarded migration for service_principals to hash-only token storage.
+
+        Runtime contract:
+        - lookup by token_hash only
+        - no plaintext token column in active schema
+        """
+        if not await self._table_exists(cursor, "service_principals"):
+            return
+
+        has_legacy_token = await self._column_exists(
+            cursor, "service_principals", "token"
+        )
+        has_token_hash = await self._column_exists(
+            cursor, "service_principals", "token_hash"
+        )
+
+        if not has_token_hash:
+            try:
+                await cursor.execute(
+                    "ALTER TABLE service_principals ADD COLUMN token_hash VARCHAR(64) NULL"
+                )
+            except Exception as exc:
+                # Race/idempotency-safe behavior:
+                # if DB reports duplicate column, verify actual presence and continue.
+                err_code = exc.args[0] if getattr(exc, "args", None) else None
+                if err_code != 1060 or not await self._column_exists(
+                    cursor, "service_principals", "token_hash"
+                ):
+                    raise RuntimeError(
+                        "service_principals migration failed: cannot add token_hash column."
+                    ) from exc
+
+            has_token_hash = await self._column_exists(
+                cursor, "service_principals", "token_hash"
+            )
+            has_legacy_token = await self._column_exists(
+                cursor, "service_principals", "token"
+            )
+            if not has_token_hash:
+                raise RuntimeError(
+                    "service_principals migration failed: token_hash column not present after ALTER."
+                )
+
+        if has_legacy_token:
+            await cursor.execute(
+                """
+                UPDATE service_principals
+                SET token_hash = SHA2(token, 256)
+                WHERE (token_hash IS NULL OR token_hash = '')
+                  AND token IS NOT NULL
+                  AND token != ''
+                """
+            )
+
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM service_principals
+            WHERE is_active = 1
+              AND (token_hash IS NULL OR token_hash = '')
+            """
+        )
+        active_missing_row = await cursor.fetchone() or {}
+        active_missing = int(active_missing_row.get("cnt", 0))
+        if active_missing > 0:
+            raise RuntimeError(
+                "service_principals migration failed: active principals without token_hash found. "
+                "Manual intervention required."
+            )
+
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM service_principals
+            WHERE token_hash IS NULL OR token_hash = ''
+            """
+        )
+        total_missing_row = await cursor.fetchone() or {}
+        total_missing = int(total_missing_row.get("cnt", 0))
+        if total_missing > 0:
+            raise RuntimeError(
+                "service_principals migration failed: rows without token_hash remain. "
+                "Manual intervention required."
+            )
+
+        # Deduplicate legacy token hashes before adding/validating unique constraint.
+        configured_names = set(Config.service_token_map.keys())
+        await cursor.execute(
+            """
+            SELECT name, token_hash, is_active
+            FROM service_principals
+            WHERE token_hash IS NOT NULL
+              AND token_hash != ''
+            """
+        )
+        hash_rows = await cursor.fetchall() or []
+        dedup_updates, conflict_groups = self._plan_service_principal_token_hash_dedup(
+            hash_rows,
+            configured_names,
+        )
+        if dedup_updates:
+            for item in dedup_updates:
+                await cursor.execute(
+                    """
+                    UPDATE service_principals
+                    SET token_hash = %s, is_active = 0
+                    WHERE name = %s
+                    """,
+                    (item["new_hash"], item["name"]),
+                )
+            shadowed_names = ", ".join(sorted(item["name"] for item in dedup_updates))
+            self.logger.warning(
+                "service_principals dedup remediated %s legacy rows across %s conflict groups; "
+                "shadowed names: %s",
+                len(dedup_updates),
+                conflict_groups,
+                shadowed_names,
+            )
+        else:
+            self.logger.info(
+                "service_principals dedup found no token_hash conflicts (groups=%s).",
+                conflict_groups,
+            )
+
+        await cursor.execute(
+            """
+            SELECT token_hash, COUNT(*) AS cnt
+            FROM service_principals
+            WHERE token_hash IS NOT NULL
+              AND token_hash != ''
+            GROUP BY token_hash
+            HAVING COUNT(*) > 1
+            """
+        )
+        duplicates_after_dedup = await cursor.fetchall() or []
+        if duplicates_after_dedup:
+            self.logger.error(
+                "service_principals dedup conflicts remaining: %s",
+                len(duplicates_after_dedup),
+            )
+            raise RuntimeError(
+                "service_principals migration failed: token_hash duplicates remain; "
+                "manual intervention required."
+            )
+        self.logger.info("service_principals dedup conflicts remaining: 0")
+
+        await cursor.execute(
+            "ALTER TABLE service_principals MODIFY COLUMN token_hash VARCHAR(64) NOT NULL"
+        )
+
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.statistics
+            WHERE table_schema = DATABASE()
+              AND table_name = 'service_principals'
+              AND column_name = 'token_hash'
+              AND non_unique = 0
+            """
+        )
+        uniq_row = await cursor.fetchone() or {}
+        if int(uniq_row.get("cnt", 0)) == 0:
+            await cursor.execute(
+                "ALTER TABLE service_principals ADD UNIQUE INDEX uq_service_token_hash (token_hash)"
+            )
+
+        if has_legacy_token:
+            await cursor.execute(
+                "UPDATE service_principals SET token = NULL WHERE token IS NOT NULL"
+            )
+            await cursor.execute("ALTER TABLE service_principals DROP COLUMN token")
+
     async def _init_default_permissions(self, conn):
-        """Initialize default role permissions."""
+        """Initialize default role permissions without clobbering custom overrides."""
         async with conn.cursor() as cursor:
+            catalog = {
+                "dashboard.view",
+                "streamers.view",
+                "streamers.create",
+                "streamers.update",
+                "streamers.delete",
+                "streamers.status.update",
+                "spec.view_claimable",
+                "spec.view_self_sessions",
+                "spec.claim.main",
+                "spec.claim.probation",
+                "spec.unclaim.self",
+                "spec.unclaim.any",
+                "events.view",
+                "events.create",
+                "events.update",
+                "events.manage",
+                "events.spec.request",
+                "events.spec.manage",
+                "events.join.self",
+                "events.leave.self",
+                "events.leave.any",
+                "assistants.view",
+                "assistants.create",
+                "assistants.update",
+                "assistants.delete",
+                "assistants.logs.view",
+                "assistants.sessions.view",
+                "assistants.sessions.manage",
+                "assistants.points.manage",
+                "assistants.sanctions.manage",
+                "assistants.warnings.manage",
+                "admin.users.create",
+                "logs.pr_actions.view",
+                "logs.admin.view",
+                "guild.view",
+                "guild.settings.view",
+                "guild.settings.update",
+                "guild.templates.view",
+                "guild.templates.update",
+                "guild.rates.view",
+                "guild.rates.update",
+                "monitoring.view",
+                "monitoring.refresh",
+                "notifications.render",
+            }
+
+            # Base permissions for all staff roles
+            base_staff_perms = {
+                "dashboard.view": True,
+                "streamers.view": True,
+                "spec.view_self_sessions": True,
+                "spec.view_claimable": True,
+                "spec.claim.main": True,
+                "spec.unclaim.self": True,
+                "events.view": True,
+                "events.join.self": True,
+                "events.leave.self": True,
+                "events.spec.request": True,
+                "assistants.view": True,
+                "logs.pr_actions.view": True,
+            }
+
+            # Junior Employee (base + probation claim)
+            junior_employee_perms = {
+                **base_staff_perms,
+                "spec.claim.probation": True,
+            }
+
+            employee_perms = {**base_staff_perms}
+
+            # Senior level (employee + event creation)
+            senior_perms = {
+                **employee_perms,
+                "events.create": True,
+            }
+
+            # Manager level (business admin, no technical monitoring controls)
+            manager_perms = {
+                **senior_perms,
+                "admin.users.create": True,
+                "streamers.create": True,
+                "streamers.update": True,
+                "streamers.delete": True,
+                "assistants.create": True,
+                "assistants.update": True,
+                "assistants.delete": True,
+                "assistants.logs.view": True,
+                "assistants.sessions.view": True,
+                "assistants.sessions.manage": True,
+                "assistants.points.manage": True,
+                "assistants.sanctions.manage": True,
+                "assistants.warnings.manage": True,
+                "events.update": True,
+                "events.manage": True,
+                "events.spec.manage": True,
+                "events.leave.any": True,
+                "spec.unclaim.any": True,
+                "logs.admin.view": True,
+                "guild.view": True,
+                "guild.settings.view": True,
+                "guild.settings.update": True,
+                "guild.templates.view": True,
+                "guild.templates.update": True,
+                "guild.rates.view": True,
+                "guild.rates.update": True,
+            }
+
+            # Developer (technical controls + status sync rights)
+            developer_perms = {
+                **manager_perms,
+                "notifications.render": True,
+                "monitoring.view": True,
+                "monitoring.refresh": True,
+                "streamers.status.update": True,
+            }
+
             default_permissions = {
-                "junior_employee": {
-                    "can_view_dashboard": True,
-                    "can_spec_probation": True,
-                    "can_manage_events": False,
-                    "can_manage_streamers": False,
-                    "can_execute_commands": False,
-                    "can_view_logs": False,
-                },
-                "employee": {
-                    "can_view_dashboard": True,
-                    "can_spec_probation": False,
-                    "can_manage_events": False,
-                    "can_manage_streamers": False,
-                    "can_execute_commands": False,
-                    "can_view_logs": False,
-                },
-                "senior_employee": {
-                    "can_view_dashboard": True,
-                    "can_spec_probation": False,
-                    "can_manage_events": False,
-                    "can_manage_streamers": False,
-                    "can_execute_commands": False,
-                    "can_view_logs": False,
-                },
-                "manager": {
-                    "can_view_dashboard": True,
-                    "can_spec_probation": True,
-                    "can_manage_events": True,
-                    "can_manage_streamers": True,
-                    "can_register_users": True,
-                    "can_execute_commands": True,
-                    "can_view_logs": True,
-                    "can_view_admin_logs": True,
-                    "can_manage_permissions": False,
-                },
-                "developer": {
-                    "can_view_dashboard": True,
-                    "can_spec_probation": True,
-                    "can_manage_events": True,
-                    "can_manage_streamers": True,
-                    "can_register_users": True,
-                    "can_manage_permissions": True,
-                    "can_access_admin_panel": True,
-                    "can_execute_commands": True,
-                    "can_view_logs": True,
-                    "can_view_admin_logs": True,
-                },
+                "junior_employee": junior_employee_perms,
+                "employee": employee_perms,
+                "senior_employee": senior_perms,
+                "manager": manager_perms,
+                "developer": developer_perms,
             }
 
             for role, permissions in default_permissions.items():
+                filtered_defaults = {
+                    key: bool(value)
+                    for key, value in permissions.items()
+                    if key in catalog and value is True
+                }
+
+                await cursor.execute(
+                    "SELECT permissions FROM role_permissions WHERE role = %s",
+                    (role,),
+                )
+                row = await cursor.fetchone()
+
+                existing_permissions: dict[str, bool] = {}
+                if row and row.get("permissions"):
+                    raw = row["permissions"]
+                    if isinstance(raw, str):
+                        try:
+                            existing_permissions = json.loads(raw)
+                        except json.JSONDecodeError:
+                            existing_permissions = {}
+                    elif isinstance(raw, dict):
+                        existing_permissions = raw
+
+                # Reconcile:
+                # - keep custom toggles for known catalog keys,
+                # - drop orphaned keys,
+                # - add any missing defaults.
+                reconciled: dict[str, bool] = {}
+                for key, value in existing_permissions.items():
+                    if key in catalog:
+                        reconciled[key] = bool(value)
+                for key, value in filtered_defaults.items():
+                    if key not in reconciled:
+                        reconciled[key] = bool(value)
+
                 await cursor.execute(
                     """
                     INSERT INTO role_permissions (role, permissions)
                     VALUES (%s, %s)
                     ON DUPLICATE KEY UPDATE permissions = %s
                     """,
-                    (role, json.dumps(permissions), json.dumps(permissions)),
+                    (
+                        role,
+                        json.dumps(reconciled),
+                        json.dumps(reconciled),
+                    ),
                 )
             await conn.commit()
-            self.logger.debug("  ✓ Default permissions initialized")
+            self.logger.debug("  ✓ Default permissions reconciled")
+
+    @staticmethod
+    def _get_default_service_permissions(service_name: str) -> dict[str, bool]:
+        """Default least-privilege permissions for built-in service principals."""
+        name = service_name.lower()
+        discord_scope = {
+            "streamers.view": True,
+            "streamers.create": True,
+            "streamers.update": True,
+            "streamers.delete": True,
+            "spec.view_claimable": True,
+            "spec.view_self_sessions": True,
+            "spec.claim.main": True,
+            "spec.claim.probation": True,
+            "spec.unclaim.any": True,
+            "assistants.view": True,
+            "assistants.logs.view": True,
+            "assistants.sessions.view": True,
+            "assistants.sessions.manage": True,
+            "events.view": True,
+            "events.create": True,
+            "events.manage": True,
+            "events.join.self": True,
+            "events.leave.any": True,
+            "events.spec.manage": True,
+            "guild.view": True,
+            "guild.settings.update": True,
+            "guild.templates.view": True,
+            "guild.templates.update": True,
+            "guild.rates.update": True,
+            "monitoring.view": True,
+            "monitoring.refresh": True,
+            "notifications.render": True,
+            "dashboard.view": True,
+        }
+        twitch_scope = {
+            "streamers.view": True,
+            "streamers.create": True,
+            "streamers.status.update": True,
+            "spec.unclaim.any": True,
+            "monitoring.refresh": True,
+        }
+        if "discord" in name:
+            return discord_scope
+        if "twitch" in name:
+            return twitch_scope
+        # Deny by default for unknown service principals.
+        return {}
+
+    @staticmethod
+    def _configured_service_tokens() -> list[tuple[str, str]]:
+        """
+        Parse configured service tokens into named tuples: (name, token).
+
+        Config contract is strict and validated at startup.
+        """
+        return list(Config.service_token_map.items())
+
+    @staticmethod
+    def _hash_service_token(token: str) -> str:
+        """Hash service bearer token for lookup/storage."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    async def _init_default_service_principals(self, conn):
+        """Initialize or reconcile service principal scopes for configured tokens."""
+        configured = self._configured_service_tokens()
+        if not configured:
+            return
+
+        async with conn.cursor() as cursor:
+            has_token_hash = await self._column_exists(
+                cursor, "service_principals", "token_hash"
+            )
+            if not has_token_hash:
+                # Guard against metadata/introspection false-negatives:
+                # run migration path once more, then re-check deterministically.
+                await self._migrate_service_principals_hash_only(cursor)
+                has_token_hash = await self._column_exists(
+                    cursor, "service_principals", "token_hash"
+                )
+            if not has_token_hash:
+                raise RuntimeError(
+                    "service_principals.token_hash is missing after migrations; "
+                    "startup aborted to prevent broken service auth."
+                )
+
+            for service_name, token in configured:
+                defaults = self._get_default_service_permissions(service_name)
+                normalized_token = (token or "").strip()
+                if not normalized_token:
+                    continue
+                token_hash = self._hash_service_token(normalized_token)
+
+                await cursor.execute(
+                    """
+                    SELECT permissions, is_active
+                    FROM service_principals
+                    WHERE name = %s
+                    LIMIT 1
+                    """,
+                    (service_name,),
+                )
+                row = await cursor.fetchone()
+
+                existing_permissions: dict[str, bool] = {}
+                # Configured service tokens are authoritative and must stay active.
+                is_active = True
+                if row:
+                    raw_permissions = row.get("permissions")
+                    if isinstance(raw_permissions, str):
+                        try:
+                            existing_permissions = json.loads(raw_permissions)
+                        except json.JSONDecodeError:
+                            existing_permissions = {}
+                    elif isinstance(raw_permissions, dict):
+                        existing_permissions = raw_permissions
+
+                reconciled = dict(existing_permissions)
+                for key, value in defaults.items():
+                    if key not in reconciled:
+                        reconciled[key] = bool(value)
+
+                await cursor.execute(
+                    """
+                    INSERT INTO service_principals (name, token_hash, permissions, is_active)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        name = %s,
+                        token_hash = %s,
+                        permissions = %s,
+                        is_active = %s
+                    """,
+                    (
+                        service_name,
+                        token_hash,
+                        json.dumps(reconciled),
+                        is_active,
+                        service_name,
+                        token_hash,
+                        json.dumps(reconciled),
+                        is_active,
+                    ),
+                )
+
+            await conn.commit()
+            self.logger.debug("  ✓ Service principals reconciled")
 
     async def _ensure_singleton_settings(self, conn):
         """Ensure settings table has exactly one row."""
@@ -1006,8 +1751,6 @@ class Database:
 
     async def get_role_permissions(self, role: str) -> dict:
         """Get permissions for a role from role_permissions table."""
-        import json
-
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -1019,13 +1762,52 @@ class Database:
                     if isinstance(permissions, str):
                         return json.loads(permissions)
                     return permissions
+                return {}
+
+    async def get_service_principal_by_token(self, token: str) -> Optional[dict]:
+        """Get active service principal by bearer token."""
+        normalized_token = (token or "").strip()
+        if not normalized_token:
+            return None
+        token_hash = self._hash_service_token(normalized_token)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                try:
+                    await cursor.execute(
+                        """
+                        SELECT name, permissions, is_active
+                        FROM service_principals
+                        WHERE token_hash = %s
+                        LIMIT 1
+                        """,
+                        (token_hash,),
+                    )
+                    row = await cursor.fetchone()
+                except Exception as e:
+                    self.logger.error(
+                        f"Service principal lookup failed (hash-only path): {e}",
+                        exc_info=True,
+                    )
+                    return None
+                if not row or not row.get("is_active", True):
+                    return None
+
+                raw_permissions = row.get("permissions") or {}
+                permissions: dict[str, bool]
+                if isinstance(raw_permissions, str):
+                    try:
+                        permissions = json.loads(raw_permissions)
+                    except json.JSONDecodeError:
+                        permissions = {}
+                elif isinstance(raw_permissions, dict):
+                    permissions = raw_permissions
+                else:
+                    permissions = {}
+
                 return {
-                    "can_view_dashboard": False,
-                    "can_spec_probation": False,
-                    "can_manage_events": False,
-                    "can_manage_streamers": False,
-                    "can_execute_commands": False,
-                    "can_view_logs": False,
+                    "principal_type": "service",
+                    "service_name": row.get("name"),
+                    "permissions": permissions,
                 }
 
     @db_retry()
@@ -2129,7 +2911,7 @@ class Database:
         self,
         notification_channel_id: Optional[int] = None,
         monitoring_channel_id: Optional[int] = None,
-        monitoring_message_ids: Optional[list] = None,
+        monitoring_message_id: Optional[int] = None,
         monitoring_filter_gta: Optional[bool] = None,
         pr_actions_channel_id: Optional[int] = None,
         control_panel_channel_id: Optional[int] = None,
@@ -2140,7 +2922,7 @@ class Database:
         Args:
             notification_channel_id: Discord channel ID for notifications (optional)
             monitoring_channel_id: Discord channel ID for monitoring (optional)
-            monitoring_message_ids: List of Discord message IDs for monitoring (optional)
+            monitoring_message_id: Discord message ID for monitoring (optional)
             monitoring_filter_gta: Filter monitoring to GTA streamers only (optional)
             pr_actions_channel_id: Discord channel ID for PR actions (optional)
             control_panel_channel_id: Discord channel ID for control panel (optional)
@@ -2155,7 +2937,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     # First, get existing settings using the same cursor to ensure consistency
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id FROM settings",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id FROM settings",
                     )
                     existing = await cursor.fetchone()
 
@@ -2177,26 +2959,12 @@ class Database:
                         )
                     )
 
-                    # Handle monitoring_message_ids (JSON list)
-                    existing_ids = (
-                        existing.get("monitoring_message_ids") if existing else None
-                    )
-                    if isinstance(existing_ids, str):
-                        import json as json_module
-
-                        existing_ids = json_module.loads(existing_ids)
-                    final_monitoring_message_ids = (
-                        monitoring_message_ids
-                        if monitoring_message_ids is not None
-                        else existing_ids
-                    )
-                    # Serialize to JSON for MySQL
-                    import json as json_module
-
-                    final_monitoring_ids_json = (
-                        json_module.dumps(final_monitoring_message_ids)
-                        if final_monitoring_message_ids is not None
-                        else None
+                    final_monitoring_message_id = (
+                        monitoring_message_id
+                        if monitoring_message_id is not None
+                        else (
+                            existing.get("monitoring_message_id") if existing else None
+                        )
                     )
                     final_pr_actions_channel = (
                         pr_actions_channel_id
@@ -2240,7 +3008,7 @@ class Database:
                             id, 
                             notification_channel_id, 
                             monitoring_channel_id, 
-                            monitoring_message_ids, 
+                            monitoring_message_id, 
                             monitoring_filter_gta, 
                             pr_actions_channel_id, 
                             control_panel_channel_id, 
@@ -2250,7 +3018,7 @@ class Database:
                         ON DUPLICATE KEY UPDATE
                             notification_channel_id = VALUES(notification_channel_id),
                             monitoring_channel_id = VALUES(monitoring_channel_id),
-                            monitoring_message_ids = VALUES(monitoring_message_ids),
+                            monitoring_message_id = VALUES(monitoring_message_id),
                             monitoring_filter_gta = VALUES(monitoring_filter_gta),
                             pr_actions_channel_id = VALUES(pr_actions_channel_id),
                             control_panel_channel_id = VALUES(control_panel_channel_id),
@@ -2259,7 +3027,7 @@ class Database:
                         (
                             final_notification,
                             final_monitoring_channel,
-                            final_monitoring_ids_json,
+                            final_monitoring_message_id,
                             final_filter_gta,
                             final_pr_actions_channel,
                             final_control_panel_channel,
@@ -2283,7 +3051,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
-                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_ids, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
+                        "SELECT notification_channel_id, monitoring_channel_id, monitoring_message_id, monitoring_filter_gta, pr_actions_channel_id, control_panel_channel_id, control_panel_message_id, notification_templates, p0_rate, p1_rate, p2_rate, p3_rate, probation_rate FROM settings WHERE id = 1",
                     )
                     return await cursor.fetchone()
         except Exception as e:
@@ -5533,7 +6301,7 @@ class Database:
         password_hash: str,
         created_by: Optional[int] = None,
     ) -> int:
-        """Create a new web user (web_auth)."""
+        """Create a new web user (web_auth) and return its PK (discord_id)."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -5545,7 +6313,7 @@ class Database:
                         (discord_id, username, password_hash),
                     )
                     await conn.commit()
-                    return cursor.lastrowid
+                    return discord_id
         except Exception as e:
             self.logger.error(f"Failed to create user {username}: {e}", exc_info=True)
             raise
@@ -5558,7 +6326,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname 
+                        SELECT w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname 
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         WHERE w.username = %s
@@ -5578,7 +6346,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname
+                        SELECT w.discord_id, w.username, w.password_hash, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_failed_login, w.last_login, w.created_at, a.role, a.nickname
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         WHERE w.discord_id = %s
@@ -5601,14 +6369,14 @@ class Database:
                     # Assuming id is web_auth.id
                     await cursor.execute(
                         """
-                        SELECT w.id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
+                        SELECT w.discord_id as id, w.discord_id, w.username, w.is_active, w.require_password_change, w.failed_login_attempts, w.last_login, w.created_at, 
                         COALESCE(a.role, 'employee') as role, 
                         COALESCE(a.nickname, w.username) as nickname,
                         rp.permissions
                         FROM web_auth w
                         LEFT JOIN assistants a ON a.pr_id = w.discord_id
                         LEFT JOIN role_permissions rp ON rp.role = COALESCE(a.role, 'employee')
-                        WHERE w.id = %s
+                        WHERE w.discord_id = %s
                         """,
                         (user_id,),
                     )
@@ -5671,7 +6439,7 @@ class Database:
                         SET failed_login_attempts = 0, 
                             last_failed_login = NULL,
                             last_login = CURRENT_TIMESTAMP
-                        WHERE id = %s
+                        WHERE discord_id = %s
                         """,
                         (user_id,),
                     )
@@ -5681,24 +6449,170 @@ class Database:
 
     @db_retry()
     async def create_session(
-        self, user_id: int, refresh_token: str, expires_at, ip: str, user_agent: str
+        self,
+        user_id: int,
+        refresh_token_hash: str,
+        family_id: str,
+        expires_at,
+        ip: str,
+        user_agent: str,
     ) -> int:
-        """Create a new session."""
+        """Create a new session with hashed refresh token and family chain."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        INSERT INTO sessions (user_id, refresh_token, expires_at, ip_address, user_agent) 
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO sessions 
+                            (user_id, refresh_token_hash, family_id, expires_at, ip_address, last_ip, user_agent) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (user_id, refresh_token, expires_at, ip, user_agent),
+                        (user_id, refresh_token_hash, family_id, expires_at, ip, ip, user_agent),
                     )
                     await conn.commit()
                     return cursor.lastrowid
         except Exception as e:
             self.logger.error(f"Failed to create session: {e}", exc_info=True)
             raise
+
+    @db_retry()
+    async def find_session_by_refresh_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        """Find a session by its refresh token hash (active or replaced)."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, user_id, refresh_token_hash, family_id, 
+                               replaced_by_hash, expires_at, created_at,
+                               revoked, revoked_at, ip_address, last_ip, user_agent
+                        FROM sessions
+                        WHERE refresh_token_hash = %s
+                        LIMIT 1
+                        """,
+                        (token_hash,),
+                    )
+                    return await cursor.fetchone()
+        except Exception as e:
+            self.logger.error(f"Failed to find session by hash: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def rotate_session(
+        self,
+        old_session_id: int,
+        old_token_hash: str,
+        new_token_hash: str,
+        new_expires_at,
+        new_ip: str,
+        new_user_agent: str,
+    ) -> Optional[int]:
+        """
+        Atomically rotate a refresh token: mark old as replaced, create new session in same family.
+
+        Returns new session_id or None if the old session was already rotated/revoked (reuse detection).
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Lock the old session to prevent race conditions
+                    await cursor.execute(
+                        """
+                        SELECT id, user_id, family_id, refresh_token_hash, 
+                               revoked, replaced_by_hash, expires_at
+                        FROM sessions
+                        WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (old_session_id,),
+                    )
+                    old_session = await cursor.fetchone()
+
+                    if not old_session:
+                        return None
+
+                    # Reuse detection: if already replaced or revoked, it's a replay/theft
+                    replaced_by_hash = old_session.get("replaced_by_hash")
+                    if (
+                        (replaced_by_hash is not None and str(replaced_by_hash).strip() != "")
+                        or old_session["revoked"]
+                    ):
+                        return None  # Caller must handle reuse detection
+
+                    # Mark old session as replaced
+                    await cursor.execute(
+                        """
+                        UPDATE sessions 
+                        SET replaced_by_hash = %s, revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        """,
+                        (new_token_hash, old_session_id),
+                    )
+
+                    # Create new session in the same family
+                    await cursor.execute(
+                        """
+                        INSERT INTO sessions 
+                            (user_id, refresh_token_hash, family_id, expires_at, ip_address, last_ip, user_agent) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            old_session["user_id"],
+                            new_token_hash,
+                            old_session["family_id"],
+                            new_expires_at,
+                            old_session.get("ip_address"),
+                            new_ip,
+                            new_user_agent,
+                        ),
+                    )
+                    new_session_id = cursor.lastrowid
+
+                    await conn.commit()
+                    return new_session_id
+        except Exception as e:
+            self.logger.error(f"Failed to rotate session: {e}", exc_info=True)
+            return None
+
+    @db_retry()
+    async def revoke_session_family(self, family_id: str) -> int:
+        """Revoke ALL sessions in a token family (reuse detection response). Returns count."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE sessions 
+                        SET revoked = TRUE, revoked_at = CURRENT_TIMESTAMP 
+                        WHERE family_id = %s AND revoked = FALSE
+                        """,
+                        (family_id,),
+                    )
+                    await conn.commit()
+                    return cursor.rowcount
+        except Exception as e:
+            self.logger.error(f"Failed to revoke session family {family_id}: {e}", exc_info=True)
+            return 0
+
+    @db_retry()
+    async def revoke_session(self, session_id: int) -> bool:
+        """Revoke a single session by its ID."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        UPDATE sessions 
+                        SET revoked = TRUE, revoked_at = CURRENT_TIMESTAMP 
+                        WHERE id = %s AND revoked = FALSE
+                        """,
+                        (session_id,),
+                    )
+                    await conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            self.logger.error(f"Failed to revoke session {session_id}: {e}", exc_info=True)
+            return False
 
     @db_retry()
     async def revoke_user_sessions(self, user_id: int) -> None:
@@ -5728,6 +6642,7 @@ class Database:
                         WHERE id = %s
                           AND user_id = %s
                           AND revoked = FALSE
+                          AND (replaced_by_hash IS NULL OR replaced_by_hash = '')
                           AND expires_at > CURRENT_TIMESTAMP
                         LIMIT 1
                         """,
@@ -5737,6 +6652,46 @@ class Database:
         except Exception as e:
             self.logger.error(f"Failed to validate session: {e}", exc_info=True)
             return False
+
+    @db_retry()
+    async def get_user_sessions(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get all active (non-revoked, non-expired) sessions for a user."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT id, ip_address, last_ip, user_agent, device_label,
+                               created_at, expires_at
+                        FROM sessions
+                        WHERE user_id = %s
+                          AND revoked = FALSE
+                          AND (replaced_by_hash IS NULL OR replaced_by_hash = '')
+                          AND expires_at > CURRENT_TIMESTAMP
+                        ORDER BY created_at DESC
+                        """,
+                        (user_id,),
+                    )
+                    return await cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Failed to get user sessions: {e}", exc_info=True)
+            return []
+
+    @db_retry()
+    async def get_session_owner(self, session_id: int) -> Optional[int]:
+        """Get the user_id that owns a given session."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT user_id FROM sessions WHERE id = %s",
+                        (session_id,),
+                    )
+                    row = await cursor.fetchone()
+                    return row["user_id"] if row else None
+        except Exception as e:
+            self.logger.error(f"Failed to get session owner: {e}", exc_info=True)
+            return None
 
     @db_retry()
     async def log_auth_event(
@@ -5999,4 +6954,3 @@ class Database:
         except Exception as e:
             self.logger.error(f"Failed to get PR action logs: {e}", exc_info=True)
             return {"items": [], "total": 0}
-

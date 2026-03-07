@@ -129,7 +129,6 @@ class APIClient:
         self,
         twitch_url: str,
         priority: int = 0,
-        added_by_id: int = 0,
     ) -> Optional[Dict]:
         return await self._request(
             "POST",
@@ -138,7 +137,6 @@ class APIClient:
                 "twitch_url": twitch_url,
                 "priority": priority,
             },
-            params={"added_by_id": added_by_id},
         )
 
     async def update_streamer(
@@ -209,10 +207,9 @@ class APIClient:
         """Claim a streamer (supports Probation via Slot Logic)."""
         return await self._request(
             "POST",
-            "/spec/claim",
+            f"/spec/claim/{pr_id}",
             data={
                 "streamer_id": streamer_id,
-                "pr_id": pr_id,
                 "is_probation": is_probation,
             },
         )
@@ -226,13 +223,12 @@ class APIClient:
             "reason": reason,
         }
         if pr_id is not None:
-            data["pr_id"] = pr_id
-
-        return await self._request(
-            "POST",
-            "/spec/unclaim",
-            data=data,
-        )
+            return await self._request(
+                "POST",
+                f"/spec/unclaim/{pr_id}",
+                data=data,
+            )
+        return await self._request("POST", "/spec/unclaim", data=data)
 
 
     async def get_current_streamer_for_pr(self, pr_id: int) -> Optional[Dict]:
@@ -253,9 +249,7 @@ class APIClient:
         - streamers: list of {streamer_id, streamer_name, priority, main_free, probation_free}
         - can_spec_probation: bool
         """
-        result = await self._request(
-            "GET", "/spec/claimable", params={"user_id": user_id}
-        )
+        result = await self._request("GET", f"/spec/claimable/{user_id}")
         if result and "streamers" in result:
             return result
         return {"streamers": [], "can_spec_probation": False}
@@ -271,16 +265,11 @@ class APIClient:
         return await self._request("GET", f"/assistants/{user_id}")
 
     async def get_assistant_capabilities(self, user_id: int) -> Dict[str, bool]:
-        """Get assistant capabilities/permissions."""
+        """Get assistant permission map (dot-key RBAC)."""
         result = await self._request("GET", f"/assistants/{user_id}/capabilities")
         if result and isinstance(result, dict) and "detail" not in result:
-            return result
-        # Default capabilities if not found
-        return {
-            "can_spec_probation": False,
-            "can_manage_events": False,
-            "can_manage_streamers": False,
-        }
+            return {str(k): bool(v) for k, v in result.items()}
+        return {}
 
     async def get_assistant_stats(self, user_id: int) -> Optional[Dict]:
         """Get assistant stats (uses assistant details endpoint)."""
@@ -348,7 +337,6 @@ class APIClient:
         name: str,
         description: str,
         required_pr_count: int,
-        created_by: int,
         start_time: Optional[str] = None,
         pr_slots: Optional[int] = None,
         priority: int = 0,
@@ -360,7 +348,6 @@ class APIClient:
             "required_pr_count": required_pr_count,
             "pr_slots": pr_slots if pr_slots is not None else required_pr_count,
             "priority": priority,
-            "created_by": created_by,
         }
         if start_time:
             data["start_time"] = start_time
@@ -379,9 +366,7 @@ class APIClient:
 
     async def join_event(self, event_id: int, user_id: int) -> Optional[Dict]:
         """Join an event."""
-        return await self._request(
-            "POST", f"/events/{event_id}/join", data={"user_id": user_id}
-        )
+        return await self._request("POST", f"/events/{event_id}/join/{user_id}")
 
     async def start_event(self, event_id: int) -> Optional[Dict]:
         """Start an event and migrate its reserved participants to active sessions."""
@@ -389,9 +374,7 @@ class APIClient:
 
     async def leave_event(self, event_id: int, user_id: int) -> Optional[Dict]:
         """Leave an event."""
-        return await self._request(
-            "POST", f"/events/{event_id}/leave", data={"user_id": user_id}
-        )
+        return await self._request("POST", f"/events/{event_id}/leave/{user_id}")
 
     async def end_event(self, event_id: int) -> Optional[Dict]:
         """End an event."""

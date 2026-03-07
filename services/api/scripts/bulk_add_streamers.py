@@ -24,6 +24,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
 
+def _get_service_token() -> str:
+    """Extract a service token from Config.service_token_map."""
+    token_map = Config.service_token_map
+    # Prefer discord_service token; fall back to any available token
+    for name in ("discord_service", "twitch_service"):
+        if name in token_map:
+            return token_map[name]
+    if token_map:
+        return next(iter(token_map.values()))
+    raise RuntimeError(
+        "SERVICE_TOKENS is not configured. "
+        "Set SERVICE_TOKENS in the API .env file."
+    )
+
+
 class StreamerEntry(TypedDict):
     url: str
     priority: int
@@ -71,12 +86,18 @@ async def bulk_add(filepath: str) -> None:
     print(f"📂 Loaded {len(data)} entries from {filepath}")
 
     base_url = f"http://{Config.api_host}:{Config.api_port}"
+    token = _get_service_token()
     print(f"🔗 API URL: {base_url}")
+    print(f"🔑 Using service token: {token[:6]}...{token[-4:]}")
 
     success_count = 0
     fail_count = 0
 
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession(headers=headers) as session:
         for i, entry in enumerate(data, start=1):
             if "url" not in entry:
                 print(f"  ⚠️ [{i}] Skipping entry without 'url': {entry}")

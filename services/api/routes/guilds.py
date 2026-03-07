@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from services.broker import BrokerService
 
 from config import Config
+from dependencies import require_permission
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -48,6 +49,7 @@ def get_broker(request: Request):
 async def get_guild_all(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("guild.view")),
 ):
     """Get all guild settings (aggregated view)."""
     trace_id = get_trace_id(request)
@@ -77,6 +79,7 @@ async def get_guild_all(
 async def get_guild_settings(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("guild.settings.view")),
 ):
     """Get core wiring settings (channel/role/message IDs)."""
     trace_id = get_trace_id(request)
@@ -103,6 +106,7 @@ async def update_guild_settings(
     data: GuildSettingsUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("guild.settings.update")),
 ):
     """Update core wiring settings."""
     trace_id = get_trace_id(request)
@@ -110,7 +114,7 @@ async def update_guild_settings(
     await db.create_or_update_guild(
         notification_channel_id=data.notification_channel_id,
         monitoring_channel_id=data.monitoring_channel_id,
-        monitoring_message_ids=data.monitoring_message_ids,
+        monitoring_message_id=data.monitoring_message_id,
         monitoring_filter_gta=data.monitoring_filter_gta,
         pr_actions_channel_id=data.pr_actions_channel_id,
         control_panel_channel_id=data.control_panel_channel_id,
@@ -145,6 +149,7 @@ async def update_guild_settings(
 async def get_guild_templates(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("guild.templates.view")),
 ):
     """Get notification templates."""
     trace_id = get_trace_id(request)
@@ -199,6 +204,7 @@ async def update_guild_templates(
     data: GuildTemplatesUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("guild.templates.update")),
 ):
     """Update notification templates."""
     trace_id = get_trace_id(request)
@@ -262,6 +268,7 @@ async def get_template_by_type(
     request: Request,
     event_type: str,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("guild.templates.view")),
 ):
     """Get a specific notification template by event type."""
     trace_id = get_trace_id(request)
@@ -288,6 +295,7 @@ async def get_template_by_type(
 async def get_guild_rates(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("guild.rates.view")),
 ):
     """Get point rates per priority."""
     trace_id = get_trace_id(request)
@@ -314,6 +322,7 @@ async def update_guild_rates(
     data: GuildRatesUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("guild.rates.update")),
 ):
     """Update point rates per priority."""
     trace_id = get_trace_id(request)

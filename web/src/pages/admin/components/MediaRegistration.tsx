@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Radio, Check, AlertCircle, Users } from 'lucide-react';
 import { getApiErrorMessage } from '../../../types/api';
+import { apiFetch } from '../../../api/client';
 
 
 const MediaRegistration = () => {
@@ -30,13 +31,11 @@ const MediaRegistration = () => {
         setMessage(null);
 
         try {
-            const token = localStorage.getItem('access_token');
             const fullUrl = urlInput;
-            const response = await fetch('/api/streamers', {
+            const response = await apiFetch('/api/streamers', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify({
                     twitch_url: fullUrl,

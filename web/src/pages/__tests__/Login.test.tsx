@@ -39,7 +39,7 @@ describe('Login', () => {
                         nickname: 'Tester',
                         role: 'manager',
                         require_password_change: false,
-                        permissions: { can_register_users: true },
+                        permissions: { 'admin.users.create': true },
                     }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
                 )
@@ -60,7 +60,7 @@ describe('Login', () => {
         });
 
         expect(localStorage.getItem('access_token')).toBe('access-1');
-        expect(localStorage.getItem('refresh_token')).toBe('refresh-1');
+        expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toContain('tester');
     });
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 # Импортируем для аннотации типов в IDE
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 import disnake
 from config import Config
 from disnake.ext import commands
-from utils import UserAuthCache
+from utils import UserAuthCache, UserPermissionsCache
 
 
 class DiscordBot(commands.Bot):
@@ -37,11 +37,13 @@ class DiscordBot(commands.Bot):
         self.broker = broker_consumer
         self.logger = logger or Config.setup_logging("DiscordBot")
         self.auth_cache = UserAuthCache(ttl_seconds=300)
+        self.permissions_cache = UserPermissionsCache(ttl_seconds=120)
 
         intents = disnake.Intents.all()
 
         self.logger.debug("Initializing Discord bot")
-        super().__init__(command_prefix="!", intents=intents)
+        reload = Config.env == "development"
+        super().__init__(command_prefix="!", intents=intents, reload=reload)
 
         # Add global checks for single-server enforcement AND user authorization
         self.add_check(self._check_guild_text_command)
@@ -90,15 +92,82 @@ class DiscordBot(commands.Bot):
             assistant = await self.api_client.get_assistant(user_id)
             is_authorized = assistant is not None and "pr_id" in assistant
             self.auth_cache.set(user_id, is_authorized)
-            
+
             if not is_authorized:
                 self.logger.debug(f"Auth denied for user {user_id}: not in database")
-            
+
             return is_authorized
         except Exception as e:
             self.logger.error(f"Auth check failed for {user_id}: {e}")
             # On error, deny access (fail-safe)
             return False
+
+    async def get_user_permissions(
+        self,
+        user_id: int,
+        *,
+        refresh: bool = False,
+    ) -> dict[str, bool]:
+        """Fetch and cache user RBAC permissions."""
+        if not refresh:
+            cached = self.permissions_cache.get(user_id)
+            if cached is not None:
+                return cached
+
+        try:
+            permissions = await self.api_client.get_assistant_capabilities(user_id)
+        except Exception as e:
+            self.logger.error(f"Permission lookup failed for {user_id}: {e}")
+            permissions = {}
+
+        normalized = {str(k): bool(v) for k, v in (permissions or {}).items()}
+        self.permissions_cache.set(user_id, normalized)
+        return normalized
+
+    async def has_permission(self, user_id: int, permission: str) -> bool:
+        permissions = await self.get_user_permissions(user_id)
+        return bool(permissions.get(permission, False))
+
+    async def has_any_permission(
+        self,
+        user_id: int,
+        permissions: Iterable[str],
+    ) -> bool:
+        perms = await self.get_user_permissions(user_id)
+        return any(bool(perms.get(key, False)) for key in permissions)
+
+    async def ensure_user_permissions(
+        self,
+        interaction: disnake.Interaction,
+        *,
+        require_any: Iterable[str] | None = None,
+        require_all: Iterable[str] | None = None,
+        error_message: str = "❌ Недостаточно прав для этого действия.",
+    ) -> bool:
+        """Check acting user permissions and send denial message if needed."""
+        user_id = int(interaction.user.id)
+        perms = await self.get_user_permissions(user_id)
+
+        any_list = list(require_any or [])
+        all_list = list(require_all or [])
+
+        allowed_any = (
+            True if not any_list else any(bool(perms.get(k, False)) for k in any_list)
+        )
+        allowed_all = (
+            True if not all_list else all(bool(perms.get(k, False)) for k in all_list)
+        )
+        if allowed_any and allowed_all:
+            return True
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(error_message, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_message, ephemeral=True)
+        except Exception:
+            pass
+        return False
 
     @property
     def api(self):

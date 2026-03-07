@@ -1,6 +1,6 @@
 import React from 'react';
-import { useOutletContext } from 'react-router-dom';
-import { FileText, Search, Filter, Eye, ChevronLeft, ChevronRight, LogIn, LogOut, Clock, User } from 'lucide-react';
+import { useOutletContext, useNavigate } from 'react-router-dom';
+import { FileText, Search, Filter, Eye, ChevronLeft, ChevronRight, Clock, User } from 'lucide-react';
 import { CustomSelect, CustomDatePicker } from '../../components/CustomInputs';
 import DetailsModal from './components/DetailsModal';
 import NotificationToast from './components/NotificationToast';
@@ -8,8 +8,29 @@ import type { OutletUserContext } from '../../types/auth';
 import type { AdminLogRecord } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
 import { formatMskToLocal } from '../../utils/datetime';
+import { apiFetch } from '../../api/client';
 
 export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
+
+export const ACTION_TRANSLATIONS: Record<string, string> = {
+    'user.create': 'Создан пользователь',
+    'user.update': 'Обновлен пользователь',
+    'streamer.add': 'Добавлен стример',
+    'streamer.update': 'Обновлен стример',
+    'streamer.remove': 'Удален стример',
+    'event.create': 'Создано событие',
+    'event.update': 'Обновлено событие',
+    'assistant.spec_points.adjust.permanent': 'Изменение баллов (Perm)',
+    'assistant.spec_time.add': 'Добавление времени',
+    'assistant.spec_time.subtract': 'Списание времени',
+    'assistant.sanctions.update': 'Обновление санкций',
+    'assistant.warnings.update': 'Обновление предупреждений',
+    'assistant.create': 'Создан ассистент',
+    'assistant.update': 'Обновлен ассистент',
+    'system.maintenance.enable': 'Включение тех. работ',
+    'system.maintenance.disable': 'Выключение тех. работ',
+    'rbac.matrix.update': 'Обновление прав',
+};
 
 interface PRActionLogItem {
     session_id: number;
@@ -71,6 +92,15 @@ function roleBadge(role: string | null): { label: string; color: string } {
     }
 }
 
+function adminRoleBadgeClass(role: string | null | undefined): string {
+    const r = (role || '').toLowerCase();
+    if (r.includes('developer')) return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30';
+    if (r.includes('service')) return 'bg-violet-500/20 text-violet-300 border border-violet-400/30';
+    if (r.includes('manager')) return 'bg-red-500/20 text-red-300 border border-red-400/30';
+    if (r.includes('senior')) return 'bg-blue-500/20 text-blue-300 border border-blue-400/30';
+    return 'bg-white/10 text-white/40 border border-white/10';
+}
+
 function endReasonLabel(reason: string | null): string {
     switch (reason) {
         case 'stream_end': return 'Стрим завершен';
@@ -86,6 +116,7 @@ function endReasonLabel(reason: string | null): string {
 
 export function SpectateLogs() {
     const { user } = useOutletContext<OutletUserContext>();
+    const navigate = useNavigate();
     const [activeTab, setActiveTab] = React.useState<'assistants' | 'admins'>('assistants');
 
     // ===== PR Action Logs State =====
@@ -136,9 +167,7 @@ export function SpectateLogs() {
     const [notification, setNotification] = React.useState<string | null>(null);
 
     // Initial check
-    const canViewAdminLogs = user?.permissions?.can_view_admin_logs === true ||
-        user?.role === 'manager' ||
-        user?.role === 'developer';
+    const canViewAdminLogs = user?.permissions?.['logs.admin.view'] === true;
 
     // ==================== PR Action Logs Logic ====================
 
@@ -146,10 +175,7 @@ export function SpectateLogs() {
     React.useEffect(() => {
         const loadAssistants = async () => {
             try {
-                const token = localStorage.getItem('access_token');
-                const res = await fetch('/api/assistants', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
+                const res = await apiFetch('/api/assistants');
                 if (res.ok) {
                     const json = await res.json() as unknown;
                     const data = unwrapApiData<AssistantOption[]>(json);
@@ -170,7 +196,6 @@ export function SpectateLogs() {
     const fetchPrLogs = React.useCallback(async (page: number) => {
         setPrLogsLoading(true);
         try {
-            const token = localStorage.getItem('access_token');
             const params = new URLSearchParams();
             params.append('page', page.toString());
             params.append('limit', '20');
@@ -181,9 +206,7 @@ export function SpectateLogs() {
             if (prFilters.date_from) params.append('date_from', prFilters.date_from);
             if (prFilters.date_to) params.append('date_to', prFilters.date_to);
 
-            const res = await fetch(`/api/logs/pr-actions?${params.toString()}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
+            const res = await apiFetch(`/api/logs/pr-actions?${params.toString()}`);
 
             if (res.ok) {
                 const json = await res.json() as unknown;
@@ -304,7 +327,6 @@ export function SpectateLogs() {
     const fetchAdminLogs = React.useCallback(async (page: number) => {
         setAdminLoading(true);
         try {
-            const token = localStorage.getItem('access_token');
             const params = new URLSearchParams();
             params.append('page', page.toString());
             params.append('limit', '20');
@@ -320,9 +342,7 @@ export function SpectateLogs() {
             if (filters.startDate) params.append('start_date', filters.startDate);
             if (filters.endDate) params.append('end_date', filters.endDate);
 
-            const response = await fetch(`/api/logs/admin?${params.toString()}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
+            const response = await apiFetch(`/api/logs/admin?${params.toString()}`);
 
             if (response.ok) {
                 const json = await response.json() as unknown;
@@ -536,10 +556,10 @@ export function SpectateLogs() {
                         <span>Страница {prLogsPage} из {prLogsTotalPages}</span>
                     </div>
 
-                    {/* PR Action Logs Timeline */}
-                    <div className="space-y-3">
+                    {/* PR Action Logs Table */}
+                    <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden">
                         {prLogsLoading ? (
-                            <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-12 text-center">
+                            <div className="p-12 text-center">
                                 <div className="animate-pulse flex flex-col items-center gap-3">
                                     <div className="w-12 h-12 rounded-full bg-white/5" />
                                     <div className="h-4 w-32 bg-white/5 rounded" />
@@ -547,128 +567,131 @@ export function SpectateLogs() {
                                 </div>
                             </div>
                         ) : prLogs.length > 0 ? (
-                            prLogs.map((log, index) => {
-                                const isJoin = log.action_type === 'join';
-                                const isEvent = log.target_type === 'event';
-                                const role = roleBadge(log.pr_role);
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-left border-collapse">
+                                    <thead className="bg-[#1a1a1a]/80 border-b border-white/5 text-xs text-white/40 font-bold uppercase tracking-wider">
+                                        <tr>
+                                            <th className="px-6 py-4 font-semibold w-[25%]">ЦЕЛЬ</th>
+                                            <th className="px-6 py-4 font-semibold w-[20%]">АССИСТЕНТ</th>
+                                            <th className="px-6 py-4 font-semibold w-[20%]">ДЕЙСТВИЕ</th>
+                                            <th className="px-6 py-4 font-semibold w-[15%]">ДЛИТЕЛЬНОСТЬ</th>
+                                            <th className="px-6 py-4 font-semibold w-[20%] text-right">ДАТА</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-white/5">
+                                        {prLogs.map((log, index) => {
+                                            const isJoin = log.action_type === 'join';
+                                            const isEvent = log.target_type === 'event';
+                                            const role = roleBadge(log.pr_role);
+                                            const actionColor = isJoin
+                                                ? (isEvent ? 'text-purple-400' : 'text-emerald-400')
+                                                : 'text-red-400';
 
-                                // Border color based on action
-                                const borderColor = isJoin
-                                    ? (isEvent ? 'border-l-purple-500' : 'border-l-emerald-500')
-                                    : (log.end_reason === 'stream_end' ? 'border-l-slate-500'
-                                        : log.end_reason === 'category_change' ? 'border-l-orange-500'
-                                            : 'border-l-red-500');
+                                            return (
+                                                <tr
+                                                    key={`${log.session_id}-${log.action_type}-${index}`}
+                                                    className="hover:bg-white/5 transition-colors group"
+                                                >
+                                                    {/* ЦЕЛЬ */}
+                                                    <td className="px-6 py-4">
+                                                        <div className="flex items-center gap-3">
+                                                            {/* Avatar */}
+                                                            <div className="relative flex-shrink-0">
+                                                                {log.target_avatar ? (
+                                                                    <img
+                                                                        src={log.target_avatar}
+                                                                        alt={log.target_name || ''}
+                                                                        className="w-9 h-9 rounded-full object-cover ring-1 ring-white/10 group-hover:ring-white/20 transition-all"
+                                                                    />
+                                                                ) : (
+                                                                    <div className="w-9 h-9 rounded-full bg-white/8 flex items-center justify-center ring-1 ring-white/10">
+                                                                        <span className="text-sm font-bold text-white/30">
+                                                                            {isEvent ? '🎉' : (log.target_name?.[0]?.toUpperCase() || '?')}
+                                                                        </span>
+                                                                    </div>
+                                                                )}
+                                                                {!!log.target_is_online && !isEvent && (
+                                                                    <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-500 border border-[#242424]" />
+                                                                )}
+                                                            </div>
+                                                            <div className="flex flex-col gap-0.5 min-w-0">
+                                                                <span className="font-bold text-white/90 text-sm truncate">
+                                                                    {log.target_name || `${log.target_type} #${log.target_id}`}
+                                                                </span>
+                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${priorityColor(log.priority)}`}>
+                                                                        {priorityLabel(log.priority)}
+                                                                    </span>
+                                                                    {isEvent && (
+                                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-400/30">
+                                                                            Событие
+                                                                        </span>
+                                                                    )}
+                                                                    {!!log.target_is_online && !isEvent && (
+                                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-400/30 flex items-center gap-1">
+                                                                            <span className="w-1 h-1 rounded-full bg-red-400 animate-pulse" />
+                                                                            LIVE
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </td>
 
-                                // Icon bg color
-                                const iconBg = isJoin
-                                    ? (isEvent ? 'bg-purple-500' : 'bg-emerald-500')
-                                    : 'bg-red-500/80';
-
-                                return (
-                                    <div
-                                        key={`${log.session_id}-${log.action_type}-${index}`}
-                                        className={`group bg-[#242424]/60 backdrop-blur-sm border border-white/5 rounded-xl border-l-4 ${borderColor} overflow-hidden transition-all hover:bg-[#2a2a2a]/80 hover:border-white/10 hover:shadow-lg hover:shadow-black/20`}
-                                    >
-                                        <div className="flex items-stretch">
-                                            {/* Left: Avatar section */}
-                                            <div className="flex items-center px-4 py-4">
-                                                <div className="relative flex-shrink-0">
-                                                    {log.target_avatar ? (
-                                                        <img
-                                                            src={log.target_avatar}
-                                                            alt={log.target_name || ''}
-                                                            className="w-12 h-12 rounded-full object-cover ring-2 ring-white/10 group-hover:ring-white/20 transition-all"
-                                                        />
-                                                    ) : (
-                                                        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-white/10 to-white/5 flex items-center justify-center ring-2 ring-white/10">
-                                                            <span className="text-lg font-bold text-white/30">
-                                                                {isEvent ? '🎉' : (log.target_name?.[0]?.toUpperCase() || '?')}
+                                                    {/* АССИСТЕНТ */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() => navigate(`/assistants/${log.pr_id}`)}
+                                                                className="font-bold text-white/90 hover:text-blue-400 hover:underline transition-colors cursor-pointer text-sm"
+                                                            >
+                                                                {log.pr_nickname || `PR #${log.pr_id}`}
+                                                            </button>
+                                                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${role.color}`}>
+                                                                {role.label}
                                                             </span>
+                                                            {!!log.is_probation && (
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-400/20">
+                                                                    Проб.
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                    )}
-                                                    {/* Online indicator */}
-                                                    {!!log.target_is_online && (
-                                                        <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-red-500 border-2 border-[#242424] flex items-center justify-center">
-                                                            <div className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                                                    </td>
+
+                                                    {/* ДЕЙСТВИЕ */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <span className={`text-sm font-semibold ${actionColor}`}>
+                                                            {isJoin ? '↓ Закреплен' : `↑ ${endReasonLabel(log.end_reason)}`}
+                                                        </span>
+                                                    </td>
+
+                                                    {/* ДЛИТЕЛЬНОСТЬ */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        {!isJoin && log.duration_seconds != null ? (
+                                                            <span className="flex items-center gap-1 text-sm text-white/50">
+                                                                <Clock className="w-3.5 h-3.5" />
+                                                                {formatDuration(log.duration_seconds)}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-white/20 text-sm">—</span>
+                                                        )}
+                                                    </td>
+
+                                                    {/* ДАТА */}
+                                                    <td className="px-6 py-4 whitespace-nowrap text-right">
+                                                        <div className="text-sm font-medium text-white/60 group-hover:text-white/80 transition-colors">
+                                                            {formatMskToLocal(log.action_time, { day: '2-digit', month: '2-digit', year: 'numeric' })},&nbsp;
+                                                            {formatMskToLocal(log.action_time, { hour: '2-digit', minute: '2-digit' })}
                                                         </div>
-                                                    )}
-                                                    {/* Action icon overlay */}
-                                                    <div className={`absolute -top-1 -left-1 w-5 h-5 rounded-full ${iconBg} flex items-center justify-center shadow-md`}>
-                                                        {isJoin
-                                                            ? <LogIn className="w-2.5 h-2.5 text-white" />
-                                                            : <LogOut className="w-2.5 h-2.5 text-white" />
-                                                        }
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* Center: Info */}
-                                            <div className="flex-1 py-3 pr-4 min-w-0">
-                                                {/* Row 1: Target name + badges */}
-                                                <div className="flex items-center gap-2 flex-wrap mb-1">
-                                                    <span className="font-bold text-white text-sm truncate">
-                                                        {log.target_name || `${log.target_type} #${log.target_id}`}
-                                                    </span>
-                                                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${priorityColor(log.priority)}`}>
-                                                        {priorityLabel(log.priority)}
-                                                    </span>
-                                                    {isEvent && (
-                                                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-400/30">
-                                                            Событие
-                                                        </span>
-                                                    )}
-                                                    {!!log.target_is_online && !isEvent && (
-                                                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-400/30 flex items-center gap-1">
-                                                            <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                                                            LIVE
-                                                        </span>
-                                                    )}
-                                                </div>
-
-                                                {/* Row 2: Action description */}
-                                                <div className="flex items-center gap-1.5 text-sm text-white/60 mb-1.5">
-                                                    <span className={isJoin ? 'text-emerald-400' : 'text-red-400'}>
-                                                        {isJoin ? '📥' : '📤'}
-                                                    </span>
-                                                    <span>
-                                                        {isJoin ? 'Закреплен' : endReasonLabel(log.end_reason)}
-                                                    </span>
-                                                    <span className="text-white/20">•</span>
-                                                    <span className="font-medium text-white/80">{log.pr_nickname || `PR #${log.pr_id}`}</span>
-                                                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${role.color}`}>{role.label}</span>
-                                                </div>
-
-                                                {/* Row 3: Meta chips */}
-                                                <div className="flex items-center gap-2 flex-wrap">
-                                                    {!!log.is_probation && (
-                                                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-400/20">
-                                                            Испытательный
-                                                        </span>
-                                                    )}
-                                                    {!isJoin && log.duration_seconds != null && (
-                                                        <span className="flex items-center gap-1 text-[11px] text-white/50">
-                                                            <Clock className="w-3 h-3" />
-                                                            {formatDuration(log.duration_seconds)}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            {/* Right: Timestamp */}
-                                            <div className="flex flex-col items-end justify-center pr-4 py-3 flex-shrink-0">
-                                                <span className="text-xs text-white/35 tabular-nums">
-                                                    {formatMskToLocal(log.action_time, { day: '2-digit', month: 'short' })}
-                                                </span>
-                                                <span className="text-[11px] text-white/25 tabular-nums">
-                                                    {formatMskToLocal(log.action_time, { hour: '2-digit', minute: '2-digit' })}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                );
-                            })
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
                         ) : (
-                            <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-12 text-center">
+                            <div className="p-12 text-center">
                                 <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4">
                                     <FileText className="w-8 h-8 text-white/15" />
                                 </div>
@@ -732,6 +755,21 @@ export function SpectateLogs() {
                                 </div>
                             </div>
 
+                            <div className="flex-1 min-w-[180px]">
+                                <label className="text-xs font-medium text-white/40 mb-1 block">Категория</label>
+                                <CustomSelect
+                                    value={filters.kind}
+                                    onChange={(val) => {
+                                        if (typeof val === 'string') {
+                                            setFilters(prev => ({ ...prev, kind: val }));
+                                        }
+                                    }}
+                                    options={kindOptions}
+                                    icon={<Filter className="w-4 h-4" />}
+                                    placeholder="Все категории"
+                                />
+                            </div>
+
                             <div className="flex-1 min-w-[200px]">
                                 <label className="text-xs font-medium text-white/40 mb-1 block">Действие</label>
                                 <CustomSelect
@@ -748,20 +786,7 @@ export function SpectateLogs() {
                                 />
                             </div>
 
-                            <div className="flex-1 min-w-[180px]">
-                                <label className="text-xs font-medium text-white/40 mb-1 block">Категория</label>
-                                <CustomSelect
-                                    value={filters.kind}
-                                    onChange={(val) => {
-                                        if (typeof val === 'string') {
-                                            setFilters(prev => ({ ...prev, kind: val }));
-                                        }
-                                    }}
-                                    options={kindOptions}
-                                    icon={<Filter className="w-4 h-4" />}
-                                    placeholder="Все категории"
-                                />
-                            </div>
+
 
                             <div className="flex gap-2">
                                 <div>
@@ -804,10 +829,10 @@ export function SpectateLogs() {
                             <span className="text-xs text-white/40">Страница <span className="text-white/70 font-medium">{adminPage}</span> из <span className="text-white/70 font-medium">{adminTotalPages}</span></span>
                         </div>
 
-                        {/* Admin Log Cards */}
-                        <div className="space-y-2">
+                        {/* Admin Logs Table */}
+                        <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden">
                             {adminLoading ? (
-                                <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-12 text-center">
+                                <div className="p-12 text-center">
                                     <div className="animate-pulse flex flex-col items-center gap-3">
                                         <div className="w-12 h-12 rounded-full bg-white/5" />
                                         <div className="h-4 w-32 bg-white/5 rounded" />
@@ -815,79 +840,113 @@ export function SpectateLogs() {
                                     </div>
                                 </div>
                             ) : adminLogs.length > 0 ? (
-                                adminLogs.map((log) => {
-                                    const kind = log.kind || resolveKind(log.action);
-                                    return (
-                                        <div
-                                            key={log.id}
-                                            className="group bg-[#242424]/60 backdrop-blur-sm border border-white/5 rounded-xl overflow-hidden transition-all hover:bg-[#2a2a2a]/80 hover:border-white/10 hover:shadow-lg hover:shadow-black/20 cursor-pointer"
-                                            onDoubleClick={() => handleCopyLog(log)}
-                                        >
-                                            <div className="flex items-stretch">
-                                                {/* Left: Kind indicator */}
-                                                <div className="flex items-center px-4 py-3">
-                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded ${kindBadgeClass(kind)} uppercase tracking-wide`}>
-                                                        {kind}
-                                                    </span>
-                                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left border-collapse">
+                                        <thead className="bg-[#1a1a1a]/80 border-b border-white/5 text-xs text-white/40 font-bold uppercase tracking-wider">
+                                            <tr>
+                                                <th
+                                                    className="px-6 py-4 font-semibold w-[20%] cursor-pointer hover:text-white/70 transition-colors"
+                                                    onClick={() => {
+                                                        setSortConfig(prev => ({
+                                                            key: 'created_at',
+                                                            direction: prev.direction === 'desc' ? 'asc' : 'desc'
+                                                        }));
+                                                    }}
+                                                >
+                                                    ДАТА {sortConfig.key === 'created_at' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
+                                                </th>
+                                                <th className="px-6 py-4 font-semibold w-[20%]">АДМИН</th>
+                                                <th className="px-6 py-4 font-semibold w-[25%]">ДЕЙСТВИЕ</th>
+                                                <th className="px-6 py-4 font-semibold w-[25%]">ЦЕЛЬ</th>
+                                                <th className="px-6 py-4 font-semibold w-[10%] text-right">ДЕТАЛИ</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5">
+                                            {adminLogs.map((log) => (
+                                                <tr
+                                                    key={log.id}
+                                                    className="hover:bg-white/5 transition-colors cursor-pointer group"
+                                                    onDoubleClick={() => handleCopyLog(log)}
+                                                >
+                                                    {/* ДАТА */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="text-sm font-medium text-white/60 group-hover:text-white/80 transition-colors">
+                                                            {formatMskToLocal(log.created_at, { day: '2-digit', month: '2-digit', year: 'numeric' })}, {formatMskToLocal(log.created_at, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                                        </div>
+                                                    </td>
 
-                                                {/* Center: Info */}
-                                                <div className="flex-1 py-3 pr-4 min-w-0">
-                                                    {/* Row 1: Action */}
-                                                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                                                        <span className="font-mono text-xs text-white/80 font-medium">{log.action}</span>
-                                                    </div>
+                                                    {/* АДМИН */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="flex items-center gap-2">
+                                                            {log.actor_id ? (
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); navigate(`/assistants/${log.actor_id}`); }}
+                                                                    className="font-bold text-white/90 hover:text-blue-400 hover:underline transition-colors cursor-pointer"
+                                                                >
+                                                                    {log.actor_name || log.admin_name || 'unknown'}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="font-bold text-white/90">{log.actor_name || log.admin_name || 'unknown'}</span>
+                                                            )}
+                                                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${adminRoleBadgeClass(log.actor_role || log.admin_role)}`}>
+                                                                {log.actor_role || log.admin_role || 'unknown'}
+                                                            </span>
+                                                        </div>
+                                                    </td>
 
-                                                    {/* Row 2: Actor + Target */}
-                                                    <div className="flex items-center gap-1.5 text-sm text-white/60 mb-1">
-                                                        <span className="font-medium text-white/80">{log.actor_name || log.admin_name || 'unknown'}</span>
-                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/40">
-                                                            {log.actor_role || log.admin_role || 'unknown'}
+                                                    {/* ДЕЙСТВИЕ */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <span className="text-sm font-bold text-white/80">
+                                                            {ACTION_TRANSLATIONS[log.action] || log.action}
                                                         </span>
-                                                        {(log.target_name || log.target_id) && (
-                                                            <>
-                                                                <span className="text-white/20">→</span>
-                                                                <span className="text-white/70">{log.target_name || log.target_id}</span>
-                                                                {log.target_type && (
-                                                                    <span className="text-[10px] px-1 py-0.5 rounded bg-white/5 text-white/30 font-mono">
-                                                                        {log.target_type}
+                                                    </td>
+
+                                                    {/* ЦЕЛЬ */}
+                                                    <td className="px-6 py-4">
+                                                        {(log.target_name || log.target_id) ? (
+                                                            <div className="flex flex-col gap-1 items-start">
+                                                                {log.target_type === 'assistant' && log.target_id ? (
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); navigate(`/assistants/${log.target_id}`); }}
+                                                                        className="font-bold text-white/90 hover:text-blue-400 hover:underline transition-colors cursor-pointer text-left"
+                                                                    >
+                                                                        {assistantsList.find(a => a.pr_id === log.target_id)?.nickname || log.target_name || log.target_id}
+                                                                    </button>
+                                                                ) : (
+                                                                    <span className="font-bold text-white/90">
+                                                                        {log.target_name || log.target_id}
                                                                     </span>
                                                                 )}
-                                                            </>
+                                                                {log.target_type && (
+                                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-white/40 font-medium">
+                                                                        {log.target_type}{log.target_id ? ` #${log.target_id}` : ''}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <span className="text-white/20">—</span>
                                                         )}
-                                                    </div>
+                                                    </td>
 
-                                                    {/* Row 3: Summary */}
-                                                    {log.details?.summary && (
-                                                        <p className="text-xs text-white/50 truncate">{log.details.summary}</p>
-                                                    )}
-                                                </div>
-
-                                                {/* Right: Timestamp + Details */}
-                                                <div className="flex items-center gap-3 pr-4 py-3 flex-shrink-0">
-                                                    <div className="flex flex-col items-end">
-                                                        <span className="text-xs text-white/35 tabular-nums">
-                                                            {formatMskToLocal(log.created_at, { day: '2-digit', month: 'short' })}
-                                                        </span>
-                                                        <span className="text-[11px] text-white/25 tabular-nums">
-                                                            {formatMskToLocal(log.created_at, { hour: '2-digit', minute: '2-digit' })}
-                                                        </span>
-                                                    </div>
-                                                    {log.details && (
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); setSelectedLog(log); }}
-                                                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 transition-all"
-                                                        >
-                                                            <Eye className="w-3.5 h-3.5 text-white/40 hover:text-white" />
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })
+                                                    {/* ДЕТАЛИ */}
+                                                    <td className="px-6 py-4 whitespace-nowrap text-right">
+                                                        {log.details && (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setSelectedLog(log); }}
+                                                                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-xs font-semibold text-white/60 hover:text-white transition-all"
+                                                            >
+                                                                Подробнее
+                                                                <Eye className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             ) : (
-                                <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-12 text-center">
+                                <div className="p-12 text-center">
                                     <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4">
                                         <FileText className="w-8 h-8 text-white/15" />
                                     </div>

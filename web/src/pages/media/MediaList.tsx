@@ -6,6 +6,7 @@ import StreamerSettingsModal from './components/StreamerSettingsModal';
 import type { OutletUserContext } from '../../types/auth';
 import type { Streamer } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
+import { apiFetch } from '../../api/client';
 
 export function MediaList() {
     useOutletContext<OutletUserContext>();
@@ -16,7 +17,7 @@ export function MediaList() {
 
     const fetchAllStreamers = React.useCallback(async () => {
         try {
-            const response = await fetch('/api/streamers');
+            const response = await apiFetch('/api/streamers');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
@@ -50,12 +51,10 @@ export function MediaList() {
     }) => {
         if (!selectedStreamer) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
+            const response = await apiFetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify(updates)
             });
@@ -69,10 +68,8 @@ export function MediaList() {
 
     const handleDeleteStreamer = async (streamer: Streamer) => {
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/streamers/${streamer.streamer_id}`, {
+            const response = await apiFetch(`/api/streamers/${streamer.streamer_id}`, {
                 method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${token}` }
             });
             if (response.ok) {
                 await fetchAllStreamers();

@@ -10,8 +10,16 @@ MSK = timezone(timedelta(hours=3))
 pytestmark = pytest.mark.anyio
 
 
-async def _client(build_api_app):
-    app = build_api_app(events_router)
+def _service_principal_create_events() -> dict:
+    return {
+        "principal_type": "service",
+        "service_name": "discord_service",
+        "permissions": {"events.create": True},
+    }
+
+
+async def _client(build_api_app, current_user: dict | None = None):
+    app = build_api_app(events_router, current_user=current_user)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -27,8 +35,6 @@ async def _create_sample_event(build_api_app, name: str = "Raid Night") -> dict:
                 "pr_slots": 2,
                 "is_pinned": False,
                 "start_time": None,
-                "channel_id": 123456,
-                "created_by": 999,
             },
         )
     return response.json()
@@ -40,6 +46,44 @@ async def test_create_event_success(build_api_app, fake_db) -> None:
     assert result["status"] == "success"
     assert str(result["data"]["id"]) == "1"
     assert fake_db.events_by_id[1]["name"] == "Raid Night"
+    assert fake_db.events_by_id[1]["created_by"] == 1001
+
+
+async def test_create_event_rejects_created_by_spoof(build_api_app) -> None:
+    async with await _client(build_api_app) as client:
+        response = await client.post(
+            "/api/events",
+            json={
+                "name": "Spoof Attempt",
+                "description": "Should fail",
+                "required_pr_count": 1,
+                "priority": 0,
+                "pr_slots": 1,
+                "created_by": 999999,
+            },
+        )
+
+    assert response.status_code == 422
+
+
+async def test_create_event_service_actor_uses_system_id(build_api_app, fake_db) -> None:
+    async with await _client(
+        build_api_app,
+        current_user=_service_principal_create_events(),
+    ) as client:
+        response = await client.post(
+            "/api/events",
+            json={
+                "name": "Service Event",
+                "description": "Created by service principal",
+                "required_pr_count": 1,
+                "priority": 0,
+                "pr_slots": 1,
+            },
+        )
+
+    assert response.status_code == 201
+    assert fake_db.events_by_id[1]["created_by"] == 0
 
 
 async def test_create_event_failure_returns_500(build_api_app, fake_db) -> None:
@@ -56,8 +100,6 @@ async def test_create_event_failure_returns_500(build_api_app, fake_db) -> None:
                 "pr_slots": 1,
                 "is_pinned": False,
                 "start_time": None,
-                "channel_id": 123,
-                "created_by": 1,
             },
         )
 
@@ -184,13 +226,13 @@ async def test_join_leave_and_end_event(build_api_app, fake_db) -> None:
     await _create_sample_event(build_api_app, name="Joinable")
 
     async with await _client(build_api_app) as client:
-        join_ok = await client.post("/api/events/1/join", json={"user_id": 500})
-        join_dupe = await client.post("/api/events/1/join", json={"user_id": 500})
-        leave = await client.post("/api/events/1/leave", json={"user_id": 500})
+        join_ok = await client.post("/api/events/1/join")
+        join_dupe = await client.post("/api/events/1/join")
+        leave = await client.post("/api/events/1/leave")
 
         # Rejoin two users then end
-        await client.post("/api/events/1/join", json={"user_id": 501})
-        await client.post("/api/events/1/join", json={"user_id": 502})
+        await client.post("/api/events/1/join/501")
+        await client.post("/api/events/1/join/502")
         ended = await client.post("/api/events/1/end")
 
     assert join_ok.status_code == 200

@@ -7,7 +7,7 @@ import secrets
 import string
 from typing import TYPE_CHECKING
 
-from dependencies import get_current_user
+from dependencies import require_permission
 
 if TYPE_CHECKING:
     from database import Database
@@ -21,8 +21,6 @@ from schemas.envelope import success_envelope
 from services.rbac import (
     ROLE_RANK,
     can_create_role,
-    can_register_users,
-    is_admin_role,
     is_valid_role,
 )
 
@@ -52,22 +50,10 @@ async def create_user(
     user_data: UserCreate,
     db: "Database" = Depends(get_db),
     auth: "AuthService" = Depends(get_auth),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("admin.users.create")),
 ):
     trace_id = get_trace_id(request)
     creator_role = current_user.get("role", "")
-
-    if not is_admin_role(creator_role):
-        raise HTTPException(
-            status_code=403,
-            detail="Недостаточно прав для доступа к админ-панели",
-        )
-
-    if not can_register_users(current_user):
-        raise HTTPException(
-            status_code=403,
-            detail="Недостаточно прав для регистрации пользователей",
-        )
 
     if not is_valid_role(creator_role):
         raise HTTPException(

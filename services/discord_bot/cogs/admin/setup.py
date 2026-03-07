@@ -14,9 +14,9 @@ if TYPE_CHECKING:
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
-from utils import create_monitoring_select, create_streamers_component
+from utils import create_streamers_component
 
-from .core import AdminMainView, get_main_embed
+from .core import AdminControlPanelView, get_main_embed
 
 # =============================================================================
 # Setup Embed
@@ -317,7 +317,7 @@ class AdminSetup(commands.Cog):
                 if channel:
                     try:
                         msg = await channel.send(
-                            embed=get_main_embed(), view=AdminMainView(self.bot)
+                            embed=get_main_embed(), view=AdminControlPanelView(self.bot)
                         )
                         await self.api.update_guild_settings(
                             control_panel_channel_id=channel_id,
@@ -340,38 +340,22 @@ class AdminSetup(commands.Cog):
                 channel_id = int(val)
                 channel = self.bot.get_channel(channel_id)
                 if channel:
-                    # Get monitoring status from API (includes available_for_claim)
-                    status = await self.api.get_monitoring_status()
-                    if not status:
-                        await interaction.followup.send(
-                            "❌ Не удалось получить данные.", ephemeral=True
-                        )
-                        return
+                    from cogs.spec.manager import MonitoringLauncherView
 
-                    online = status.get("online_streamers", [])
-                    total_count = status.get("total_streamers", 0)
-                    gta_count = status.get("gta_count", 0)
-                    online_count = status.get("online_count", len(online))
-                    available = status.get("available_for_claim", [])
-
-                    pages = create_streamers_component(
-                        online, total_count, gta_count, online_count=online_count
+                    embed = disnake.Embed(
+                        title="📊 Мониторинг стримеров",
+                        description=(
+                            "Нажмите кнопку ниже, чтобы открыть мониторинг.\n\n"
+                            "Мониторинг показывает текущий статус всех стримеров, "
+                            "а также позволяет закрепиться или открепиться."
+                        ),
+                        color=0x2B2D31,
                     )
-                    select_row = create_monitoring_select(available, [])
-
-                    # Send all pages and collect message IDs
-                    message_ids = []
-                    for i, page in enumerate(pages):
-                        if i == len(pages) - 1:
-                            # Last page: include select row
-                            msg = await channel.send(components=[page, select_row])
-                        else:
-                            msg = await channel.send(components=[page])
-                        message_ids.append(msg.id)
+                    msg = await channel.send(embed=embed, view=MonitoringLauncherView())
 
                     await self.api.update_guild_settings(
                         monitoring_channel_id=channel_id,
-                        monitoring_message_ids=message_ids,
+                        monitoring_message_id=msg.id,
                     )
                     await back_to_main()
                     await interaction.followup.send(

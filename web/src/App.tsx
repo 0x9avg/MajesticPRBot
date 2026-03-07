@@ -3,6 +3,7 @@ import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import MainLayout from './components/MainLayout'
 import ProtectedRoute from './components/ProtectedRoute'
+import PermissionRoute from './components/rbac/PermissionRoute'
 import MainHub from './pages/hub/MainHub'
 import MediaList from './pages/media/MediaList'
 import PRStats from './pages/stats/PRStats'
@@ -13,6 +14,7 @@ import BotDashboard from './pages/dashboard/BotDashboard'
 
 import UserProfile from './pages/UserProfile'
 import MediaProfile from './pages/MediaProfile'
+import { ADMIN_SECTION_PERMISSIONS } from './rbac/catalog'
 
 function App() {
     return (
@@ -28,13 +30,32 @@ function App() {
                         <Route path="/media/:id" element={<MediaProfile />} />
                         <Route path="/assistants" element={<PRStats />} />
                         <Route path="/logs" element={<SpectateLogs />} />
-                        <Route path="/events/new" element={<CreateEvent />} />
+                        <Route
+                            path="/events/new"
+                            element={
+                                <PermissionRoute requireAny={['events.create']}>
+                                    <CreateEvent />
+                                </PermissionRoute>
+                            }
+                        />
 
-                        <Route element={<ProtectedRoute allowedRoles={['manager', 'developer']} />}>
-                            <Route path="/admin" element={<AdminPanel />} />
-                        </Route>
+                        <Route
+                            path="/admin"
+                            element={
+                                <PermissionRoute requireAny={ADMIN_SECTION_PERMISSIONS}>
+                                    <AdminPanel />
+                                </PermissionRoute>
+                            }
+                        />
 
-                        <Route path="/bot" element={<BotDashboard />} />
+                        <Route
+                            path="/bot"
+                            element={
+                                <PermissionRoute requireAny={['monitoring.view', 'monitoring.refresh']}>
+                                    <BotDashboard />
+                                </PermissionRoute>
+                            }
+                        />
                     </Route>
                 </Route>
 

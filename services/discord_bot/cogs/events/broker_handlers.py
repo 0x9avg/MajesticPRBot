@@ -29,31 +29,14 @@ class BrokerHandlers(commands.Cog):
         """Register all broker event handlers."""
         broker = self.bot.broker
 
-        @broker.on("streamer.added")
-        async def on_streamer_added(data):
-            self.logger.info(f"Event: streamer.added - {data.get('streamer_name')}")
-            await self._refresh_monitoring()
-
-        @broker.on("streamer.removed")
-        async def on_streamer_removed(data):
-            self.logger.info(f"Event: streamer.removed - {data.get('streamer_name')}")
-            await self._refresh_monitoring()
-
-        @broker.on("streamer.updated")
-        async def on_streamer_updated(data):
-            self.logger.info(f"Event: streamer.updated - {data.get('streamer_name')}")
-            await self._refresh_monitoring()
-
         @broker.on("stream.state.online")
         async def on_stream_online(data):
             self.logger.info(f"Event: stream online - {data.get('streamer_name')}")
-            await self._refresh_monitoring()
             await self._handle_notification("stream_online", data)
 
         @broker.on("stream.state.offline")
         async def on_stream_offline(data):
             self.logger.info(f"Event: stream offline - {data.get('streamer_name')}")
-            await self._refresh_monitoring()
             await self._handle_notification("stream_offline", data)
 
         @broker.on("stream.state.category")
@@ -65,7 +48,7 @@ class BrokerHandlers(commands.Cog):
                 f"DEBUG Handler: {data.get('streamer_name')} | Old: {old_id} | New: {new_id} | GTA: {Config.gta5_game_id} | NewName: {data.get('new_game_name')}"
             )
 
-            await self._refresh_monitoring()
+
 
             if (
                 str(new_id) == Config.gta5_game_id
@@ -84,7 +67,6 @@ class BrokerHandlers(commands.Cog):
         async def on_spec_event(data):
             event = data.get("event", "")
             self.logger.info(f"Event: spec - {event}")
-            await self._refresh_monitoring()
 
             if event == "spec.claimed":
                 await self._log_pr_claim(data)
@@ -96,30 +78,15 @@ class BrokerHandlers(commands.Cog):
         async def on_event_action(data):
             event = data.get("event", "")
             self.logger.info(f"Event: event action - {event}")
-            await self._refresh_monitoring()
 
             if event == "event.joined":
                 await self._log_event_join(data)
             elif event == "event.left":
                 await self._log_event_leave(data)
 
-        @broker.on("monitoring.refresh")
-        async def on_monitoring_refresh(data):
-            self.logger.info("Event: monitoring.refresh")
-            await self._refresh_monitoring()
-
         self.logger.debug("✓ Broker handlers registered")
 
-    async def _refresh_monitoring(self):
-        """Refresh monitoring message via Spec cog."""
-        try:
-            spec_cog = self.bot.get_cog("Spec")
-            if spec_cog:
-                await spec_cog.update_monitoring()
-            else:
-                self.logger.warning("Spec cog not loaded, skipping monitoring refresh")
-        except Exception as e:
-            self.logger.error(f"Failed to refresh monitoring: {e}")
+
 
     async def _handle_notification(self, event_type: str, data: dict):
         """Delegate notification handling to Notifications cog."""

@@ -39,9 +39,25 @@ def _seed_assistant(
     }
 
 
-async def _client(build_api_app):
-    app = build_api_app(assistants_router)
+async def _client(build_api_app, current_user: dict | None = None):
+    app = build_api_app(assistants_router, current_user=current_user)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def _employee_current_user(discord_id: int = 1001) -> dict:
+    return {
+        "id": discord_id,
+        "username": f"user_{discord_id}",
+        "nickname": f"User{discord_id}",
+        "role": "employee",
+        "principal_type": "user",
+        "discord_id": discord_id,
+        "require_password_change": False,
+        "permissions": {
+            "assistants.view": True,
+            "logs.pr_actions.view": True,
+        },
+    }
 
 
 async def test_get_all_assistants_returns_list(build_api_app, fake_db) -> None:
@@ -74,7 +90,7 @@ async def test_create_assistant_invalid_role(build_api_app) -> None:
             },
         )
     assert response.status_code == 400
-    assert "Invalid role" in response.json()["detail"]
+    assert "Невалидная роль" in response.json()["detail"]
 
 
 async def test_create_assistant_success(build_api_app, fake_db) -> None:
@@ -161,6 +177,47 @@ async def test_get_logs_for_assistant(build_api_app, fake_db) -> None:
     }
 
 
+async def test_employee_can_view_own_logs(build_api_app, fake_db) -> None:
+    fake_db.assistant_logs_by_id[2001] = [
+        {
+            "id": 1,
+            "action": "Assigned",
+            "target": "StreamerA",
+            "created_at": "2026-02-14T10:00:00",
+        }
+    ]
+
+    async with await _client(
+        build_api_app,
+        current_user=_employee_current_user(discord_id=2001),
+    ) as assistants_client:
+        response = await assistants_client.get("/api/assistants/2001/logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["data"], list)
+    assert payload["data"][0]["target"] == "StreamerA"
+
+
+async def test_employee_cannot_view_other_assistant_logs(build_api_app, fake_db) -> None:
+    fake_db.assistant_logs_by_id[3001] = [
+        {
+            "id": 1,
+            "action": "Assigned",
+            "target": "StreamerB",
+            "created_at": "2026-02-14T10:00:00",
+        }
+    ]
+
+    async with await _client(
+        build_api_app,
+        current_user=_employee_current_user(discord_id=2001),
+    ) as assistants_client:
+        response = await assistants_client.get("/api/assistants/3001/logs")
+
+    assert response.status_code == 403
+
+
 async def test_get_assistant_sessions_admin_only_endpoint(
     build_api_app, fake_db
 ) -> None:
@@ -192,7 +249,7 @@ async def test_get_assistant_sessions_admin_only_endpoint(
     assert response.status_code == 200
     data = response.json()["data"]
     assert len(data) == 1
-    assert data[0]["id"] == 9001
+    assert data[0]["id"] == "9001"
     assert data[0]["target_name"] == "StreamerOne"
 
 
@@ -203,21 +260,20 @@ async def test_get_capabilities_for_unknown_and_known_assistant(
         unknown = await assistants_client.get("/api/assistants/777/capabilities")
 
     assert unknown.status_code == 200
-    assert unknown.json()["data"]["can_view_dashboard"] is False
+    assert unknown.json()["data"] == {}
 
     _seed_assistant(fake_db, 1500, "Dev", role="developer")
     async with await _client(build_api_app) as assistants_client:
         known = await assistants_client.get("/api/assistants/1500/capabilities")
 
     assert known.status_code == 200
-    assert known.json()["data"]["can_register_users"] is True
+    assert known.json()["data"]["admin.users.create"] is True
 
 
-async def test_reset_and_manual_session(build_api_app, fake_db) -> None:
+async def test_manual_session(build_api_app, fake_db) -> None:
     _seed_assistant(fake_db, 1600, "ResetUser")
 
     async with await _client(build_api_app) as assistants_client:
-        reset_response = await assistants_client.post("/api/assistants/1600/reset")
         session_response = await assistants_client.post(
             "/api/assistants/1600/session",
             json={
@@ -231,8 +287,6 @@ async def test_reset_and_manual_session(build_api_app, fake_db) -> None:
             },
         )
 
-    assert reset_response.status_code == 200
-    assert fake_db.assistants_by_id[1600]["total_spec_seconds"] == 0
     assert session_response.status_code == 200
     assert len(fake_db.manual_sessions) == 1
 
@@ -327,11 +381,22 @@ async def test_non_admin_cannot_use_sensitive_assistant_endpoints(
             json={"delta": 1.0},
         )
         sessions = await assistants_client.get("/api/assistants/1900/sessions")
-        reset = await assistants_client.post("/api/assistants/1900/reset")
+        manual_session = await assistants_client.post(
+            "/api/assistants/1900/session",
+            json={
+                "target_type": "streamer",
+                "target_id": 5001,
+                "target_name": "StreamerY",
+                "started_at": "2026-02-14T10:00:00Z",
+                "ended_at": "2026-02-14T11:00:00Z",
+                "is_probation": False,
+                "priority": 1,
+            },
+        )
 
     assert adjust.status_code == 403
     assert sessions.status_code == 403
-    assert reset.status_code == 403
+    assert manual_session.status_code == 403
 
 
 async def test_manual_session_validation_rules(build_api_app, fake_db) -> None:

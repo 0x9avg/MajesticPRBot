@@ -4,7 +4,7 @@ from typing import List, Optional
 # Moscow timezone (UTC+3)
 MSK = timezone(timedelta(hours=3))
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from schemas.common import Snowflake
 
@@ -27,7 +27,8 @@ class EventBase(BaseModel):
 
 
 class EventCreate(EventBase):
-    created_by: Snowflake
+    model_config = ConfigDict(extra="forbid")
+    pass
 
 
 class EventParticipant(BaseModel):
@@ -59,10 +60,6 @@ class EventResponse(EventBase):
             return v.replace(tzinfo=MSK)
         return v
     
-
-class EventJoinRequest(BaseModel):
-    user_id: Snowflake
-
 
 class EventEndResponse(BaseModel):
     status: str

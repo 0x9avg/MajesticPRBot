@@ -28,6 +28,7 @@ class Config(BaseSettings):
     # ==========================================================================
     api_base_url: str = Field(default="http://localhost:8000", alias="API_BASE_URL")
     api_timeout: int = Field(default=30, alias="API_TIMEOUT")
+    service_token: str = Field(default="", alias="SERVICE_TOKEN")
 
     # ==========================================================================
     # RabbitMQ Settings
@@ -63,6 +64,7 @@ class Config(BaseSettings):
         "TWITCH_CLIENT_ID",
         "TWITCH_CLIENT_SECRET",
         "TWITCH_BOT_ID",
+        "SERVICE_TOKEN",
     ]
 
     model_config = {
@@ -81,6 +83,8 @@ class Config(BaseSettings):
             missing.append("TWITCH_CLIENT_SECRET")
         if self.twitch_bot_id == 0:
             missing.append("TWITCH_BOT_ID")
+        if not self.service_token:
+            missing.append("SERVICE_TOKEN")
         return missing if missing else None
 
     def get_log_level(self) -> int:

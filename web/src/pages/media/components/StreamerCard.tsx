@@ -4,6 +4,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom';
 import { ExternalLink, Users, Settings, Trash2 } from 'lucide-react';
 import type { OutletUserContext } from '../../../types/auth';
 import type { Streamer } from '../../../types/domain';
+import { hasAny } from '../../../rbac/guards';
 
 interface StreamerCardProps {
     streamer: Streamer;
@@ -14,7 +15,7 @@ interface StreamerCardProps {
 const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps) => {
     const navigate = useNavigate();
     const { user } = useOutletContext<OutletUserContext>();
-    const userRole = user?.role;
+    const canManageStreamer = hasAny(user, ['streamers.update', 'streamers.delete']);
 
     return (
         <>
@@ -54,7 +55,7 @@ const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps
                 </div>
 
                 {/* Right Section: Settings (Border Left) */}
-                {(userRole === 'manager' || userRole === 'developer') && (
+                {canManageStreamer && (
                     <div className="flex justify-center pl-4 border-l border-white/10">
                         <button
                             onClick={() => onSettingsClick && onSettingsClick(streamer)}

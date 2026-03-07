@@ -10,6 +10,29 @@ MSK = timezone(timedelta(hours=3))
 pytestmark = pytest.mark.anyio
 
 
+def _service_principal_create_streamers() -> dict:
+    return {
+        "principal_type": "service",
+        "service_name": "discord_service",
+        "permissions": {"streamers.create": True},
+    }
+
+
+def _status_sync_user() -> dict:
+    return {
+        "id": 77,
+        "username": "sync-bot",
+        "nickname": "SyncBot",
+        "role": "developer",
+        "principal_type": "user",
+        "discord_id": 7077,
+        "require_password_change": False,
+        "permissions": {
+            "streamers.status.update": True,
+        },
+    }
+
+
 def _seed_streamer(
     fake_db, streamer_id: int, name: str, is_online: bool = True
 ) -> None:
@@ -33,8 +56,16 @@ def _seed_streamer(
     }
 
 
-async def _client(build_api_app, include_broker: bool = True):
-    app = build_api_app(streamers_router, include_broker=include_broker)
+async def _client(
+    build_api_app,
+    include_broker: bool = True,
+    current_user: dict | None = None,
+):
+    app = build_api_app(
+        streamers_router,
+        include_broker=include_broker,
+        current_user=current_user,
+    )
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -76,13 +107,50 @@ async def test_create_streamer_full_mode_success(
                 "is_online": True,
                 "priority": 2,
                 "pr_slots": 2,
-                "added_by_id": 55,
             },
         )
 
     assert response.status_code == 201
     assert fake_db.streamers_by_id[2100]["streamer_name"] == "full_mode_streamer"
+    assert fake_db.streamers_by_id[2100]["added_by_id"] == 1001
     assert any(call[0] == "streamer.added" for call in fake_broker.calls)
+
+
+async def test_create_streamer_rejects_added_by_id_spoof(build_api_app) -> None:
+    async with await _client(build_api_app) as streamers_client:
+        response = await streamers_client.post(
+            "/api/streamers",
+            json={
+                "streamer_id": 2101,
+                "streamer_name": "spoof_streamer",
+                "is_online": True,
+                "priority": 1,
+                "pr_slots": 1,
+                "added_by_id": 999999,
+            },
+        )
+
+    assert response.status_code == 422
+
+
+async def test_create_streamer_service_actor_uses_system_id(build_api_app, fake_db) -> None:
+    async with await _client(
+        build_api_app,
+        current_user=_service_principal_create_streamers(),
+    ) as streamers_client:
+        response = await streamers_client.post(
+            "/api/streamers",
+            json={
+                "streamer_id": 2102,
+                "streamer_name": "service_streamer",
+                "is_online": False,
+                "priority": 0,
+                "pr_slots": 1,
+            },
+        )
+
+    assert response.status_code == 201
+    assert fake_db.streamers_by_id[2102]["added_by_id"] == 0
 
 
 async def test_create_streamer_url_mode_pending_or_unavailable(
@@ -160,7 +228,10 @@ async def test_remove_streamer(build_api_app, fake_db) -> None:
 
 
 async def test_update_streamer_status_not_found(build_api_app) -> None:
-    async with await _client(build_api_app) as streamers_client:
+    async with await _client(
+        build_api_app,
+        current_user=_status_sync_user(),
+    ) as streamers_client:
         response = await streamers_client.patch(
             "/api/streamers/5555/status",
             json={"is_online": True, "game_id": 32982, "game_name": "GTA"},
@@ -181,7 +252,10 @@ async def test_update_streamer_status_offline_triggers_auto_unassign(
         "assigned_at": datetime.now(MSK),
     }
 
-    async with await _client(build_api_app) as streamers_client:
+    async with await _client(
+        build_api_app,
+        current_user=_status_sync_user(),
+    ) as streamers_client:
         response = await streamers_client.patch(
             "/api/streamers/2400/status",
             json={
@@ -203,7 +277,10 @@ async def test_update_streamer_status_category_change_event(
     _seed_streamer(fake_db, 2401, "category_streamer", True)
     fake_db.streamers_by_id[2401]["game_id"] = 32982
 
-    async with await _client(build_api_app) as streamers_client:
+    async with await _client(
+        build_api_app,
+        current_user=_status_sync_user(),
+    ) as streamers_client:
         response = await streamers_client.patch(
             "/api/streamers/2401/status",
             json={"is_online": True, "game_id": 509658, "game_name": "Just Chatting"},
@@ -217,7 +294,10 @@ async def test_sync_status_bulk(build_api_app, fake_db) -> None:
     _seed_streamer(fake_db, 2501, "sync_one", False)
     _seed_streamer(fake_db, 2502, "sync_two", False)
 
-    async with await _client(build_api_app) as streamers_client:
+    async with await _client(
+        build_api_app,
+        current_user=_status_sync_user(),
+    ) as streamers_client:
         response = await streamers_client.post(
             "/api/streamers/sync_status",
             json=[
@@ -242,7 +322,10 @@ async def test_sync_status_bulk(build_api_app, fake_db) -> None:
 
 
 async def test_sync_status_empty_payload(build_api_app) -> None:
-    async with await _client(build_api_app) as streamers_client:
+    async with await _client(
+        build_api_app,
+        current_user=_status_sync_user(),
+    ) as streamers_client:
         response = await streamers_client.post("/api/streamers/sync_status", json=[])
 
     assert response.status_code == 200

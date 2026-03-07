@@ -14,7 +14,6 @@ def _seed_auth_user(
     fake_db, username: str, password_hash: str = "hashed::secret"
 ) -> None:
     user = {
-        "id": 1,
         "discord_id": 1001,
         "username": username,
         "password_hash": password_hash,
@@ -26,10 +25,10 @@ def _seed_auth_user(
         "created_at": datetime.now(MSK),
         "role": "manager",
         "nickname": "Manager",
-        "permissions": {"can_register_users": True},
+        "permissions": {"admin.users.create": True},
     }
     fake_db.users_by_username[username] = user
-    fake_db.users_by_id[user["id"]] = user
+    fake_db.users_by_id[user["discord_id"]] = user
     fake_db.users_by_discord[user["discord_id"]] = user
 
 
@@ -51,7 +50,8 @@ async def test_login_success(build_api_app, fake_db) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["access_token"].startswith("access-")
-    assert payload["refresh_token"].startswith("refresh-")
+    assert payload["token_type"] == "bearer"
+    assert "refresh_token=" in response.headers.get("set-cookie", "")
     assert len(fake_db.sessions) == 1
     assert any(log["action"] == "login_success" for log in fake_db.auth_logs)
 
@@ -128,4 +128,4 @@ async def test_me_returns_current_user_info(build_api_app) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["username"] == "creator"
-    assert payload["permissions"]["can_register_users"] is True
+    assert payload["permissions"]["admin.users.create"] is True

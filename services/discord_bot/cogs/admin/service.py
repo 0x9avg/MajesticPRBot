@@ -16,7 +16,11 @@ import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
 
-from .core import AdminMainView, get_main_embed
+from .core import AdminControlPanelView, get_main_embed
+
+SERVICE_SECTION_PERMS = ["monitoring.view", "monitoring.refresh"]
+SERVICE_VIEW_PERMS = ["monitoring.view"]
+SERVICE_REFRESH_PERMS = ["monitoring.refresh"]
 
 # =============================================================================
 # Service Embed
@@ -73,43 +77,49 @@ class ServiceView(disnake.ui.View):
 
     bot: "DiscordBot"
 
-    def __init__(self, bot: "DiscordBot"):
+    def __init__(self, bot: "DiscordBot", permissions: dict[str, bool] | None = None):
         super().__init__(timeout=None)
         self.bot = bot
+        permissions_map = permissions or {}
 
-        self.add_item(
-            disnake.ui.Button(
-                label="🔄 Синхронизация Twitch",
-                custom_id="admin_svc_sync",
-                style=disnake.ButtonStyle.primary,
-                row=0,
-            )
-        )
-        self.add_item(
-            disnake.ui.Button(
-                label="🔄 Обновить мониторинг",
-                custom_id="admin_svc_refresh",
-                style=disnake.ButtonStyle.secondary,
-                row=0,
-            )
-        )
+        def has_any(required: list[str]) -> bool:
+            return any(bool(permissions_map.get(key, False)) for key in required)
 
-        self.add_item(
-            disnake.ui.Button(
-                label="🔄 Пересоздать панели",
-                custom_id="admin_svc_respawn",
-                style=disnake.ButtonStyle.secondary,
-                row=1,
+        if has_any(SERVICE_REFRESH_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="🔄 Синхронизация Twitch",
+                    custom_id="admin_svc_sync",
+                    style=disnake.ButtonStyle.primary,
+                    row=0,
+                )
             )
-        )
-        self.add_item(
-            disnake.ui.Button(
-                label="📊 Статистика API",
-                custom_id="admin_svc_api_stats",
-                style=disnake.ButtonStyle.secondary,
-                row=1,
+            self.add_item(
+                disnake.ui.Button(
+                    label="🔄 Обновить мониторинг",
+                    custom_id="admin_svc_refresh",
+                    style=disnake.ButtonStyle.secondary,
+                    row=0,
+                )
             )
-        )
+            self.add_item(
+                disnake.ui.Button(
+                    label="🔄 Пересоздать панели",
+                    custom_id="admin_svc_respawn",
+                    style=disnake.ButtonStyle.secondary,
+                    row=1,
+                )
+            )
+
+        if has_any(SERVICE_VIEW_PERMS):
+            self.add_item(
+                disnake.ui.Button(
+                    label="📊 Статистика API",
+                    custom_id="admin_svc_api_stats",
+                    style=disnake.ButtonStyle.secondary,
+                    row=1,
+                )
+            )
 
         self.add_item(
             disnake.ui.Button(
@@ -151,6 +161,13 @@ class AdminService(commands.Cog):
         ):
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=SERVICE_SECTION_PERMS,
+            error_message="❌ Нет доступа к сервисному разделу.",
+        ):
+            return
+
         # 2. SAFE DEFER
         try:
             if not interaction.response.is_done():
@@ -161,12 +178,19 @@ class AdminService(commands.Cog):
         # 3. EXECUTE
         try:
             if custom_id == "admin_service":
+                permissions = await self.bot.get_user_permissions(interaction.user.id)
                 embed = await get_service_embed(self.bot)
                 await interaction.edit_original_response(
-                    embed=embed, view=ServiceView(self.bot)
+                    embed=embed, view=ServiceView(self.bot, permissions)
                 )
 
             elif custom_id == "admin_svc_sync":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=SERVICE_REFRESH_PERMS,
+                    error_message="❌ Нет прав на запуск синхронизации.",
+                ):
+                    return
                 await self.bot.api_client.sync_streamers()
                 await interaction.followup.send(
                     "✅ Синхронизация запущена! Стримеры будут обновлены.",
@@ -174,12 +198,25 @@ class AdminService(commands.Cog):
                 )
 
             elif custom_id == "admin_svc_refresh":
-                await self.bot.api_client.refresh_monitoring()
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=SERVICE_REFRESH_PERMS,
+                    error_message="❌ Нет прав на обновление мониторинга.",
+                ):
+                    return
+                # Monitoring is now ephemeral/on-demand, no persistent messages to refresh
                 await interaction.followup.send(
-                    "✅ Мониторинг обновлен!", ephemeral=True
+                    "ℹ️ Мониторинг теперь работает по запросу (кнопка 'Открыть мониторинг').",
+                    ephemeral=True,
                 )
 
             elif custom_id == "admin_svc_api_stats":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=SERVICE_VIEW_PERMS,
+                    error_message="❌ Нет прав на просмотр системной статистики.",
+                ):
+                    return
                 stats = await self.bot.api_client.get_health()
 
                 # Format uptime
@@ -233,6 +270,12 @@ class AdminService(commands.Cog):
                 await interaction.followup.send(embed=embed, ephemeral=True)
 
             elif custom_id == "admin_svc_respawn":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=SERVICE_REFRESH_PERMS,
+                    error_message="❌ Нет прав на пересоздание сервисных панелей.",
+                ):
+                    return
                 settings = await self.bot.api_client.get_guild_settings()
                 if not settings:
                     await interaction.followup.send(
@@ -257,32 +300,42 @@ class AdminService(commands.Cog):
 
                         embed = get_main_embed()
                         msg = await channel.send(
-                            embed=embed, view=AdminMainView(self.bot)
+                            embed=embed, view=AdminControlPanelView(self.bot)
                         )
                         await self.bot.api_client.update_guild_settings(
                             control_panel_message_id=msg.id
                         )
                         messages_recreated.append("Панель управления")
 
-                # Recreate Monitoring
+                # Recreate Monitoring launcher
                 mon_channel_id = settings.get("monitoring_channel_id")
                 if mon_channel_id:
                     channel = self.bot.get_channel(int(mon_channel_id))
                     if channel:
-                        # Delete all old monitoring messages
-                        old_ids = settings.get("monitoring_message_ids") or []
-                        if isinstance(old_ids, str):
-                            import json
-
-                            old_ids = json.loads(old_ids)
-                        for old_id in old_ids:
+                        # Delete old monitoring messages
+                        old_mon_msg_id = settings.get("monitoring_message_id")
+                        if old_mon_msg_id:
                             try:
-                                old_msg = await channel.fetch_message(int(old_id))
+                                old_msg = await channel.fetch_message(int(old_mon_msg_id))
                                 await old_msg.delete()
                             except Exception:
                                 pass
 
-                        await self.bot.api_client.refresh_monitoring()
+                        # Send new launcher message
+                        from cogs.spec.manager import MonitoringLauncherView
+                        embed = disnake.Embed(
+                            title="📊 Мониторинг стримеров",
+                            description=(
+                                "Нажмите кнопку ниже, чтобы открыть мониторинг.\n\n"
+                                "Мониторинг показывает текущий статус всех стримеров, "
+                                "а также позволяет закрепиться или открепиться."
+                            ),
+                            color=0x2B2D31,
+                        )
+                        msg = await channel.send(embed=embed, view=MonitoringLauncherView())
+                        await self.bot.api_client.update_guild_settings(
+                            monitoring_message_id=msg.id,
+                        )
                         messages_recreated.append("Мониторинг")
 
                 if messages_recreated:

@@ -94,6 +94,7 @@ export interface DashboardStats {
 
 export interface AdminLogRecord {
     id: string;
+    actor_id?: string | null;
     actor_name: string;
     actor_role?: string | null;
     admin_name?: string;
@@ -112,3 +113,6 @@ export interface AdminLogRecord {
     } | null;
     created_at: string;
 }
+
+
+export infterface Vacancy

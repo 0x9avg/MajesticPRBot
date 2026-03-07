@@ -1,6 +1,7 @@
 """Spec Manager - Claim/Unclaim system for PR assistants.
 
 All interactions via BUTTONS only (per GEMINI.md - no slash commands except /setup).
+Monitoring uses ephemeral paginated messages triggered by a launcher button.
 """
 
 from __future__ import annotations
@@ -15,12 +16,35 @@ if TYPE_CHECKING:
 
 import disnake
 from disnake.ext import commands
+from config import Config
 from utils import (
-    create_monitoring_select,
     create_notification_component,
     create_streamers_component,
     format_spec_duration,
+    safe_defer,
 )
+
+SPEC_VIEW_CLAIMABLE_PERMS = ["spec.view_claimable"]
+SPEC_CLAIM_MAIN_PERMS = ["spec.claim.main"]
+SPEC_CLAIM_PROBATION_ALL_PERMS = ["spec.claim.probation"]
+SPEC_UNCLAIM_PERMS = ["spec.unclaim.self"]
+EVENT_JOIN_PERMS = ["events.join.self"]
+EVENT_LEAVE_PERMS = ["events.leave.self"]
+
+
+class MonitoringLauncherView(disnake.ui.View):
+    """Persistent launcher view for opening per-user monitoring panel."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(
+            disnake.ui.Button(
+                label="Открыть мониторинг",
+                custom_id="monitoring_open",
+                emoji="📊",
+                style=disnake.ButtonStyle.primary,
+            )
+        )
 
 
 class Spec(commands.Cog):
@@ -31,6 +55,8 @@ class Spec(commands.Cog):
     - spec_unclaim_{streamer_id} - Unclaim a streamer
     - probation_choice_main_{streamer_id} - Choose main spec
     - probation_choice_prob_{streamer_id} - Choose probation spec
+    - monitoring_open - Open ephemeral monitoring panel
+    - monitoring_page_prev/next - Paginate monitoring
 
     Transfer is initiated from AssistantsView in admin panel.
     """
@@ -43,17 +69,77 @@ class Spec(commands.Cog):
         self.api = bot.api_client
         self.logger = bot.logger
 
-        # Lock to prevent concurrent monitoring updates
-        self._monitoring_lock = asyncio.Lock()
-
     @commands.Cog.listener()
     async def on_ready(self):
-        """Refresh monitoring on bot startup."""
-        self.logger.info("Spec cog ready - Refreshing monitoring...")
+        """Register persistent views and ensure launcher message exists."""
+        self.bot.add_view(MonitoringLauncherView())
+        self.logger.info("✓ MonitoringLauncherView registered")
         try:
-            await self.update_monitoring()
+            await self._ensure_monitoring_message()
         except Exception as e:
-            self.logger.error(f"Failed to refresh monitoring on ready: {e}")
+            self.logger.error(f"Failed to ensure monitoring message on ready: {e}")
+
+    async def _ensure_spec_action_permission(
+        self,
+        interaction: disnake.MessageInteraction,
+        custom_id: str,
+    ) -> bool:
+        """Enforce per-action RBAC for spec/event actions in Discord UI."""
+        if custom_id.startswith("spec_claim_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_CLAIM_MAIN_PERMS,
+                error_message="❌ Нет прав на закрепление.",
+            )
+        if custom_id.startswith("spec_unclaim_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_UNCLAIM_PERMS,
+                error_message="❌ Нет прав на открепление.",
+            )
+        if custom_id.startswith("probation_choice_main_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_CLAIM_MAIN_PERMS,
+                error_message="❌ Нет прав на закрепление.",
+            )
+        if custom_id.startswith("probation_choice_prob_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_all=SPEC_CLAIM_PROBATION_ALL_PERMS,
+                error_message="❌ Нет прав на стажерский спек.",
+            )
+        if custom_id == "monitoring_open":
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+                error_message="❌ Нет прав на просмотр мониторинга.",
+            )
+        if custom_id == "monitoring_claim":
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+                error_message="❌ Нет прав на просмотр доступных закреплений.",
+            )
+        if custom_id == "monitoring_unclaim":
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=[*SPEC_UNCLAIM_PERMS, *EVENT_LEAVE_PERMS],
+                error_message="❌ Нет прав на открепление.",
+            )
+        if custom_id.startswith("monitoring_page_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+                error_message="❌ Нет прав на просмотр мониторинга.",
+            )
+        if custom_id.startswith("claim_page_"):
+            return await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+                error_message="❌ Нет прав на просмотр доступных закреплений.",
+            )
+        return True
 
     # =========================================================================
     # Button Handlers
@@ -73,6 +159,23 @@ class Spec(commands.Cog):
                 "claim_select_",
             )
         ):
+            return
+
+        # monitoring_open gets a fresh ephemeral response, not deferred
+        if custom_id == "monitoring_open":
+            if not await self._ensure_spec_action_permission(interaction, custom_id):
+                return
+            await self._handle_monitoring_open(interaction)
+            return
+
+        # monitoring_page_* edits the existing ephemeral response
+        if custom_id.startswith("monitoring_page_"):
+            if not await self._ensure_spec_action_permission(interaction, custom_id):
+                return
+            await self._handle_monitoring_page(interaction, custom_id)
+            return
+
+        if not await self._ensure_spec_action_permission(interaction, custom_id):
             return
 
         if not custom_id.startswith(("probation_choice_", "claim_select_")):
@@ -103,9 +206,8 @@ class Spec(commands.Cog):
             elif custom_id == "monitoring_unclaim":
                 await self._handle_monitoring_unclaim(interaction)
             elif custom_id.startswith("claim_page_"):
-                # Format: claim_page_{direction}_{current_page}
                 parts = custom_id.split("_")
-                direction = parts[2]  # "next" or "prev"
+                direction = parts[2]
                 current_page = int(parts[3])
                 new_page = current_page + 1 if direction == "next" else current_page - 1
                 await self._show_claim_selector(interaction, page=new_page)
@@ -121,6 +223,13 @@ class Spec(commands.Cog):
     ):
         """Handle claim button click (with Probation support)."""
         try:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_CLAIM_MAIN_PERMS,
+                error_message="❌ Нет прав на закрепление.",
+            ):
+                return
+
             streamer_id = int(custom_id.replace("spec_claim_", ""))
             pr_id = interaction.user.id
 
@@ -208,6 +317,21 @@ class Spec(commands.Cog):
         is_probation: bool,
     ):
         """Perform the actual claim operation."""
+        if is_probation:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_all=SPEC_CLAIM_PROBATION_ALL_PERMS,
+                error_message="❌ Нет прав на стажерский спек.",
+            ):
+                return
+        else:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_CLAIM_MAIN_PERMS,
+                error_message="❌ Нет прав на закрепление.",
+            ):
+                return
+
         # Ensure deferred
         try:
             if not interaction.response.is_done():
@@ -250,9 +374,6 @@ class Spec(commands.Cog):
                 f"✅ Успешно закреплен ({spec_type}): **{streamer_name}**",
                 ephemeral=True,
             )
-
-            # Refresh monitoring
-            await self.update_monitoring()
         else:
             error = result.get("detail", "Ошибка") if result else "API Error"
             await interaction.followup.send(f"❌ {error}", ephemeral=True)
@@ -262,6 +383,13 @@ class Spec(commands.Cog):
     ):
         """Handle unclaim button click."""
         try:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_UNCLAIM_PERMS,
+                error_message="❌ Нет прав на открепление.",
+            ):
+                return
+
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
             pr_id = interaction.user.id
 
@@ -279,9 +407,6 @@ class Spec(commands.Cog):
                     f"⏱️ Время спека: **{duration_str}**",
                     ephemeral=True,
                 )
-
-                # Refresh monitoring
-                await self.update_monitoring()
             else:
                 error = result.get("detail", "Ошибка") if result else "API Error"
                 await interaction.followup.send(f"❌ {error}", ephemeral=True)
@@ -309,6 +434,12 @@ class Spec(commands.Cog):
 
         # Unclaim
         if "streamer_id" in current:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=SPEC_UNCLAIM_PERMS,
+                error_message="❌ Нет прав на открепление от стримеров.",
+            ):
+                return
             streamer_id = current["streamer_id"]
             result = await self.api.unclaim_streamer(
                 streamer_id, pr_id=pr_id, reason="manual_unclaim"
@@ -321,31 +452,48 @@ class Spec(commands.Cog):
                     f"⏱️ Время спека: **{duration_str}**",
                     ephemeral=True,
                 )
-                await self.update_monitoring()
             else:
                 error = result.get("detail", "Ошибка") if result else "API Error"
                 await interaction.followup.send(f"❌ {error}", ephemeral=True)
         elif "event_id" in current:
+            if not await self.bot.ensure_user_permissions(
+                interaction,
+                require_any=EVENT_LEAVE_PERMS,
+                error_message="❌ Нет прав на выход из события.",
+            ):
+                return
             event_id = current.get("event_id")
-            # For events, the unclaim route is /events/{event_id}/leave
+            # For events, service route explicitly targets PR id.
             result = await self.api._request(
-                "POST", f"/events/{event_id}/leave", data={"user_id": pr_id}
+                "POST", f"/events/{event_id}/leave/{pr_id}"
             )
             if result and "event_id" in result:
                 await interaction.followup.send("✅ Вы покинули событие.", ephemeral=True)
-                await self.update_monitoring()
             else:
                 error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
                 await interaction.followup.send(f"❌ {error}", ephemeral=True)
 
     async def _handle_monitoring_claim(self, interaction: disnake.MessageInteraction):
         """Handle 'Claim' button from monitoring UI - show paginated selector."""
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+            error_message="❌ Нет прав на просмотр доступных закреплений.",
+        ):
+            return
         await self._show_claim_selector(interaction, page=0)
 
     async def _show_claim_selector(
         self, interaction: disnake.MessageInteraction, page: int = 0
     ):
         """Show paginated claim selector."""
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+            error_message="❌ Нет прав на просмотр доступных закреплений.",
+        ):
+            return
+
         user_id = interaction.user.id
 
         # Get claimable streamers from API
@@ -408,22 +556,22 @@ class Spec(commands.Cog):
 
         # Pagination buttons
         if total_pages > 1:
-            if page > 0:
-                view.add_item(
-                    disnake.ui.Button(
-                        label="◀ Назад",
-                        custom_id=f"claim_page_prev_{page}",
-                        style=disnake.ButtonStyle.secondary,
-                    )
+            view.add_item(
+                disnake.ui.Button(
+                    label="◀ Назад",
+                    custom_id=f"claim_page_prev_{page}",
+                    style=disnake.ButtonStyle.secondary,
+                    disabled=(page <= 0),
                 )
-            if page < total_pages - 1:
-                view.add_item(
-                    disnake.ui.Button(
-                        label="Вперёд ▶",
-                        custom_id=f"claim_page_next_{page}",
-                        style=disnake.ButtonStyle.secondary,
-                    )
+            )
+            view.add_item(
+                disnake.ui.Button(
+                    label="Вперёд ▶",
+                    custom_id=f"claim_page_next_{page}",
+                    style=disnake.ButtonStyle.secondary,
+                    disabled=(page >= total_pages - 1),
                 )
+            )
 
         # Edit or send message
         try:
@@ -446,6 +594,13 @@ class Spec(commands.Cog):
         if custom_id != "claim_select_streamer":
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+            error_message="❌ Нет прав на просмотр доступных закреплений.",
+        ):
+            return
+
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
@@ -457,6 +612,12 @@ class Spec(commands.Cog):
             if str(interaction.values[0]).startswith("event_"):
                 event_id = int(str(interaction.values[0]).replace("event_", ""))
                 user_id = interaction.user.id
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=EVENT_JOIN_PERMS,
+                    error_message="❌ Нет прав на присоединение к событиям.",
+                ):
+                    return
                 
                 result = await self.api.join_event(event_id, user_id)
                 if result and "event_id" in result:
@@ -465,7 +626,6 @@ class Spec(commands.Cog):
                         await interaction.followup.send("✅ Вы закреплены за событием. Спек начнётся при старте события.", ephemeral=True)
                     else:
                         await interaction.followup.send("✅ Успешно закреплен за событием", ephemeral=True)
-                    await self.update_monitoring()
                 else:
                     error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
                     await interaction.followup.send(f"❌ {error}", ephemeral=True)
@@ -557,6 +717,13 @@ class Spec(commands.Cog):
         if custom_id != "spec_claim_select":
             return
 
+        if not await self.bot.ensure_user_permissions(
+            interaction,
+            require_any=SPEC_VIEW_CLAIMABLE_PERMS,
+            error_message="❌ Нет прав на просмотр доступных закреплений.",
+        ):
+            return
+
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
@@ -588,147 +755,205 @@ class Spec(commands.Cog):
 
 
     # =========================================================================
-    # Monitoring Update
+    # Monitoring Launcher & Ephemeral Pagination
     # =========================================================================
 
-    async def update_monitoring(self):
-        """Update monitoring messages with current streamer statuses.
+    async def _ensure_monitoring_message(self):
+        """Ensure the monitoring launcher message exists in the configured channel.
 
-        Uses multi-message pagination and Chain Repair algorithm:
-        - Attempts to edit existing messages by ID
-        - If a message is missing (404), marks chain as broken
-        - Recreates broken chain from that point
-        - Cleans up orphan messages
+        Similar to AdminCore._ensure_control_panel: creates or updates a single
+        persistent message with a 'Open monitoring' button.
         """
-        async with self._monitoring_lock:
-            try:
-                # Get monitoring status from API
-                status = await self.api.get_monitoring_status()
-                if not status:
-                    self.logger.warning("Failed to get monitoring status from API")
-                    return
+        try:
+            settings = await self.api.get_guild_settings()
+            if not settings:
+                self.logger.warning("No guild settings found, skipping monitoring launcher")
+                return
 
-                settings = await self.api.get_guild_settings()
-                if not settings:
-                    return
+            monitoring_channel_id = settings.get("monitoring_channel_id")
+            if not monitoring_channel_id:
+                self.logger.debug("No monitoring channel configured")
+                return
 
-                monitoring_channel_id = settings.get("monitoring_channel_id")
-                if not monitoring_channel_id:
-                    return
+            channel = self.bot.get_channel(int(monitoring_channel_id))
+            if not channel:
+                self.logger.warning(f"Monitoring channel {monitoring_channel_id} not found")
+                return
 
-                channel = self.bot.get_channel(int(monitoring_channel_id))
-                if not channel:
-                    self.logger.warning("Monitoring channel not found")
-                    return
+            old_msg_id = settings.get("monitoring_message_id")
+            old_msg = None
 
-                # Get saved message IDs (list)
-                saved_ids = settings.get("monitoring_message_ids") or []
-                if isinstance(saved_ids, str):
-                    import json
+            if old_msg_id:
+                try:
+                    old_msg = await channel.fetch_message(int(old_msg_id))
+                except (disnake.NotFound, disnake.Forbidden):
+                    self.logger.info("Old monitoring launcher message not found, will create new")
+                    old_msg = None
+                except Exception as e:
+                    self.logger.warning(f"Error fetching monitoring launcher message: {e}")
+                    old_msg = None
 
-                    saved_ids = json.loads(saved_ids)
-                saved_ids = [int(mid) for mid in saved_ids] if saved_ids else []
+            embed = disnake.Embed(
+                title="📊 Мониторинг стримеров",
+                description=(
+                    "Нажмите кнопку ниже, чтобы открыть мониторинг.\n\n"
+                    "Мониторинг показывает текущий статус всех стримеров, "
+                    "а также позволяет закрепиться или открепиться."
+                ),
+                color=0x2B2D31,
+            )
 
-                # Generate pages
-                online_streamers = status.get("online_streamers", [])
-                available_streamers = status.get("available_for_claim", [])
-                active_events = status.get("active_events", [])
-                total_count = status.get("total_streamers", 0)
-                gta_count = status.get("gta_count", 0)
-                online_count = status.get("online_count", len(online_streamers))
-
-                # Apply GTA filter if enabled
-                gta_filter = settings.get("monitoring_filter_gta", False)
-                if gta_filter:
-                    from config import Config
-
-                    online_streamers = [
-                        s
-                        for s in online_streamers
-                        if str(s.get("game_id")) == Config.gta5_game_id
-                    ]
-                    available_streamers = [
-                        s
-                        for s in available_streamers
-                        if str(s.get("game_id")) == Config.gta5_game_id
-                    ]
-
-                pages = create_streamers_component(
-                    online_streamers, total_count, gta_count, events=active_events, online_count=online_count
-                )
-
-                # Add select row to last page
-                select_row = create_monitoring_select(available_streamers, [])
-
-                # Sync Loop with Chain Repair
-                new_ids = []
-                broken_chain = False
-
-                for i, page in enumerate(pages):
-                    # Build components for this page
-                    if i == len(pages) - 1:
-                        # Last page: add select row
-                        page_components = [page, select_row]
-                    else:
-                        page_components = [page]
-
-                    if i < len(saved_ids) and not broken_chain:
-                        # Try to edit existing message
-                        try:
-                            msg = await channel.fetch_message(saved_ids[i])
-                            await msg.edit(components=page_components)
-                            new_ids.append(msg.id)
-                            self.logger.debug(
-                                f"Edited monitoring message {i+1}/{len(pages)}"
-                            )
-                        except disnake.NotFound:
-                            # Message was deleted - chain is broken
-                            self.logger.warning(
-                                f"Monitoring message {saved_ids[i]} not found - chain broken"
-                            )
-                            broken_chain = True
-                            # Send new message
-                            msg = await channel.send(components=page_components)
-                            new_ids.append(msg.id)
-                        except Exception as e:
-                            self.logger.error(f"Failed to edit message: {e}")
-                            broken_chain = True
-                            msg = await channel.send(components=page_components)
-                            new_ids.append(msg.id)
-                    else:
-                        # Chain broken or new page - delete old if exists, send new
-                        if i < len(saved_ids):
-                            try:
-                                old_msg = await channel.fetch_message(saved_ids[i])
-                                await old_msg.delete()
-                                self.logger.debug(
-                                    f"Deleted orphan message {saved_ids[i]}"
-                                )
-                            except:  # noqa: E722
-                                pass  # Already deleted
-
-                        msg = await channel.send(components=page_components)
-                        new_ids.append(msg.id)
-                        self.logger.debug(
-                            f"Sent new monitoring message {i+1}/{len(pages)}"
-                        )
-
-                # Cleanup: delete extra old messages
-                for i in range(len(pages), len(saved_ids)):
+            if old_msg:
+                try:
+                    await old_msg.edit(embed=embed, view=MonitoringLauncherView())
+                    self.logger.info(f"✓ Updated monitoring launcher in #{channel.name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to edit monitoring launcher: {e}")
+            else:
+                # Delete old monitoring message
+                old_msg_id = settings.get("monitoring_message_id")
+                if old_msg_id:
                     try:
-                        old_msg = await channel.fetch_message(saved_ids[i])
+                        old_msg = await channel.fetch_message(int(old_msg_id))
                         await old_msg.delete()
-                        self.logger.debug(f"Deleted extra message {saved_ids[i]}")
-                    except:  # noqa: E722
+                    except Exception:
                         pass
 
-                # Save new IDs if changed
-                if new_ids != saved_ids:
-                    await self.api.update_guild_settings(monitoring_message_ids=new_ids)
-                    self.logger.info(f"Updated monitoring: {len(new_ids)} messages")
+                msg = await channel.send(embed=embed, view=MonitoringLauncherView())
+                await self.api.update_guild_settings(
+                    monitoring_message_id=msg.id,
+                )
+                self.logger.info(f"✓ Monitoring launcher created in #{channel.name}")
 
-            except Exception as e:
-                self.logger.error(f"Error updating monitoring: {e}", exc_info=True)
+        except Exception as e:
+            self.logger.error(f"Failed to ensure monitoring launcher: {e}", exc_info=True)
+
+    async def _handle_monitoring_open(self, interaction: disnake.MessageInteraction):
+        """Handle 'Open monitoring' button — send ephemeral paginated monitoring."""
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            self.logger.warning(f"Defer failed for monitoring_open: {e}")
+            return
+
+        await self._send_monitoring_ephemeral(interaction, page=0)
+
+    async def _handle_monitoring_page(self, interaction: disnake.MessageInteraction, custom_id: str):
+        """Handle monitoring pagination buttons."""
+        # Format: monitoring_page_{next|prev}_{current_page}
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            self.logger.warning(f"Defer failed for monitoring page: {e}")
+            return
+
+        try:
+            parts = custom_id.split("_")
+            direction = parts[2]  # "next" or "prev"
+            current_page = int(parts[3])
+            new_page = current_page + 1 if direction == "next" else current_page - 1
+            await self._send_monitoring_ephemeral(interaction, page=new_page)
+        except (IndexError, ValueError) as e:
+            self.logger.error(f"Invalid monitoring page custom_id: {custom_id}: {e}")
+            await interaction.followup.send("❌ Ошибка пагинации.", ephemeral=True)
+
+    async def _send_monitoring_ephemeral(self, interaction: disnake.MessageInteraction, page: int = 0):
+        """Build and send/edit an ephemeral monitoring page for the user."""
+        try:
+            # Fetch data from API
+            status = await self.api.get_monitoring_status()
+            if not status:
+                await interaction.followup.send("❌ Не удалось получить данные мониторинга.", ephemeral=True)
+                return
+
+            settings = await self.api.get_guild_settings()
+
+            online_streamers = status.get("online_streamers", [])
+            active_events = status.get("active_events", [])
+            total_count = status.get("total_streamers", 0)
+            gta_count = status.get("gta_count", 0)
+            online_count = status.get("online_count", len(online_streamers))
+
+            # Apply GTA filter if enabled
+            if settings:
+                gta_filter = settings.get("monitoring_filter_gta", False)
+                if gta_filter:
+                    online_streamers = [
+                        s for s in online_streamers
+                        if str(s.get("game_id")) == Config.gta5_game_id
+                    ]
+
+            # Generate all pages
+            pages = create_streamers_component(
+                online_streamers, total_count, gta_count, events=active_events, online_count=online_count
+            )
+
+            total_pages = len(pages)
+            page = max(0, min(page, total_pages - 1))
+
+            # Current page container
+            current_container = pages[page]
+
+            # Build action row with pagination + claim/unclaim
+            pr_id = interaction.user.id
+            current_assignment = await self.api.get_pr_current_streamer(pr_id)
+
+            buttons = []
+            # Pagination: prev
+            buttons.append(
+                disnake.ui.Button(
+                    label="◀",
+                    custom_id=f"monitoring_page_prev_{page}",
+                    style=disnake.ButtonStyle.secondary,
+                    disabled=(page <= 0),
+                )
+            )
+
+            # Context-aware claim / unclaim
+            if current_assignment:
+                buttons.append(
+                    disnake.ui.Button(
+                        label="📤 Открепиться",
+                        custom_id="monitoring_unclaim",
+                        style=disnake.ButtonStyle.danger,
+                    )
+                )
+            else:
+                buttons.append(
+                    disnake.ui.Button(
+                        label="📥 Закрепиться",
+                        custom_id="monitoring_claim",
+                        style=disnake.ButtonStyle.success,
+                    )
+                )
+
+            # Pagination: next
+            buttons.append(
+                disnake.ui.Button(
+                    label="▶",
+                    custom_id=f"monitoring_page_next_{page}",
+                    style=disnake.ButtonStyle.secondary,
+                    disabled=(page >= total_pages - 1),
+                )
+            )
+
+            action_row = disnake.ui.ActionRow(*buttons)
+            page_components = [current_container, action_row]
+
+            # Send or edit
+            try:
+                await interaction.edit_original_response(components=page_components)
+            except Exception:
+                await interaction.followup.send(components=page_components, ephemeral=True)
+
+        except Exception as e:
+            self.logger.error(f"Error sending monitoring ephemeral: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("❌ Ошибка загрузки мониторинга.", ephemeral=True)
+            except Exception:
+                pass
 
 
 def setup(bot: commands.Bot) -> None:

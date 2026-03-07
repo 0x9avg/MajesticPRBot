@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Check, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
-import { CustomSelect, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
+import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import type { Assistant, Event, Streamer } from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
 import { parseMskDate, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
+import { apiFetch } from '../../../api/client';
 
 export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
 
@@ -105,6 +106,14 @@ const ensureOptionExists = (
 const AssistantsManagement = () => {
     const [assistants, setAssistants] = useState<Assistant[]>([]);
     const [selectedPrId, setSelectedPrId] = useState<string | null>(null);
+    const [copiedId, setCopiedId] = useState(false);
+
+    const handleCopyId = () => {
+        if (!selectedPrId) return;
+        void navigator.clipboard.writeText(selectedPrId);
+        setCopiedId(true);
+        setTimeout(() => setCopiedId(false), 1500);
+    };
     const [selectedAssistant, setSelectedAssistant] = useState<Assistant | null>(null);
     const [sessions, setSessions] = useState<AssistantSessionRecord[]>([]);
     const [streamerOptions, setStreamerOptions] = useState<SelectOption[]>([]);
@@ -144,8 +153,6 @@ const AssistantsManagement = () => {
         priority: '0',
     });
 
-    const getAccessToken = () => localStorage.getItem('access_token');
-
     const filteredAssistants = useMemo(() => {
         const query = search.trim().toLowerCase();
         if (!query) return assistants;
@@ -170,7 +177,7 @@ const AssistantsManagement = () => {
     }, [sessionEdit.target_type, sessionEdit.target_id, eventOptions, streamerOptions]);
 
     const fetchAssistants = async () => {
-        const response = await fetch('/api/assistants');
+        const response = await apiFetch('/api/assistants');
         if (!response.ok) throw new Error('Не удалось загрузить ассистентов');
         const json = await response.json() as unknown;
         const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
@@ -187,8 +194,8 @@ const AssistantsManagement = () => {
         setOptionsError(null);
         try {
             const [streamersResponse, eventsResponse] = await Promise.all([
-                fetch('/api/streamers'),
-                fetch('/api/events'),
+                apiFetch('/api/streamers'),
+                apiFetch('/api/events'),
             ]);
 
             if (!streamersResponse.ok || !eventsResponse.ok) {
@@ -246,7 +253,7 @@ const AssistantsManagement = () => {
     };
 
     const fetchAssistantDetail = async (prId: string) => {
-        const response = await fetch(`/api/assistants/${prId}`);
+        const response = await apiFetch(`/api/assistants/${prId}`);
         if (!response.ok) throw new Error('Не удалось загрузить профиль ассистента');
         const json = await response.json() as unknown;
         const data = unwrapApiData<Assistant>(json);
@@ -254,12 +261,7 @@ const AssistantsManagement = () => {
     };
 
     const fetchAssistantSessions = async (prId: string) => {
-        const token = getAccessToken();
-        if (!token) throw new Error('Требуется авторизация');
-
-        const response = await fetch(`/api/assistants/${prId}/sessions?limit=50`, {
-            headers: { Authorization: `Bearer ${token}` },
-        });
+        const response = await apiFetch(`/api/assistants/${prId}/sessions?limit=50`);
 
         if (response.ok) {
             const json = await response.json() as unknown;
@@ -271,7 +273,7 @@ const AssistantsManagement = () => {
         // Fallback: if auth header is stripped somewhere in the chain,
         // still show read-only streamer sessions from public spec endpoint.
         if (response.status === 401 || response.status === 403) {
-            const fallback = await fetch(`/api/spec/sessions/${prId}?limit=50`);
+            const fallback = await apiFetch(`/api/spec/sessions/${prId}?limit=50`);
             if (fallback.ok) {
                 const fallbackJson = await fallback.json() as unknown;
                 const fallbackData = unwrapApiData<Array<{
@@ -368,16 +370,13 @@ const AssistantsManagement = () => {
         payload?: Record<string, unknown>,
     ) => {
         if (!selectedPrId) return;
-        const token = getAccessToken();
-        if (!token) throw new Error('Требуется авторизация');
         setBusy(true);
         setMessage(null);
         try {
-            const response = await fetch(endpoint, {
+            const response = await apiFetch(endpoint, {
                 method,
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`,
                 },
                 body: payload ? JSON.stringify(payload) : undefined,
             });
@@ -387,6 +386,11 @@ const AssistantsManagement = () => {
             }
             await refreshSelectedAssistant(selectedPrId);
             setMessage({ type: 'success', text: 'Изменения сохранены' });
+        } catch (error: unknown) {
+            setMessage({
+                type: 'error',
+                text: error instanceof Error ? error.message : 'Операция не выполнена',
+            });
         } finally {
             setBusy(false);
         }
@@ -580,13 +584,10 @@ const AssistantsManagement = () => {
         setBusy(true);
         setMessage(null);
         try {
-            const token = getAccessToken();
-            if (!token) throw new Error('Требуется авторизация');
-            const response = await fetch('/api/assistants', {
+            const response = await apiFetch('/api/assistants', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
                     pr_id: selectedPrId,
@@ -615,11 +616,8 @@ const AssistantsManagement = () => {
         setBusy(true);
         setMessage(null);
         try {
-            const token = getAccessToken();
-            if (!token) throw new Error('Требуется авторизация');
-            const response = await fetch(`/api/assistants/${selectedPrId}`, {
+            const response = await apiFetch(`/api/assistants/${selectedPrId}`, {
                 method: 'DELETE',
-                headers: { Authorization: `Bearer ${token}` },
             });
             if (!response.ok) {
                 const json = await response.json().catch(() => ({} as unknown));
@@ -663,46 +661,60 @@ const AssistantsManagement = () => {
                 </div>
             )}
 
-            <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">
-                <div className="xl:col-span-1 bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+            <div className="space-y-4">
+                {/* Поиск + горизонтальные карточки */}
+                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
                     <input
                         type="text"
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         placeholder="Поиск: ник или PR ID"
-                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-xl px-3 py-2 text-sm text-white"
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/20 transition-colors"
                     />
-                    <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
+                    <div className="flex flex-wrap gap-2">
                         {loading ? (
-                            <div className="text-white/50 text-sm">Загрузка...</div>
+                            <div className="text-white/50 text-sm py-1">Загрузка...</div>
                         ) : filteredAssistants.length === 0 ? (
-                            <div className="text-white/40 text-sm">Ничего не найдено</div>
+                            <div className="text-white/40 text-sm py-1">Ничего не найдено</div>
                         ) : (
                             filteredAssistants.map((assistant) => (
                                 <button
                                     key={assistant.pr_id}
                                     onClick={() => setSelectedPrId(String(assistant.pr_id))}
-                                    className={`w-full text-left rounded-xl border px-3 py-2 transition-colors ${String(assistant.pr_id) === selectedPrId ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200' : 'border-white/10 bg-white/5 text-white/80 hover:bg-white/10'}`}
+                                    className={`text-left rounded-xl border px-3 py-2 transition-all text-sm shrink-0 ${String(assistant.pr_id) === selectedPrId
+                                        ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200 shadow-[0_0_10px_rgba(99,102,241,0.15)]'
+                                        : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white/90 hover:border-white/20'
+                                        }`}
                                 >
-                                    <div className="font-medium truncate">{assistant.nickname}</div>
-                                    <div className="text-xs text-white/50">PR ID: {assistant.pr_id}</div>
+                                    <div className="font-medium">{assistant.nickname}</div>
                                 </button>
                             ))
                         )}
                     </div>
                 </div>
 
-                <div className="xl:col-span-3 space-y-4">
+                <div className="space-y-4">
                     {!selectedAssistant ? (
-                        <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-8 text-white/50 text-center">
+                        <div className="bg-black/20 border border-white/5 rounded-2xl p-8 text-white/50 text-center">
                             Выберите ассистента для управления
                         </div>
                     ) : (
                         <>
-                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
                                 <div className="bg-white/5 rounded-xl p-3">
                                     <div className="text-xs text-white/50">Ник</div>
-                                    <div className="text-white font-semibold">{selectedAssistant.nickname}</div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="text-white font-semibold">{selectedAssistant.nickname}</div>
+                                        <button
+                                            onClick={handleCopyId}
+                                            title={`Скопировать PR ID: ${selectedPrId}`}
+                                            className="ml-auto p-1 rounded-lg text-white/30 hover:text-white/80 hover:bg-white/10 transition-all"
+                                        >
+                                            {copiedId
+                                                ? <Check className="w-3.5 h-3.5 text-green-400" />
+                                                : <Clipboard className="w-3.5 h-3.5" />}
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
                                     <div className="text-xs text-white/50">Баллы</div>
@@ -723,7 +735,7 @@ const AssistantsManagement = () => {
                             </div>
 
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
                                     <div className="text-white font-semibold flex items-center gap-2">
                                         <Coins className="w-4 h-4 text-green-400" />Баллы
                                     </div>
@@ -733,7 +745,7 @@ const AssistantsManagement = () => {
                                             step="0.0001"
                                             value={pointsForm.delta}
                                             onChange={(e) => setPointsForm((prev) => ({ ...prev, delta: e.target.value }))}
-                                            className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
                                             placeholder="Изменение баллов (дельта)"
                                         />
                                         {pointsForm.delta && !isNaN(Number(pointsForm.delta)) && (
@@ -751,7 +763,7 @@ const AssistantsManagement = () => {
                                     </button>
                                 </div>
 
-                                <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
                                     <div className="text-white font-semibold flex items-center gap-2"><Shield className="w-4 h-4 text-amber-400" />Санкции и выговоры</div>
                                     <div className="grid grid-cols-2 gap-2">
                                         <div className="relative">
@@ -761,7 +773,7 @@ const AssistantsManagement = () => {
                                                 min="0"
                                                 value={sanctionsForm.penalty_points}
                                                 onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_points: e.target.value }))}
-                                                className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
+                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
                                                 placeholder="± Баллы"
                                             />
                                             {sanctionsForm.penalty_points && !isNaN(Number(sanctionsForm.penalty_points)) && (
@@ -777,7 +789,7 @@ const AssistantsManagement = () => {
                                                 min="0"
                                                 value={sanctionsForm.penalty_percent}
                                                 onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_percent: e.target.value }))}
-                                                className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
+                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
                                                 placeholder="± Проценты"
                                             />
                                             {sanctionsForm.penalty_percent && !isNaN(Number(sanctionsForm.penalty_percent)) && (
@@ -796,22 +808,19 @@ const AssistantsManagement = () => {
                                     </button>
 
                                     <div className="pt-2 border-t border-white/10">
-                                        <select
-                                            value={warningsForm.target_state}
-                                            onChange={(e) => setWarningsForm((prev) => ({ ...prev, target_state: e.target.value }))}
-                                            className={`w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm font-semibold outline-none focus:border-white/30 mb-2 cursor-pointer transition-colors ${warningsForm.target_state === '0-0' ? 'text-green-400' :
-                                                warningsForm.target_state === '0-1' ? 'text-yellow-400' :
-                                                    warningsForm.target_state === '1-0' ? 'text-orange-400' :
-                                                        warningsForm.target_state === '1-1' ? 'text-red-400' :
-                                                            'text-white/60'
-                                                }`}
-                                        >
-                                            <option value="" disabled className="text-white/60 font-normal">Выберите состояние выговоров</option>
-                                            <option value="0-0" className="text-green-400 font-semibold bg-[#2a2a2a]">🟢 [0/2][0/2] — Нет выговоров</option>
-                                            <option value="0-1" className="text-yellow-400 font-semibold bg-[#2a2a2a]">🟡 [0/2][1/2] — 1 Устный</option>
-                                            <option value="1-0" className="text-orange-400 font-semibold bg-[#2a2a2a]">🟠 [1/2][0/2] — 1 Строгий</option>
-                                            <option value="1-1" className="text-red-400 font-semibold bg-[#2a2a2a]">🔴 [1/2][1/2] — 1 Строгий, 1 Устный</option>
-                                        </select>
+                                        <div className="mb-2">
+                                            <CustomDropdown
+                                                value={warningsForm.target_state}
+                                                onChange={(v) => setWarningsForm((prev) => ({ ...prev, target_state: v }))}
+                                                placeholder="Выберите состояние выговоров"
+                                                options={[
+                                                    { value: '0-0', label: '🟢 [0/2][0/2] — Нет выговоров', colorClass: 'text-green-400' },
+                                                    { value: '0-1', label: '🟡 [0/2][1/2] — 1 Устный', colorClass: 'text-yellow-400' },
+                                                    { value: '1-0', label: '🟠 [1/2][0/2] — 1 Строгий', colorClass: 'text-orange-400' },
+                                                    { value: '1-1', label: '🔴 [1/2][1/2] — 1 Строгий, 1 Устный', colorClass: 'text-red-400' },
+                                                ]}
+                                            />
+                                        </div>
 
                                         <button
                                             onClick={() => void handleWarningsUpdate()}
@@ -826,21 +835,21 @@ const AssistantsManagement = () => {
 
 
                             {/* Role & Delete */}
-                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 flex items-center gap-4">
+                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 flex items-center gap-4">
                                 <div className="flex-1">
                                     <label className="text-xs text-white/50 mb-1 block">Роль</label>
-                                    <select
+                                    <CustomDropdown
                                         value={selectedAssistant.role || 'employee'}
-                                        onChange={(e) => void handleRoleChange(e.target.value)}
+                                        onChange={(v) => void handleRoleChange(v)}
                                         disabled={busy}
-                                        className="w-full bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
-                                    >
-                                        <option value="junior_employee">Стажер</option>
-                                        <option value="employee">Сотрудник</option>
-                                        <option value="senior_employee">Старший сотрудник</option>
-                                        <option value="manager">Менеджер</option>
-                                        <option value="developer">Разработчик</option>
-                                    </select>
+                                        options={[
+                                            { value: 'junior_employee', label: 'Стажер' },
+                                            { value: 'employee', label: 'Сотрудник' },
+                                            { value: 'senior_employee', label: 'Старший сотрудник' },
+                                            { value: 'manager', label: 'Менеджер' },
+                                            { value: 'developer', label: 'Разработчик' },
+                                        ]}
+                                    />
                                 </div>
                                 <button
                                     onClick={() => void handleDeleteAssistant()}
@@ -853,7 +862,7 @@ const AssistantsManagement = () => {
                             </div>
 
 
-                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div className="text-white font-semibold flex items-center gap-2"><Timer className="w-4 h-4 text-indigo-400" />Ручная сессия</div>
 
@@ -861,20 +870,22 @@ const AssistantsManagement = () => {
                                 <div className="space-y-3">
                                     {/* Row 1: Target type + selector */}
                                     <div className="flex flex-wrap items-center gap-2">
-                                        <select
-                                            value={manualSessionForm.target_type}
-                                            onChange={(e) => setManualSessionForm((prev) => ({
-                                                ...prev,
-                                                target_type: e.target.value,
-                                                target_id: '',
-                                                priority: '0',
-                                            }))}
-                                            className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                        >
-                                            <option value="streamer">Стример</option>
-                                            <option value="event">Событие</option>
-                                            <option value="manual">Manual</option>
-                                        </select>
+                                        <div className="shrink-0 w-36">
+                                            <CustomDropdown
+                                                value={manualSessionForm.target_type}
+                                                onChange={(v) => setManualSessionForm((prev) => ({
+                                                    ...prev,
+                                                    target_type: v,
+                                                    target_id: '',
+                                                    priority: '0',
+                                                }))}
+                                                options={[
+                                                    { value: 'streamer', label: 'Стример' },
+                                                    { value: 'event', label: 'Событие' },
+                                                    { value: 'manual', label: 'Manual' },
+                                                ]}
+                                            />
+                                        </div>
                                         {manualSessionForm.target_type !== 'manual' && (
                                             <div className="flex-1 min-w-[200px]">
                                                 <CustomSelect
@@ -906,7 +917,7 @@ const AssistantsManagement = () => {
                                                 type="text"
                                                 value={manualSessionForm.target_name}
                                                 onChange={(e) => setManualSessionForm((prev) => ({ ...prev, target_name: e.target.value }))}
-                                                className="flex-1 min-w-[150px] bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                className="flex-1 min-w-[150px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
                                                 placeholder="Название"
                                             />
                                         )}
@@ -957,7 +968,7 @@ const AssistantsManagement = () => {
                                                 value={manualSessionForm.priority}
                                                 onChange={(e) => setManualSessionForm((prev) => ({ ...prev, priority: e.target.value }))}
                                                 disabled={manualSessionForm.is_probation}
-                                                className="w-16 bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
+                                                className="w-16 bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
                                             />
                                         </div>
                                         <label className="flex items-center gap-2 cursor-pointer group">
@@ -984,7 +995,7 @@ const AssistantsManagement = () => {
                                 </button>
                             </div>
 
-                            <div className="bg-[#1e1e1e] border border-white/5 rounded-2xl p-4 space-y-3">
+                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div className="text-white font-semibold">Сессии ассистента</div>
                                     <button
@@ -1023,20 +1034,22 @@ const AssistantsManagement = () => {
                                                 <div className="space-y-3">
                                                     {/* Row 1: Target type + selector */}
                                                     <div className="flex flex-wrap items-center gap-2">
-                                                        <select
-                                                            value={sessionEdit.target_type}
-                                                            onChange={(e) => setSessionEdit((prev) => ({
-                                                                ...prev,
-                                                                target_type: e.target.value,
-                                                                target_id: '',
-                                                                priority_override: '0',
-                                                            }))}
-                                                            className="bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                        >
-                                                            <option value="streamer">Стример</option>
-                                                            <option value="event">Событие</option>
-                                                            <option value="manual">Manual</option>
-                                                        </select>
+                                                        <div className="shrink-0 w-36">
+                                                            <CustomDropdown
+                                                                value={sessionEdit.target_type}
+                                                                onChange={(v) => setSessionEdit((prev) => ({
+                                                                    ...prev,
+                                                                    target_type: v,
+                                                                    target_id: '',
+                                                                    priority_override: '0',
+                                                                }))}
+                                                                options={[
+                                                                    { value: 'streamer', label: 'Стример' },
+                                                                    { value: 'event', label: 'Событие' },
+                                                                    { value: 'manual', label: 'Manual' },
+                                                                ]}
+                                                            />
+                                                        </div>
                                                         {sessionEdit.target_type !== 'manual' && (
                                                             <div className="flex-1 min-w-[200px]">
                                                                 <CustomSelect
@@ -1068,7 +1081,7 @@ const AssistantsManagement = () => {
                                                                 type="text"
                                                                 value={sessionEdit.target_name}
                                                                 onChange={(e) => setSessionEdit((prev) => ({ ...prev, target_name: e.target.value }))}
-                                                                className="flex-1 min-w-[150px] bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                                className="flex-1 min-w-[150px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
                                                                 placeholder="Название"
                                                             />
                                                         )}
@@ -1117,7 +1130,7 @@ const AssistantsManagement = () => {
                                                                 max="3"
                                                                 value={sessionEdit.priority_override}
                                                                 onChange={(e) => setSessionEdit((prev) => ({ ...prev, priority_override: e.target.value }))}
-                                                                className="w-16 bg-[#2a2a2a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+                                                                className="w-16 bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
                                                                 disabled={sessionEdit.is_probation}
                                                             />
                                                         </div>

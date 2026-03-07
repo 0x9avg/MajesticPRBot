@@ -89,6 +89,15 @@ ID_SETUP_POINTS = "guild_setup_points"
 ID_TOGGLE_GTA_FILTER = "guild_toggle_gta_filter"
 ID_BTN_HOME = "admin_home"
 
+GUILD_SECTION_VIEW_PERMS = ["guild.view"]
+GUILD_SECTION_UPDATE_PERMS = [
+    "guild.settings.update",
+    "guild.templates.update",
+    "guild.rates.update",
+]
+GUILD_SETTINGS_UPDATE_PERMS = ["guild.settings.update"]
+GUILD_RATES_UPDATE_PERMS = ["guild.rates.update"]
+
 
 # =============================================================================
 # Views
@@ -98,33 +107,44 @@ ID_BTN_HOME = "admin_home"
 class GuildSettingsView(disnake.ui.View):
     """View for guild settings - points configuration."""
 
-    def __init__(self, user_id: int, gta_filter_on: bool = False):
+    def __init__(
+        self,
+        user_id: int,
+        gta_filter_on: bool = False,
+        permissions: dict[str, bool] | None = None,
+    ):
         super().__init__(timeout=None)
         self.user_id = user_id
+        permissions_map = permissions or {}
 
-        # Points config button
-        self.add_item(
-            disnake.ui.Button(
-                label="💰 Настроить баллы",
-                custom_id=ID_SETUP_POINTS,
-                style=disnake.ButtonStyle.success,
-                row=0,
-            )
-        )
+        def has_any(required: list[str]) -> bool:
+            return any(bool(permissions_map.get(key, False)) for key in required)
 
-        # GTA filter toggle button
-        self.add_item(
-            disnake.ui.Button(
-                label="🎮 Только GTA" if gta_filter_on else "🎮 Все стримеры",
-                custom_id=ID_TOGGLE_GTA_FILTER,
-                style=(
-                    disnake.ButtonStyle.primary
-                    if gta_filter_on
-                    else disnake.ButtonStyle.secondary
-                ),
-                row=0,
+        if has_any(GUILD_RATES_UPDATE_PERMS):
+            # Points config button
+            self.add_item(
+                disnake.ui.Button(
+                    label="💰 Настроить баллы",
+                    custom_id=ID_SETUP_POINTS,
+                    style=disnake.ButtonStyle.success,
+                    row=0,
+                )
             )
-        )
+
+        if has_any(GUILD_SETTINGS_UPDATE_PERMS):
+            # GTA filter toggle button
+            self.add_item(
+                disnake.ui.Button(
+                    label="🎮 Только GTA" if gta_filter_on else "🎮 Все стримеры",
+                    custom_id=ID_TOGGLE_GTA_FILTER,
+                    style=(
+                        disnake.ButtonStyle.primary
+                        if gta_filter_on
+                        else disnake.ButtonStyle.secondary
+                    ),
+                    row=0,
+                )
+            )
 
         # Back to main
         self.add_item(
@@ -261,16 +281,30 @@ class AdminGuild(commands.Cog):
 
             # Navigation from main menu
             if custom_id == "admin_guild":
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=GUILD_SECTION_UPDATE_PERMS,
+                    require_all=GUILD_SECTION_VIEW_PERMS,
+                    error_message="❌ Нет доступа к настройкам сервера.",
+                ):
+                    return
                 data = await self.api.get_guild_settings()
                 gta_filter_on = (
                     data.get("monitoring_filter_gta", False) if data else False
                 )
+                permissions = await self.bot.get_user_permissions(user_id)
                 await interaction.edit_original_response(
                     embed=create_guild_settings_embed(data),
-                    view=GuildSettingsView(user_id, gta_filter_on),
+                    view=GuildSettingsView(user_id, gta_filter_on, permissions),
                 )
 
             elif custom_id == ID_TOGGLE_GTA_FILTER:
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=GUILD_SETTINGS_UPDATE_PERMS,
+                    error_message="❌ Нет прав на изменение настроек сервера.",
+                ):
+                    return
                 # Toggle GTA filter
                 data = await self.api.get_guild_settings()
                 current_value = (
@@ -280,17 +314,15 @@ class AdminGuild(commands.Cog):
 
                 await self.api.update_guild_settings(monitoring_filter_gta=new_value)
 
-                # Refresh monitoring messages
-                await self.api.refresh_monitoring()
-
                 # Refresh embed and view
                 data = await self.api.get_guild_settings()
                 gta_filter_on = (
                     data.get("monitoring_filter_gta", False) if data else False
                 )
+                permissions = await self.bot.get_user_permissions(user_id)
                 await interaction.edit_original_response(
                     embed=create_guild_settings_embed(data),
-                    view=GuildSettingsView(user_id, gta_filter_on),
+                    view=GuildSettingsView(user_id, gta_filter_on, permissions),
                 )
 
                 status_text = "включён" if new_value else "выключен"
@@ -299,6 +331,12 @@ class AdminGuild(commands.Cog):
                 )
 
             elif custom_id == ID_SETUP_POINTS:
+                if not await self.bot.ensure_user_permissions(
+                    interaction,
+                    require_any=GUILD_RATES_UPDATE_PERMS,
+                    error_message="❌ Нет прав на изменение ставок баллов.",
+                ):
+                    return
                 # Open points config modal
                 data = await self.api.get_guild_settings()
                 modal = PointsConfigModal(self.bot, data or {})

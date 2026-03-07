@@ -77,6 +77,9 @@ const createFetchMock = () =>
                 ],
             });
         }
+        if (url.endsWith('/api/assistants/101/session')) {
+            return ok({ status: 'success', data: {} });
+        }
         return new Response('{}', { status: 404 });
     });
 
@@ -110,7 +113,7 @@ describe('AssistantsManagement', () => {
         });
     });
 
-    it('keeps manual mode and requires comment', async () => {
+    it('keeps manual mode and allows session without comment', async () => {
         const fetchMock = createFetchMock();
         vi.stubGlobal('fetch', fetchMock);
 
@@ -127,8 +130,13 @@ describe('AssistantsManagement', () => {
         await user.click(screen.getByRole('button', { name: 'Добавить ручную сессию' }));
 
         await waitFor(() => {
-            expect(screen.getByText('Для manual-сессии обязателен комментарий')).toBeInTheDocument();
+            expect(screen.queryByText('Для manual-сессии обязателен комментарий')).not.toBeInTheDocument();
+            expect(screen.getByText('Изменения сохранены')).toBeInTheDocument();
         });
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/api/assistants/101/session',
+            expect.objectContaining({ method: 'POST' })
+        );
     });
 });
-

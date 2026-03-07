@@ -8,8 +8,6 @@ export type KnownRole =
 export type Role = KnownRole | (string & {});
 
 export interface Permissions {
-    can_register_users?: boolean;
-    can_view_admin_logs?: boolean;
     [key: string]: boolean | undefined;
 }
 
@@ -25,4 +23,5 @@ export interface UserContext {
 
 export interface OutletUserContext {
     user: UserContext | null;
+    authResolved?: boolean;
 }

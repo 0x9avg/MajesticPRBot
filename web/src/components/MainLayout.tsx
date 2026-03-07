@@ -4,33 +4,35 @@ import { useState, useEffect } from 'react';
 import type { Assistant } from '../types/domain';
 import type { UserContext } from '../types/auth';
 import { unwrapApiData } from '../types/api';
+import { apiFetch, setAccessToken, getAccessToken, onLogout } from '../api/client';
 
 export interface MainLayoutOutletContext {
     user: UserContext | null;
+    authResolved: boolean;
 }
 
 export default function MainLayout() {
     const navigate = useNavigate();
     const [user, setUser] = useState<UserContext | null>(null);
+    const [authResolved, setAuthResolved] = useState(false);
 
     useEffect(() => {
         const clearAuthAndRedirect = () => {
-            localStorage.removeItem('access_token');
+            setAccessToken(null);
             localStorage.removeItem('refresh_token');
             localStorage.removeItem('user');
             setUser(null);
+            setAuthResolved(true);
             navigate('/login', { replace: true });
         };
 
+        // Register the logout callback so the API client can trigger hard logouts
+        onLogout(clearAuthAndRedirect);
+
         const fetchUserData = async () => {
             try {
-                const token = localStorage.getItem('access_token');
-                if (!token) return;
-
-                // 1. Get Base User Info
-                const authRes = await fetch('/api/auth/me', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
+                // 1. Get Base User Info (uses apiFetch for silent refresh)
+                const authRes = await apiFetch('/api/auth/me');
 
                 if (authRes.status === 401) {
                     clearAuthAndRedirect();
@@ -49,7 +51,7 @@ export default function MainLayout() {
                 // 2. Try fetching full assistant data (matches UserProfile logic)
                 try {
                     // Try by ID first
-                    const assistantRes = await fetch(`/api/assistants/${authUser.discord_id}`);
+                    const assistantRes = await apiFetch(`/api/assistants/${authUser.discord_id}`);
                     if (assistantRes.ok) {
                         const json = await assistantRes.json() as unknown;
                         const assistantData = unwrapApiData<Partial<Assistant>>(json);
@@ -62,7 +64,7 @@ export default function MainLayout() {
                         }
                     } else {
                         // Fallback: Try finding by nickname
-                        const allRes = await fetch('/api/assistants');
+                        const allRes = await apiFetch('/api/assistants');
                         if (allRes.ok) {
                             const allJson = await allRes.json() as unknown;
                             const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
@@ -89,6 +91,8 @@ export default function MainLayout() {
 
             } catch (err) {
                 console.error('Failed to update user data:', err);
+            } finally {
+                setAuthResolved(true);
             }
         };
 
@@ -106,35 +110,37 @@ export default function MainLayout() {
             }
         }
 
+        // Restore access token from localStorage on mount (page refresh)
+        if (!getAccessToken()) {
+            const storedToken = localStorage.getItem('access_token');
+            if (storedToken) {
+                setAccessToken(storedToken);
+            }
+        }
+
         // Then refresh from network
         fetchUserData();
     }, [navigate]);
 
     const handleLogout = async () => {
-        const token = localStorage.getItem('access_token');
-
         try {
-            if (token) {
-                await fetch('/api/auth/logout', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
+            if (getAccessToken() || localStorage.getItem('access_token')) {
+                await apiFetch('/api/auth/logout/current', { method: 'POST' });
             }
         } catch (err) {
             console.warn('Logout request failed:', err);
         } finally {
-            localStorage.removeItem('access_token');
+            setAccessToken(null);
             localStorage.removeItem('refresh_token');
             localStorage.removeItem('user');
             setUser(null);
+            setAuthResolved(true);
             navigate('/login', { replace: true });
         }
     };
 
     return (
-        <div className="min-h-screen bg-[#1a1a1a] text-white flex flex-col font-sans">
+        <div className="min-h-screen bg-[#1a1a1a] text-white flex flex-col font-sans overflow-hidden">
             <header className="fixed top-0 left-0 right-0 z-50 bg-[#1a1a1a]/80 backdrop-blur-md border-b border-white/5 h-16 flex items-center justify-between px-6 lg:px-12">
                 <div
                     className="flex items-center gap-4 cursor-pointer hover:opacity-80 transition-opacity"
@@ -178,14 +184,14 @@ export default function MainLayout() {
                 </div>
             </header>
 
-            <main className="flex-1 pt-24 px-6 lg:px-12 pb-12 relative">
+            <main className="flex-1 pt-24 px-6 lg:px-12 pb-12 relative overflow-hidden">
                 <div className="fixed top-0 left-0 w-full h-full pointer-events-none z-0 overflow-hidden">
                     <div className="absolute top-[-10%] left-[-10%] w-[40vw] h-[40vw] bg-[#3b82f6]/5 rounded-full blur-[120px]" />
                     <div className="absolute bottom-[-10%] right-[-10%] w-[30vw] h-[30vw] bg-[#e81c5a]/5 rounded-full blur-[120px]" />
                 </div>
 
                 <div className="relative z-10 max-w-7xl mx-auto">
-                    <Outlet context={{ user } satisfies MainLayoutOutletContext} />
+                    <Outlet context={{ user, authResolved } satisfies MainLayoutOutletContext} />
                 </div>
             </main>
         </div>

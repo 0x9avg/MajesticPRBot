@@ -23,7 +23,7 @@ const baseUser = {
     nickname: 'Tester',
     role: 'manager',
     require_password_change: false,
-    permissions: { can_register_users: true },
+    permissions: { 'admin.users.create': true },
 };
 
 describe('MainLayout', () => {
@@ -34,6 +34,15 @@ describe('MainLayout', () => {
 
     it('loads cached user and logs out locally when token is absent', async () => {
         localStorage.setItem('user', JSON.stringify(baseUser));
+        vi.stubGlobal(
+            'fetch',
+            vi.fn().mockResolvedValue(
+                new Response('{}', {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                })
+            )
+        );
 
         render(<MainLayout />);
 
@@ -68,11 +77,17 @@ describe('MainLayout', () => {
         render(<MainLayout />);
 
         await waitFor(() => {
-            expect(fetchMock).toHaveBeenCalledWith('/api/auth/me', {
-                headers: { Authorization: 'Bearer bad-token' },
-            });
+            expect(fetchMock).toHaveBeenCalled();
             expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true });
         });
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            '/api/auth/me',
+            expect.objectContaining({
+                headers: expect.any(Headers),
+                credentials: 'include',
+            })
+        );
 
         expect(localStorage.getItem('access_token')).toBeNull();
         expect(localStorage.getItem('refresh_token')).toBeNull();

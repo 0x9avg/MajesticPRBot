@@ -1,6 +1,6 @@
 """
 Authentication Service for API.
-Handles JWT token creation and verification.
+Handles JWT token creation, verification, and refresh token rotation.
 """
 
 import hashlib
@@ -15,7 +15,7 @@ MSK = timezone(timedelta(hours=3))
 
 
 class AuthService:
-    """JWT-based authentication service."""
+    """JWT-based authentication service with refresh token rotation."""
 
     secret_key: str
     algorithm: str
@@ -36,6 +36,10 @@ class AuthService:
         self.refresh_token_expire_days = refresh_token_expire_days
         self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+    # =========================================================================
+    # Password helpers
+    # =========================================================================
+
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash."""
         return self.pwd_context.verify(plain_password, hashed_password)
@@ -43,6 +47,10 @@ class AuthService:
     def hash_password(self, password: str) -> str:
         """Hash a password."""
         return self.pwd_context.hash(password)
+
+    # =========================================================================
+    # Access token
+    # =========================================================================
 
     def create_access_token(
         self,
@@ -70,20 +78,6 @@ class AuthService:
 
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
-    def create_refresh_token(self, user_id: int) -> Tuple[str, datetime]:
-        """Create a refresh token. Returns (token, expires_at)."""
-        expires_at = datetime.now(MSK) + timedelta(
-            days=self.refresh_token_expire_days
-        )
-
-        # Generate a secure random token
-        random_bytes = secrets.token_bytes(32)
-        token_hash = hashlib.sha256(
-            f"{user_id}:{random_bytes.hex()}:{expires_at.isoformat()}".encode()
-        ).hexdigest()
-
-        return token_hash, expires_at
-
     def verify_token(self, token: str) -> dict:
         """Verify and decode a JWT token. Raises JWTError on failure."""
         payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
@@ -98,3 +92,39 @@ class AuthService:
             return payload
         except JWTError:
             return None
+
+    # =========================================================================
+    # Refresh token (opaque)
+    # =========================================================================
+
+    @staticmethod
+    def generate_refresh_token() -> str:
+        """Generate a cryptographically secure opaque refresh token."""
+        return secrets.token_urlsafe(48)
+
+    @staticmethod
+    def hash_token(token: str) -> str:
+        """Hash a token using SHA-256 for secure DB storage."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_refresh_token(self, user_id: int) -> Tuple[str, str, datetime]:
+        """
+        Create a refresh token.
+
+        Returns:
+            (raw_token, token_hash, expires_at)
+            - raw_token: sent to client as HttpOnly cookie
+            - token_hash: stored in DB (never store raw)
+            - expires_at: expiration timestamp
+        """
+        raw_token = self.generate_refresh_token()
+        token_hash = self.hash_token(raw_token)
+        expires_at = datetime.now(MSK) + timedelta(
+            days=self.refresh_token_expire_days
+        )
+        return raw_token, token_hash, expires_at
+
+    @staticmethod
+    def generate_family_id() -> str:
+        """Generate a unique family ID for a token rotation chain."""
+        return secrets.token_urlsafe(16)

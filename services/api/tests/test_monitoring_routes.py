@@ -10,6 +10,22 @@ MSK = timezone(timedelta(hours=3))
 pytestmark = pytest.mark.anyio
 
 
+def _developer_user() -> dict:
+    return {
+        "id": 99,
+        "username": "dev",
+        "nickname": "Dev",
+        "role": "developer",
+        "principal_type": "user",
+        "discord_id": 9099,
+        "require_password_change": False,
+        "permissions": {
+            "monitoring.refresh": True,
+            "monitoring.view": True,
+        },
+    }
+
+
 def _seed_streamer(
     fake_db,
     streamer_id: int,
@@ -42,21 +58,38 @@ def _seed_streamer(
     }
 
 
-async def _client(build_api_app, include_broker: bool = True):
-    app = build_api_app(monitoring_router, include_broker=include_broker)
+async def _client(
+    build_api_app,
+    include_broker: bool = True,
+    current_user: dict | None = None,
+):
+    app = build_api_app(
+        monitoring_router,
+        include_broker=include_broker,
+        current_user=current_user,
+    )
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 async def test_refresh_monitoring_with_and_without_broker(
     build_api_app, fake_broker
 ) -> None:
-    async with await _client(build_api_app, include_broker=True) as client:
+    dev_user = _developer_user()
+    async with await _client(
+        build_api_app,
+        include_broker=True,
+        current_user=dev_user,
+    ) as client:
         ok = await client.post("/api/monitoring/refresh", json={"force": True})
 
     assert ok.status_code == 200
     assert any(call[0] == "monitoring.refresh" for call in fake_broker.calls)
 
-    async with await _client(build_api_app, include_broker=False) as client:
+    async with await _client(
+        build_api_app,
+        include_broker=False,
+        current_user=dev_user,
+    ) as client:
         unavailable = await client.post(
             "/api/monitoring/refresh", json={"force": False}
         )
@@ -107,13 +140,17 @@ async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> 
         fake_db, 6004, "offline", online=False, game_id=32982, assignments=[]
     )
 
-    async with await _client(build_api_app) as client:
+    async with await _client(
+        build_api_app,
+        current_user=_developer_user(),
+    ) as client:
         response = await client.get("/api/monitoring/status")
 
     assert response.status_code == 200
     data = response.json()["data"]
 
-    assert data["total_streamers"] == 4
+    # Monitoring now builds from online streamer list.
+    assert data["total_streamers"] == 3
     assert data["online_count"] == 3
     assert data["gta_count"] == 2
     assert data["available_count"] == 1

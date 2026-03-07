@@ -4,6 +4,7 @@ import StreamerCard from './components/StreamerCard';
 import StreamerSettingsModal from './components/StreamerSettingsModal';
 import type { Streamer } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
+import { apiFetch } from '../../api/client';
 
 export function MediaDashboard() {
     const [streamers, setStreamers] = React.useState<Streamer[]>([]);
@@ -19,7 +20,7 @@ export function MediaDashboard() {
 
     const fetchStreamers = async () => {
         try {
-            const response = await fetch('/api/streamers');
+            const response = await apiFetch('/api/streamers');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
@@ -43,12 +44,10 @@ export function MediaDashboard() {
     }) => {
         if (!selectedStreamer) return;
         try {
-            const token = localStorage.getItem('access_token');
-            const response = await fetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
+            const response = await apiFetch(`/api/streamers/${selectedStreamer.streamer_id}`, {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify(updates)
             });

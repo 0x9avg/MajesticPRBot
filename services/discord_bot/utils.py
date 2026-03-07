@@ -55,6 +55,35 @@ class UserAuthCache:
         self._cache.clear()
 
 
+class UserPermissionsCache:
+    """Simple TTL cache for user permission maps."""
+
+    def __init__(self, ttl_seconds: int = 120):
+        self._cache: Dict[int, Tuple[Dict[str, bool], float]] = {}
+        self._ttl = ttl_seconds
+
+    def get(self, user_id: int) -> Optional[Dict[str, bool]]:
+        if user_id not in self._cache:
+            return None
+
+        permissions, timestamp = self._cache[user_id]
+        if time.time() - timestamp > self._ttl:
+            del self._cache[user_id]
+            return None
+
+        return dict(permissions)
+
+    def set(self, user_id: int, permissions: Dict[str, bool]) -> None:
+        normalized = {str(k): bool(v) for k, v in (permissions or {}).items()}
+        self._cache[user_id] = (normalized, time.time())
+
+    def invalidate(self, user_id: int) -> None:
+        self._cache.pop(user_id, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
 def parse_to_unix(value: Union[str, datetime.datetime, None]) -> int:
     """
     Convert API timestamp (ISO 8601) or datetime object to Unix timestamp.
@@ -218,7 +247,7 @@ def create_streamers_component(
     now_unix = int(time.time())
     
     # Constants for pagination
-    STREAMERS_PER_PAGE = 5
+    STREAMERS_PER_PAGE = 3
 
     # Handle empty states - return single page
     if subscribed_count == 0 and not events:
@@ -246,13 +275,31 @@ def create_streamers_component(
             accent_colour=disnake.Colour(65358),
         )]
 
-    # Sort streamers: pinned first, then by priority DESC
-    online_streamers_sorted = sorted(
-        online_streamers,
-        key=lambda s: (s.get("is_pinned", False), s.get("priority", 0)),
-        reverse=True,
-    )
-    
+    # Sort streamers and events together
+    activities = []
+    for s in online_streamers:
+        activities.append({**s, "activity_type": "streamer"})
+    for e in events:
+        activities.append({**e, "activity_type": "event"})
+
+    def get_sort_key(item):
+        is_pinned = item.get("is_pinned", False)
+        priority = item.get("priority", 0)
+
+        if item["activity_type"] == "streamer":
+            pr_slots = item.get("pr_slots", 1)
+            assignments_count = len(item.get("assignments", []))
+            is_unassigned = assignments_count < pr_slots
+        else:
+            required_pr = item.get("pr_slots", item.get("required_pr_count", 0))
+            participants_count = len(item.get("participants", []))
+            is_unassigned = participants_count < required_pr
+
+        # Sort order: 1. Pinned 2. Priority 3. Unassigned (Free)
+        return (is_pinned, priority, is_unassigned)
+
+    activities_sorted = sorted(activities, key=get_sort_key, reverse=True)
+
     def build_streamer_components(streamer: Dict[str, Any]) -> List:
         """Build 4 components for a single streamer."""
         streamer_name = streamer["streamer_name"]
@@ -320,58 +367,54 @@ def create_streamers_component(
             pr_line = f"👤 PR ({participant_count}/{slots}): {mentions}"
         else:
             pr_line = f"👤 PR (0/{slots}): *свободен*"
+            
+        priority = event.get("priority", 0)
 
         return [
             disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small),
-            disnake.ui.TextDisplay(content=f"### {event['name']}"),
+            disnake.ui.TextDisplay(content=f"### 🎉 {event['name']}"),
             disnake.ui.TextDisplay(
                 content=f"{event.get('description', '')[:100]}{'...' if len(event.get('description', '')) > 100 else ''}"
             ),
             disnake.ui.TextDisplay(
-                content=f"{pr_line}\n🕒 **Начало:** <t:{start_unix}:R>"
+                content=f"🏷 Приоритет: **{priority}**\n{pr_line}\n🕒 **Начало:** <t:{start_unix}:R>"
             ),
         ]
 
     # Build all pages
     pages = []
     
-    # Split streamers into chunks
-    streamer_chunks = [
-        online_streamers_sorted[i:i + STREAMERS_PER_PAGE]
-        for i in range(0, len(online_streamers_sorted), STREAMERS_PER_PAGE)
+    # Split activities into chunks
+    chunks = [
+        activities_sorted[i:i + STREAMERS_PER_PAGE]
+        for i in range(0, len(activities_sorted), STREAMERS_PER_PAGE)
     ]
     
-    if not streamer_chunks:
-        streamer_chunks = [[]]  # At least one empty chunk for events
+    if not chunks:
+        chunks = [[]]  # At least one empty chunk
     
-    for page_idx, chunk in enumerate(streamer_chunks):
+    for page_idx, chunk in enumerate(chunks):
         components = []
         
         # First page: add header
         if page_idx == 0:
             # Use online_count if provided, else fallback to len of list
             display_online = online_count if online_count is not None else len(online_streamers)
-            components.append(disnake.ui.TextDisplay(content="### 🎥 Стримеры онлайн — Majestic"))
+            components.append(disnake.ui.TextDisplay(content="### 🎥 Активности онлайн — Majestic"))
             components.append(disnake.ui.TextDisplay(
                 content=f"**Онлайн**: {display_online} · **В GTA:** {gta_count} · **Всего:** {subscribed_count}"
             ))
         
-        # Add streamer components
-        for streamer in chunk:
-            components.extend(build_streamer_components(streamer))
+        # Add components
+        for item in chunk:
+            if item["activity_type"] == "streamer":
+                components.extend(build_streamer_components(item))
+            else:
+                components.extend(build_event_components(item))
         
-        # Last page: add events and footer
-        is_last_page = page_idx == len(streamer_chunks) - 1
-        if is_last_page:
-            if events:
-                components.append(disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.large))
-                components.append(disnake.ui.TextDisplay(content="### 🎉 Активные события"))
-                for event in events:
-                    components.extend(build_event_components(event))
-            
-            # Footer timestamp
-            components.append(disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small))
-            components.append(disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"))
+        # Add footer to every page
+        components.append(disnake.ui.Separator(divider=True, spacing=disnake.SeparatorSpacing.small))
+        components.append(disnake.ui.TextDisplay(content=f"-# 🔄 Обновлено: <t:{now_unix}:R>"))
         
         pages.append(disnake.ui.Container(*components, accent_colour=disnake.Colour(65358)))
     
@@ -450,23 +493,6 @@ def create_notification_component(
 
     return result
 
-
-def create_monitoring_select(
-    available_streamers: list, events: list = None
-) -> disnake.ui.ActionRow:
-    """Create action row with Claim/Unclaim buttons for monitoring."""
-    claim_btn = disnake.ui.Button(
-        label="📥 Закрепиться",
-        style=disnake.ButtonStyle.success,
-        custom_id="monitoring_claim",
-    )
-    unclaim_btn = disnake.ui.Button(
-        label="📤 Открепиться",
-        style=disnake.ButtonStyle.danger,
-        custom_id="monitoring_unclaim",
-    )
-    
-    return disnake.ui.ActionRow(claim_btn, unclaim_btn)
 
 
 def format_notification_template(

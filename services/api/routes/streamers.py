@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from services.broker import BrokerService
 
 from config import Config
-from dependencies import get_current_user
+from dependencies import require_permission
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -33,12 +33,26 @@ def get_broker(request: Request):
     return request.app.state.broker
 
 
+def _resolve_actor_id(principal: dict) -> int:
+    """Resolve immutable actor ID for audit fields from auth principal."""
+    if principal.get("principal_type") == "service":
+        return 0
+    discord_id = principal.get("discord_id")
+    if discord_id is None:
+        raise HTTPException(status_code=400, detail="User has no discord_id")
+    try:
+        return int(discord_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid discord_id")
+
+
 @router.get("")
 async def list_streamers(
     request: Request,
     db: "Database" = Depends(get_db),
     online_only: bool = Query(False, description="Filter only online streamers"),
     gta_only: bool = Query(False, description="Filter only GTA 5 streamers (used with online_only)"),
+    _principal: dict = Depends(require_permission("streamers.view")),
 ):
     """Get all streamers."""
     trace_id = get_trace_id(request)
@@ -80,6 +94,7 @@ async def get_streamer(
     request: Request,
     twitch_id: int,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("streamers.view")),
 ):
     """Get a specific streamer by Twitch ID."""
     trace_id = get_trace_id(request)
@@ -104,6 +119,7 @@ async def create_streamer(
     data: StreamerCreate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    principal: dict = Depends(require_permission("streamers.create")),
 ):
     """
     Add a new streamer.
@@ -113,6 +129,10 @@ async def create_streamer(
     2. Full mode (Twitch bot): Provide `streamer_id` + `streamer_name` → direct creation
     """
     trace_id = get_trace_id(request)
+    added_by_id = _resolve_actor_id(principal)
+    actor_name = principal.get("nickname") or principal.get("username")
+    if principal.get("principal_type") == "service":
+        actor_name = f"service:{principal.get('service_name', 'unknown')}"
 
     # Mode B: Full data from Twitch bot - direct creation
     if data.is_full_mode:
@@ -124,7 +144,7 @@ async def create_streamer(
             priority=data.priority,
             pr_slots=data.pr_slots,
             allow_juniors=data.allow_juniors,
-            added_by_id=data.added_by_id,
+            added_by_id=added_by_id,
             game_id=data.game_id,
             game_name=data.game_name,
             stream_title=data.stream_title,
@@ -148,6 +168,38 @@ async def create_streamer(
                 trace_id=trace_id,
             )
 
+        await db.log_admin_action_v2(
+            actor_name=actor_name or "Unknown",
+            actor_role=principal.get("role")
+            if principal.get("principal_type") == "user"
+            else "service",
+            action="streamer.create",
+            target_type="streamer",
+            target_id=str(data.streamer_id),
+            details={
+                "summary": f"Created streamer {data.streamer_name}",
+                "changes": {
+                    "after": {
+                        "streamer_id": data.streamer_id,
+                        "streamer_name": data.streamer_name,
+                        "priority": data.priority,
+                        "pr_slots": data.pr_slots,
+                        "allow_juniors": data.allow_juniors,
+                    }
+                },
+                "meta": {
+                    "ip": request.client.host if request.client else None,
+                    "request_path": str(request.url.path),
+                    "method": request.method,
+                    "actor_id": added_by_id,
+                    "principal_type": principal.get("principal_type"),
+                    "service_name": principal.get("service_name")
+                    if principal.get("principal_type") == "service"
+                    else None,
+                },
+            },
+        )
+
         response_data = StreamerResponse(**streamer)
         return JSONResponse(
             status_code=status.HTTP_201_CREATED,
@@ -169,9 +221,39 @@ async def create_streamer(
             {
                 "priority": data.priority,
                 "pr_slots": data.pr_slots,
-                "added_by_id": data.added_by_id,
+                "added_by_id": added_by_id,
             },
             trace_id=trace_id,
+        )
+
+        await db.log_admin_action_v2(
+            actor_name=actor_name or "Unknown",
+            actor_role=principal.get("role")
+            if principal.get("principal_type") == "user"
+            else "service",
+            action="streamer.create.requested",
+            target_type="streamer",
+            target_id=username or "unknown",
+            details={
+                "summary": f"Requested streamer verification for {username}",
+                "changes": {
+                    "after": {
+                        "twitch_url": username,
+                        "priority": data.priority,
+                        "pr_slots": data.pr_slots,
+                    }
+                },
+                "meta": {
+                    "ip": request.client.host if request.client else None,
+                    "request_path": str(request.url.path),
+                    "method": request.method,
+                    "actor_id": added_by_id,
+                    "principal_type": principal.get("principal_type"),
+                    "service_name": principal.get("service_name")
+                    if principal.get("principal_type") == "service"
+                    else None,
+                },
+            },
         )
 
         return JSONResponse(
@@ -196,7 +278,7 @@ async def update_streamer(
     data: StreamerUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_permission("streamers.update")),
 ):
     """Update streamer properties."""
     trace_id = get_trace_id(request)
@@ -333,6 +415,7 @@ async def remove_streamer(
     twitch_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("streamers.delete")),
 ):
     """Delete a streamer."""
     trace_id = get_trace_id(request)
@@ -366,6 +449,7 @@ async def update_streamer_status(
     data: StreamerStatusUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("streamers.status.update")),
 ):
     """
     Update streamer online status.
@@ -483,6 +567,7 @@ async def sync_streamers_status(
     request: Request,
     updates: List[dict],
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("streamers.status.update")),
 ):
     """
     Bulk update streamer statuses.

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from services.broker import BrokerService
 
 from config import Config
+from dependencies import require_permission
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -36,6 +37,7 @@ async def refresh_monitoring(
     data: MonitoringRefreshResponse,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
+    _principal: dict = Depends(require_permission("monitoring.refresh")),
 ):
     """
     Trigger monitoring message refresh.
@@ -75,6 +77,7 @@ async def refresh_monitoring(
 async def get_monitoring_status(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("monitoring.view")),
 ):
     """
     Get monitoring view model.
@@ -128,8 +131,6 @@ async def get_monitoring_status(
                         has_main = True
 
                 # Available if either slot is free
-                # Note: This list feeds the dropdown.
-                # Ideally we show if ANY slot is free.
                 if not (has_main and has_probation):
                     available_for_claim.append(
                         {
@@ -141,8 +142,7 @@ async def get_monitoring_status(
                         }
                     )
 
-        # Process events for claim dropdown
-    # Events appear in available_for_claim if they have free slots
+    # Process events for claim dropdown
     active_events = []
     for e in events:
         active_events.append({
@@ -166,7 +166,7 @@ async def get_monitoring_status(
                     "streamer_name": f"[Событие] {e['name']}",
                     "priority": e.get("priority", 0),
                     "is_pinned": e.get("is_pinned", False),
-                    "has_main": True,     # Mocked as True for select menu
+                    "has_main": True,
                     "has_probation": False
                 }
             )

@@ -4,6 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Twitch, User, Clock, Shield } from 'lucide-react';
 import type { Streamer } from '../types/domain';
 import { unwrapApiData } from '../types/api';
+import { apiFetch } from '../api/client';
 
 export default function MediaProfile() {
     const { id } = useParams();
@@ -15,7 +16,7 @@ export default function MediaProfile() {
     useEffect(() => {
         const fetchStreamer = async () => {
             try {
-                const response = await fetch(`/api/streamers/${id}`);
+                const response = await apiFetch(`/api/streamers/${id}`);
                 if (!response.ok) {
                     throw new Error('Стример не найден');
                 }

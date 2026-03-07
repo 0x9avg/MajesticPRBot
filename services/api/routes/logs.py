@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 import math
 from typing import Any, Dict, List, Optional
 
-from dependencies import get_current_user, get_db
+from dependencies import get_db, require_permission
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -33,20 +33,14 @@ async def get_admin_logs(
         "created_at", pattern="^(created_at|admin_name|actor_name|action|target_name)$"
     ),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
-    user: Dict[str, Any] = Depends(get_current_user),
+    _principal: dict = Depends(require_permission("logs.admin.view")),
     db: "Database" = Depends(get_db),
 ):
     """
     Get admin logs with page-based pagination.
-    Requires 'can_view_admin_logs' permission.
+    Requires 'logs.admin.view' permission.
     """
     trace_id = get_trace_id(request)
-    permissions = user.get("permissions", {})
-    if not permissions.get("can_view_admin_logs", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Недостаточно прав для просмотра логов администратора",
-        )
 
     offset = (page - 1) * limit
 
@@ -69,6 +63,12 @@ async def get_admin_logs(
         sort_by=sort_by,
         sort_order=sort_order,
     )
+
+    # Convert bigints to strings to prevent JS precision loss
+    for log in logs:
+        for field in ["id", "actor_id", "admin_id", "target_id"]:
+            if log.get(field):
+                log[field] = str(log[field])
 
     total = await db.count_admin_logs(filters=filters)
     pages = math.ceil(total / limit) if total > 0 else 1
@@ -99,6 +99,7 @@ async def get_pr_action_logs(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("logs.pr_actions.view")),
 ):
     """
     Get PR action logs (claims/unclaims) with pagination and filtering.
@@ -141,4 +142,3 @@ async def get_pr_action_logs(
             trace_id=trace_id,
         )
     )
-

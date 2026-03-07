@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from database import Database
 
+from dependencies import require_permission
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
@@ -24,6 +25,7 @@ def get_db(request: Request):
 async def get_dashboard_stats(
     request: Request,
     db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("dashboard.view")),
 ):
     """Get aggregated statistics for the main dashboard."""
     trace_id = get_trace_id(request)

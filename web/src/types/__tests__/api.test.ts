@@ -13,6 +13,12 @@ describe('api utils', () => {
     });
 
     it('extracts detail/message/errors in priority order', () => {
+        expect(
+            getApiErrorMessage(
+                { detail: { code: 'TOKEN_EXPIRED', message: 'structured detail error' } },
+                'fallback'
+            )
+        ).toBe('structured detail error');
         expect(getApiErrorMessage({ detail: 'detail error' }, 'fallback')).toBe('detail error');
         expect(getApiErrorMessage({ message: 'message error' }, 'fallback')).toBe('message error');
         expect(

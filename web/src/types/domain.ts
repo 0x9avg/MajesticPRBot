@@ -146,7 +146,7 @@ export interface PunishmentReturnQueueItem {
     can_delete: boolean;
 }
 
-export interface PunishmentReturnHistoryItem extends PunishmentReturnQueueItem {}
+export type PunishmentReturnHistoryItem = PunishmentReturnQueueItem;
 
 export interface PunishmentReturnCreateInput {
     punishment_type: PunishmentType;

@@ -49,6 +49,26 @@ async def test_create_event_success(build_api_app, fake_db) -> None:
     assert fake_db.events_by_id[1]["created_by"] == 1001
 
 
+async def test_create_event_persists_is_pinned(build_api_app, fake_db) -> None:
+    async with await _client(build_api_app) as client:
+        response = await client.post(
+            "/api/events",
+            json={
+                "name": "Pinned Event",
+                "description": "Pinned",
+                "required_pr_count": 1,
+                "priority": 1,
+                "pr_slots": 1,
+                "is_pinned": True,
+                "start_time": None,
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["is_pinned"] is True
+    assert fake_db.events_by_id[1]["is_pinned"] is True
+
+
 async def test_create_event_rejects_created_by_spoof(build_api_app) -> None:
     async with await _client(build_api_app) as client:
         response = await client.post(
@@ -249,7 +269,12 @@ async def test_update_event_success_and_not_found(build_api_app) -> None:
     async with await _client(build_api_app) as client:
         updated = await client.patch(
             "/api/events/1",
-            json={"name": "Edited", "priority": 3, "is_pinned": True},
+            json={
+                "name": "Edited",
+                "priority": 3,
+                "is_pinned": True,
+                "points": 42.5,
+            },
         )
         missing = await client.patch(
             "/api/events/999",
@@ -259,6 +284,8 @@ async def test_update_event_success_and_not_found(build_api_app) -> None:
     assert updated.status_code == 200
     assert updated.json()["data"]["name"] == "Edited"
     assert updated.json()["data"]["priority"] == 3
+    assert updated.json()["data"]["is_pinned"] is True
+    assert updated.json()["data"]["points"] == 42.5
     assert missing.status_code == 404
 
 

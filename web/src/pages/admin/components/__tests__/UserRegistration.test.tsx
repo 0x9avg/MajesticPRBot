@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { vi, describe, it, beforeEach, afterEach, expect } from 'vitest';
 import UserRegistration from '../UserRegistration';
 import type { UserContext } from '../../../../types/auth';
+import { setAccessToken } from '../../../../api/client';
 
 let mockedUser: UserContext | null = null;
 
@@ -53,6 +54,7 @@ describe('UserRegistration', () => {
         mockedUser = makeUser('manager', true);
         vi.stubGlobal('localStorage', createLocalStorageMock());
         localStorage.clear();
+        setAccessToken(null);
     });
 
     afterEach(() => {
@@ -66,10 +68,10 @@ describe('UserRegistration', () => {
 
         await ui.click(screen.getByText('Выберите роль'));
 
-        expect(screen.getByText('Мл. Сотрудник')).toBeInTheDocument();
-        expect(screen.getByText('Сотрудник')).toBeInTheDocument();
-        expect(screen.getByText('Ст. Сотрудник')).toBeInTheDocument();
-        expect(screen.queryByText('Менеджер')).not.toBeInTheDocument();
+        expect(screen.getByText('Младший ассистент')).toBeInTheDocument();
+        expect(screen.getByText('Ассистент')).toBeInTheDocument();
+        expect(screen.getByText('Старший ассистент')).toBeInTheDocument();
+        expect(screen.queryByText('Глава ассистентов')).not.toBeInTheDocument();
         expect(screen.queryByText('Разработчик')).not.toBeInTheDocument();
     });
 
@@ -93,7 +95,7 @@ describe('UserRegistration', () => {
 
     it('renders API 403 error message from backend', async () => {
         mockedUser = makeUser('manager', true);
-        localStorage.setItem('access_token', 'test-token');
+        setAccessToken('test-token');
 
         const fetchMock = vi.fn().mockResolvedValue(
             new Response(
@@ -113,7 +115,7 @@ describe('UserRegistration', () => {
         await ui.type(screen.getAllByRole('textbox')[1], 'New User');
         await ui.type(screen.getByPlaceholderText('000000000000000000'), '123456789');
         await ui.click(screen.getByText('Выберите роль'));
-        await ui.click(screen.getByText('Сотрудник'));
+        await ui.click(screen.getByText('Ассистент'));
         await ui.click(screen.getByRole('button', { name: 'Создать пользователя' }));
 
         await waitFor(() => {

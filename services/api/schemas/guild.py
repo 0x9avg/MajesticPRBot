@@ -30,7 +30,8 @@ class GuildSettingsUpdate(BaseModel):
 
 
 class GuildTemplatesUpdate(BaseModel):
-    stream_online: Optional[str] = None
+    stream_online_gta: Optional[str] = None
+    stream_online_other: Optional[str] = None
     stream_offline: Optional[str] = None
     category_to_gta: Optional[str] = None
     category_from_gta: Optional[str] = None
@@ -54,7 +55,8 @@ class GuildSettingsResponse(BaseModel):
     pr_actions_channel_id: Optional[Snowflake] = None
     control_panel_channel_id: Optional[Snowflake] = None
     control_panel_message_id: Optional[Snowflake] = None
-    template_stream_online: Optional[str] = None
+    template_stream_online_gta: Optional[str] = None
+    template_stream_online_other: Optional[str] = None
     template_stream_offline: Optional[str] = None
     template_category_to_gta: Optional[str] = None
     template_category_from_gta: Optional[str] = None
@@ -88,7 +90,8 @@ class GuildSettingsOnlyResponse(BaseModel):
 class GuildTemplatesResponse(BaseModel):
     """Notification templates only."""
 
-    stream_online: Optional[str] = None
+    stream_online_gta: Optional[str] = None
+    stream_online_other: Optional[str] = None
     stream_offline: Optional[str] = None
     category_to_gta: Optional[str] = None
     category_from_gta: Optional[str] = None

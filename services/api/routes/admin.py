@@ -104,47 +104,48 @@ async def create_user(
     password_hash = auth.hash_password(password)
 
     try:
-        # Create web auth user
-        await db.create_user(
+        await db.create_user_with_assistant(
             discord_id=user_data.discord_id,
             username=user_data.username,
             password_hash=password_hash,
-        )
-
-        # Create/Update assistant profile
-        await db.create_or_update_assistant(
-            pr_id=user_data.discord_id,
             nickname=user_data.nickname,
             role=user_data.role,
             appointed_at=user_data.appointed_at,
         )
 
-        # Log action
-        await db.log_admin_action_v2(
-            actor_name=current_user["nickname"],
-            actor_role=current_user.get("role"),
-            action="user.create",
-            target_type="user",
-            target_id=str(user_data.discord_id),
-            details={
-                "summary": f"Created user {user_data.username}",
-                "payload": {
-                    "nickname": user_data.nickname,
-                    "login": user_data.username,
-                    "discord_user_id": user_data.discord_id,
-                    "role": user_data.role,
-                    "appointed_at": user_data.appointed_at.isoformat()
-                    if user_data.appointed_at
-                    else None,
+        try:
+            await db.log_admin_action_v2(
+                actor_name=current_user["nickname"],
+                actor_role=current_user.get("role"),
+                action="user.create",
+                target_type="user",
+                target_id=str(user_data.discord_id),
+                details={
+                    "summary": f"Created user {user_data.username}",
+                    "payload": {
+                        "nickname": user_data.nickname,
+                        "login": user_data.username,
+                        "discord_user_id": user_data.discord_id,
+                        "role": user_data.role,
+                        "appointed_at": user_data.appointed_at.isoformat()
+                        if user_data.appointed_at
+                        else None,
+                    },
+                    "meta": {
+                        "ip": request.client.host if request.client else None,
+                        "request_path": str(request.url.path),
+                        "method": request.method,
+                        "actor_id": current_user.get("id"),
+                    },
                 },
-                "meta": {
-                    "ip": request.client.host if request.client else None,
-                    "request_path": str(request.url.path),
-                    "method": request.method,
-                    "actor_id": current_user.get("id"),
-                },
-            },
-        )
+            )
+        except Exception as e:
+            logger.warning(
+                "User %s created, but admin log write failed: %s",
+                user_data.username,
+                e,
+                exc_info=True,
+            )
 
         return JSONResponse(
             content=success_envelope(
@@ -174,6 +175,11 @@ async def create_user(
                 raise HTTPException(
                     status_code=400,
                     detail=f"Пользователь с Discord ID {user_data.discord_id} уже существует",
+                )
+            if "assistants" in error_text or "pr_id" in error_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Сотрудник с ID {user_data.discord_id} уже существует",
                 )
             raise HTTPException(status_code=400, detail="Пользователь уже существует")
 

@@ -16,6 +16,7 @@ from routes.stats import router as stats_router
 from routes.notifications import router as notifications_router
 from routes.logs import router as logs_router
 from routes.returns import router as returns_router
+from routes.services import router as services_router
 
 # Main router that includes all sub-routers
 router = APIRouter(prefix="/api")
@@ -33,5 +34,6 @@ router.include_router(stats_router)
 router.include_router(notifications_router)
 router.include_router(logs_router)
 router.include_router(returns_router)
+router.include_router(services_router)
 
 __all__ = ["router"]

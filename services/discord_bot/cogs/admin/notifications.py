@@ -19,7 +19,8 @@ from disnake.ext import commands
 # =============================================================================
 
 EVENT_TYPES = {
-    "stream_online": "🟢 Стрим начался",
+    "stream_online_gta": "🟢 Стрим начался (GTA)",
+    "stream_online_other": "🟠 Стрим начался (не GTA)",
     "stream_offline": "🔴 Стрим закончился",
     "category_to_gta": "🎮 Смена на GTA 5",
     "category_from_gta": "🚫 Уход с GTA 5",

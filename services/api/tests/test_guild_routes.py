@@ -49,13 +49,13 @@ async def test_get_and_update_templates(build_api_app, fake_db, fake_broker) -> 
         initial = await client.get("/api/guild/templates")
         updated = await client.patch(
             "/api/guild/templates",
-            json={"stream_online": "LIVE {streamer_name}", "stream_offline": "OFF {streamer_name}"},
+            json={"stream_online_gta": "LIVE {streamer_name}", "stream_offline": "OFF {streamer_name}"},
         )
 
     assert initial.status_code == 200
     assert updated.status_code == 200
     templates = fake_db.guild_settings["notification_templates"]
-    assert templates["stream_online"] == "LIVE {streamer_name}"
+    assert templates["stream_online_gta"] == "LIVE {streamer_name}"
     assert templates["stream_offline"] == "OFF {streamer_name}"
     assert any(call[0] == "guild.templates.updated" for call in fake_broker.calls)
 
@@ -63,11 +63,11 @@ async def test_get_and_update_templates(build_api_app, fake_db, fake_broker) -> 
 async def test_get_template_by_type_valid_and_invalid(build_api_app) -> None:
     async with await _client(build_api_app) as client:
         invalid = await client.get("/api/guild/templates/unknown")
-        valid = await client.get("/api/guild/templates/stream_online")
+        valid = await client.get("/api/guild/templates/stream_online_gta")
 
     assert invalid.status_code == 400
     assert valid.status_code == 200
-    assert valid.json()["data"]["event_type"] == "stream_online"
+    assert valid.json()["data"]["event_type"] == "stream_online_gta"
 
 
 async def test_get_and_update_rates(build_api_app, fake_db, fake_broker) -> None:
@@ -90,7 +90,7 @@ async def test_get_and_update_rates(build_api_app, fake_db, fake_broker) -> None
 async def test_update_endpoints_work_without_broker(build_api_app) -> None:
     async with await _client(build_api_app, include_broker=False) as client:
         settings = await client.patch("/api/guild/settings", json={"notification_channel_id": 555})
-        templates = await client.patch("/api/guild/templates", json={"stream_online": "X"})
+        templates = await client.patch("/api/guild/templates", json={"stream_online_gta": "X"})
         rates = await client.patch("/api/guild/rates", json={"p0_rate": 1.11})
 
     assert settings.status_code == 200

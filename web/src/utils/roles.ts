@@ -11,10 +11,10 @@ export const ROLE_RANK: Record<Role, number> = {
 };
 
 export const ROLE_LABELS: Record<Role, string> = {
-    junior_employee: 'Мл. Сотрудник',
-    employee: 'Сотрудник',
-    senior_employee: 'Ст. Сотрудник',
-    manager: 'Менеджер',
+    junior_employee: 'Младший ассистент',
+    employee: 'Ассистент',
+    senior_employee: 'Старший ассистент',
+    manager: 'Глава ассистентов',
     developer: 'Разработчик',
 };
 

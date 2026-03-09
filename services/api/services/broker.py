@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 import aio_pika
 from aio_pika import ExchangeType, Message
@@ -40,8 +41,11 @@ class BrokerService:
     @property
     def url(self) -> str:
         """Get the AMQP connection URL."""
+        user = quote(self.user, safe="")
+        password = quote(self.password, safe="")
+        vhost = quote(self.vhost, safe="")
         return (
-            f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
+            f"amqp://{user}:{password}@{self.host}:{self.port}/{vhost}"
         )
 
     async def connect(self) -> None:
@@ -398,16 +402,6 @@ class BrokerService:
                 "pr_id": pr_id,
                 "duration_seconds": duration_seconds,
                 "ended_at": ended_at,
-                "trace_id": trace_id,
-            },
-        )
-
-    async def emit_monitoring_refresh(self, trace_id: str = None) -> bool:
-        """Request monitoring refresh."""
-        return await self.publish(
-            "monitoring.refresh",
-            {
-                "event": "refresh",
                 "trace_id": trace_id,
             },
         )

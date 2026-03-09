@@ -111,11 +111,11 @@ class Notifications(commands.Cog):
 
             # Map broker event types to notification types
             event_map = {
-                "online": "stream_online",
+                "stream_online_gta": "stream_online_gta",
+                "stream_online_other": "stream_online_other",
                 "offline": "stream_offline",
                 "category_to_gta": "category_to_gta",
                 "category_from_gta": "category_from_gta",
-                "stream_online": "stream_online",
                 "stream_offline": "stream_offline",
             }
 
@@ -152,7 +152,7 @@ class Notifications(commands.Cog):
                 return
 
             include_embed = (
-                notification_type == "stream_online"
+                notification_type == "stream_online_gta"
                 or notification_type == "category_to_gta"
             )
 

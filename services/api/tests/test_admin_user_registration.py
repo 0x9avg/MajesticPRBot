@@ -203,6 +203,50 @@ async def test_success_case_writes_admin_log(app, fake_db, set_current_user):
     assert fake_db.logged_actions[0]["action"] == "user.create"
 
 
+async def test_assistant_failure_rolls_back_created_user(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager", permissions={"admin.users.create": True}, nickname="Boss"
+    )
+    fake_db.raise_on_create_or_update_assistant = Exception("assistant insert failed")
+
+    payload = user_payload(
+        username="rollback_user",
+        nickname="Rollback User",
+        role="employee",
+        discord_id=9151,
+    )
+
+    response = await post_create_user(app, payload)
+
+    assert response.status_code == 500
+    assert "rollback_user" not in fake_db.users_by_username
+    assert 9151 not in fake_db.users_by_discord
+    assert 9151 not in fake_db.assistants_by_id
+
+
+async def test_admin_log_failure_does_not_fail_created_user(
+    app, fake_db, set_current_user
+):
+    set_current_user(
+        role="manager", permissions={"admin.users.create": True}, nickname="Boss"
+    )
+    fake_db.raise_on_log_admin_action = Exception("log insert failed")
+
+    payload = user_payload(
+        username="log_failure_user",
+        nickname="Log Failure User",
+        role="employee",
+        discord_id=9152,
+    )
+
+    response = await post_create_user(app, payload)
+
+    assert response.status_code == 200
+    assert fake_db.users_by_username["log_failure_user"]["discord_id"] == 9152
+    assert fake_db.assistants_by_id[9152]["role"] == "employee"
+    assert fake_db.logged_actions == []
+
+
 async def test_create_user_with_appointed_at(
     app, fake_db, set_current_user
 ):

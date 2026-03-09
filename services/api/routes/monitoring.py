@@ -1,6 +1,4 @@
-"""
-Monitoring and Dashboard routes for API.
-"""
+"""Monitoring routes for on-demand Discord monitoring views."""
 
 from __future__ import annotations
 
@@ -8,7 +6,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from database import Database
-    from services.broker import BrokerService
 
 from config import Config
 from dependencies import require_permission
@@ -16,7 +13,6 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
 from schemas.envelope import success_envelope
-from schemas.monitoring import MonitoringRefreshResponse
 
 router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
 
@@ -24,53 +20,6 @@ router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
 def get_db(request: Request):
     """Get database from app state."""
     return request.app.state.database
-
-
-def get_broker(request: Request):
-    """Get broker from app state."""
-    return request.app.state.broker
-
-
-@router.post("/refresh")
-async def refresh_monitoring(
-    request: Request,
-    data: MonitoringRefreshResponse,
-    db: "Database" = Depends(get_db),
-    broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("monitoring.refresh")),
-):
-    """
-    Trigger monitoring message refresh.
-    Sends event to Discord bot to update monitoring embeds.
-    """
-    trace_id = get_trace_id(request)
-
-    if broker:
-        await broker.publish(
-            "monitoring.refresh",
-            {
-                "event": "monitoring.refresh",
-                "force": data.force,
-            },
-        )
-        return JSONResponse(
-            content=success_envelope(
-                data={"force": data.force},
-                message="Refresh requested",
-                code="REFRESH_REQUESTED",
-                trace_id=trace_id,
-            )
-        )
-
-    return JSONResponse(
-        status_code=503,
-        content=success_envelope(
-            data=None,
-            message="Broker unavailable",
-            code="BROKER_UNAVAILABLE",
-            trace_id=trace_id,
-        ),
-    )
 
 
 @router.get("/status")

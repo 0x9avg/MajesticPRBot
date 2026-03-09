@@ -4,16 +4,20 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { render, screen, waitFor } from '@testing-library/react';
 import ProtectedRoute from '../ProtectedRoute';
 
+const authState = vi.hoisted(() => ({
+    token: null as string | null,
+}));
+
 // Mock the client module
 vi.mock('../../api/client', () => ({
-    hydrateAccessTokenFromStorage: vi.fn(() => null),
+    getAccessToken: vi.fn(() => authState.token),
     tryRefresh: vi.fn(() => Promise.resolve(false)),
 }));
 
-import { hydrateAccessTokenFromStorage, tryRefresh } from '../../api/client';
+import { getAccessToken, tryRefresh } from '../../api/client';
 
 const mockedTryRefresh = vi.mocked(tryRefresh);
-const mockedHydrate = vi.mocked(hydrateAccessTokenFromStorage);
+const mockedGetAccessToken = vi.mocked(getAccessToken);
 
 /**
  * Helper: build a fake JWT with the given payload (no real signature).
@@ -42,8 +46,9 @@ const renderWithRoutes = (initialPath: string, allowedRoles?: string[]) => {
 describe('ProtectedRoute', () => {
     beforeEach(() => {
         localStorage.clear();
+        authState.token = null;
         mockedTryRefresh.mockReset().mockResolvedValue(false);
-        mockedHydrate.mockReset().mockReturnValue(null);
+        mockedGetAccessToken.mockImplementation(() => authState.token);
     });
 
     it('redirects to login when token is missing and refresh fails', async () => {
@@ -55,8 +60,7 @@ describe('ProtectedRoute', () => {
 
     it('allows access when token exists and is not expired', async () => {
         const token = fakeJwt({ role: 'manager', exp: Date.now() / 1000 + 3600 });
-        localStorage.setItem('access_token', token);
-        localStorage.setItem('user', JSON.stringify({ role: 'manager' }));
+        authState.token = token;
 
         renderWithRoutes('/admin', ['manager', 'developer']);
         await waitFor(() => {
@@ -66,8 +70,7 @@ describe('ProtectedRoute', () => {
 
     it('redirects to hub when role is not allowed', async () => {
         const token = fakeJwt({ role: 'employee', exp: Date.now() / 1000 + 3600 });
-        localStorage.setItem('access_token', token);
-        localStorage.setItem('user', JSON.stringify({ role: 'employee' }));
+        authState.token = token;
 
         renderWithRoutes('/admin', ['manager', 'developer']);
         await waitFor(() => {
@@ -75,10 +78,9 @@ describe('ProtectedRoute', () => {
         });
     });
 
-    it('redirects to login when role check is required but user payload is broken', async () => {
+    it('redirects to login when role check is required but token has no role', async () => {
         const token = fakeJwt({ exp: Date.now() / 1000 + 3600 });
-        localStorage.setItem('access_token', token);
-        localStorage.setItem('user', '{broken-json');
+        authState.token = token;
 
         renderWithRoutes('/admin', ['manager']);
         await waitFor(() => {
@@ -89,15 +91,14 @@ describe('ProtectedRoute', () => {
     it('attempts refresh when token is expired and succeeds', async () => {
         // Set an expired token
         const expiredToken = fakeJwt({ role: 'manager', exp: Date.now() / 1000 - 60 });
-        localStorage.setItem('access_token', expiredToken);
+        authState.token = expiredToken;
 
         // Mock successful refresh — tryRefresh updates the in-memory token
         const freshToken = fakeJwt({ role: 'manager', exp: Date.now() / 1000 + 3600 });
         mockedTryRefresh.mockImplementation(async () => {
-            localStorage.setItem('access_token', freshToken);
+            authState.token = freshToken;
             return true;
         });
-        localStorage.setItem('user', JSON.stringify({ role: 'manager' }));
 
         renderWithRoutes('/admin', ['manager']);
         await waitFor(() => {
@@ -108,7 +109,7 @@ describe('ProtectedRoute', () => {
 
     it('redirects to login when token is expired and refresh fails', async () => {
         const expiredToken = fakeJwt({ role: 'manager', exp: Date.now() / 1000 - 60 });
-        localStorage.setItem('access_token', expiredToken);
+        authState.token = expiredToken;
         mockedTryRefresh.mockResolvedValue(false);
 
         renderWithRoutes('/admin');
@@ -121,7 +122,7 @@ describe('ProtectedRoute', () => {
     it('attempts refresh when no token exists but cookie might be present', async () => {
         mockedTryRefresh.mockImplementation(async () => {
             const freshToken = fakeJwt({ role: 'employee', exp: Date.now() / 1000 + 3600 });
-            localStorage.setItem('access_token', freshToken);
+            authState.token = freshToken;
             return true;
         });
 

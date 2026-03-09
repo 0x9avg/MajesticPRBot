@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterable
 
 # Импортируем для аннотации типов в IDE
@@ -16,8 +19,6 @@ import disnake
 from config import Config
 from disnake.ext import commands
 from utils import UserAuthCache, UserPermissionsCache
-
-
 class DiscordBot(commands.Bot):
     """
     Discord Bot микросервис.
@@ -38,6 +39,8 @@ class DiscordBot(commands.Bot):
         self.logger = logger or Config.setup_logging("DiscordBot")
         self.auth_cache = UserAuthCache(ttl_seconds=300)
         self.permissions_cache = UserPermissionsCache(ttl_seconds=120)
+        self._start_time = datetime.now(timezone.utc)
+        self._heartbeat_task: asyncio.Task | None = None
 
         intents = disnake.Intents.all()
 
@@ -190,6 +193,42 @@ class DiscordBot(commands.Bot):
         """Start the bot with token from config."""
         await self.start(Config.discord_token)
 
+    def _build_service_status_details(self) -> dict[str, object]:
+        guild = self.get_guild(int(Config.guild_id))
+        broker_connected = bool(
+            self.broker
+            and self.broker.connection
+            and not self.broker.connection.is_closed
+        )
+        uptime_seconds = int(
+            max(
+                0,
+                (datetime.now(timezone.utc) - self._start_time).total_seconds(),
+            )
+        )
+        return {
+            "ready": self.user is not None,
+            "gateway_latency_ms": round(self.latency * 1000),
+            "guilds_connected": len(self.guilds),
+            "target_guild_connected": guild is not None,
+            "broker_connected": broker_connected,
+            "uptime_seconds": uptime_seconds,
+        }
+
+    async def report_service_status(self, status: str) -> None:
+        try:
+            await self.api_client.report_service_status(
+                status=status,
+                details=self._build_service_status_details(),
+            )
+        except Exception as e:
+            self.logger.debug(f"Service status report failed: {e}")
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await self.report_service_status("online")
+            await asyncio.sleep(30)
+
     async def on_ready(self):
         """Called when bot is ready."""
         self.logger.info(f"✓ Discord bot ready as {self.user}")
@@ -205,11 +244,14 @@ class DiscordBot(commands.Bot):
         # Start broker consumer if available
         if self.broker:
             try:
-                await self.broker.connect()
                 await self.broker.consume_in_background()
                 self.logger.info("✓ Broker consumer started")
             except Exception as e:
-                self.logger.warning(f"Broker unavailable: {e}")
+                self.logger.warning(f"Broker unavailable at on_ready: {e}")
+
+        await self.report_service_status("online")
+        if not self._heartbeat_task or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def on_guild_join(self, guild: disnake.Guild):
         """Auto-leave guilds that are not the target guild."""
@@ -273,6 +315,14 @@ class DiscordBot(commands.Bot):
 
     async def close(self):
         """Cleanup on shutdown."""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._heartbeat_task
+        self._heartbeat_task = None
+
+        await self.report_service_status("stopping")
+
         if self.api_client:
             await self.api_client.close()
             self.logger.debug("✓ API client closed")

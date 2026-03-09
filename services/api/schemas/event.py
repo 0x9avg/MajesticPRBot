@@ -39,6 +39,7 @@ class EventParticipant(BaseModel):
 
 class EventResponse(EventBase):
     id: Snowflake
+    points: Optional[float] = None
     is_active: bool
     created_at: datetime
     created_by: Optional[Snowflake] = None

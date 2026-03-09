@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import type { Assistant, AssistantLog } from '../types/domain';
 import { unwrapApiData } from '../types/api';
 import { formatMskToLocal } from '../utils/datetime';
+import { formatDocumentTitle } from '../utils/documentTitle';
 import { apiFetch } from '../api/client';
 
 export default function UserProfile() {
@@ -70,6 +71,17 @@ export default function UserProfile() {
         };
         fetchData();
     }, [navigate, id]);
+
+    useEffect(() => {
+        if (user?.nickname) {
+            document.title = formatDocumentTitle([user.nickname, 'Ассистенты']);
+            return;
+        }
+
+        if (error) {
+            document.title = formatDocumentTitle(['Ассистенты']);
+        }
+    }, [user?.nickname, error]);
 
     if (loading) {
         return (

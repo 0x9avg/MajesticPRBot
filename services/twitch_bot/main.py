@@ -15,10 +15,10 @@ async def main():
     """Main entry point."""
     logger = Config.setup_logging("Main")
 
-    # Validate config
-    missing = Config.validate_env_vars()
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+    try:
+        Config.validate_startup_config()
+    except ValueError as exc:
+        logger.error(str(exc))
         sys.exit(1)
 
     logger.info("Starting Twitch Bot microservice...")
@@ -58,11 +58,13 @@ async def main():
         logger=Config.setup_logging("TwitchBot"),
     )
 
+    consumer_task = None
+
     # Start Consumer if available
     if consumer:
         consumer.bot = bot
-        # Connect safely in background so it doesn't block startup if RabbitMQ limits/issues
-        asyncio.create_task(consumer.connect())
+        # Keep retrying in background until the broker becomes available.
+        consumer_task = asyncio.create_task(consumer.connect())
 
     # Run
     try:
@@ -70,9 +72,16 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        await bot.close()
         await api_client.close()
         if consumer:
             await consumer.disconnect()
+        if consumer_task and not consumer_task.done():
+            consumer_task.cancel()
+            try:
+                await consumer_task
+            except asyncio.CancelledError:
+                pass
         logger.info("✓ Twitch Bot stopped")
 
 

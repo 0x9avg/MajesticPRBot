@@ -1,0 +1,154 @@
+name: prmajesticbot
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - deploy/env/web.env
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - public
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - deploy/env/api.env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    expose:
+      - "8000"
+    volumes:
+      - api_logs:/opt/prmajestic/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    init: true
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  discord_bot:
+    build:
+      context: .
+      dockerfile: services/discord_bot/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - deploy/env/discord_bot.env
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - discord_logs:/opt/prmajestic/logs
+    init: true
+    networks:
+      - public
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  twitch_bot:
+    build:
+      context: .
+      dockerfile: services/twitch_bot/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - deploy/env/twitch_bot.env
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - twitch_logs:/opt/prmajestic/logs
+      - twitch_state:/opt/prmajestic/state/twitch
+    init: true
+    networks:
+      - public
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    env_file:
+      - deploy/env/rabbitmq.env
+    ports:
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    env_file:
+      - deploy/env/mysql.env
+    ports:
+      - "127.0.0.1:3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-name-resolve
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot --password=$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  api_logs:
+  discord_logs:
+  twitch_logs:
+  twitch_state:
+  mysql_data:
+  rabbitmq_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  public:
+  backend:
+    internal: true

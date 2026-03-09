@@ -176,8 +176,11 @@ async def get_guild_templates(
 
     # Map DB keys to schema keys, using defaults for missing
     data = GuildTemplatesResponse(
-        stream_online=templates_dict.get(
-            "stream_online", Config.template_defaults.get("stream_online")
+        stream_online_gta=templates_dict.get(
+            "stream_online_gta", Config.template_defaults.get("stream_online_gta")
+        ),
+        stream_online_other=templates_dict.get(
+            "stream_online_other", Config.template_defaults.get("stream_online_other")
         ),
         stream_offline=templates_dict.get(
             "stream_offline", Config.template_defaults.get("stream_offline")
@@ -210,7 +213,8 @@ async def update_guild_templates(
     trace_id = get_trace_id(request)
 
     await db.update_guild_templates(
-        template_stream_online=data.stream_online,
+        template_stream_online_gta=data.stream_online_gta,
+        template_stream_online_other=data.stream_online_other,
         template_stream_offline=data.stream_offline,
         template_category_to_gta=data.category_to_gta,
         template_category_from_gta=data.category_from_gta,
@@ -240,8 +244,11 @@ async def update_guild_templates(
 
     # Map DB keys to schema keys, using defaults for missing
     response_data = GuildTemplatesResponse(
-        stream_online=templates_dict.get(
-            "stream_online", Config.template_defaults.get("stream_online")
+        stream_online_gta=templates_dict.get(
+            "stream_online_gta", Config.template_defaults.get("stream_online_gta")
+        ),
+        stream_online_other=templates_dict.get(
+            "stream_online_other", Config.template_defaults.get("stream_online_other")
         ),
         stream_offline=templates_dict.get(
             "stream_offline", Config.template_defaults.get("stream_offline")

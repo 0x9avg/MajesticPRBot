@@ -1,4 +1,5 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect } from 'react'
+import { BrowserRouter as Router, Routes, Route, Navigate, matchPath, useLocation } from 'react-router-dom'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import MainLayout from './components/MainLayout'
@@ -9,17 +10,57 @@ import MediaList from './pages/media/MediaList'
 import PRStats from './pages/stats/PRStats'
 import SpectateLogs from './pages/action-logs/SpectateLogs'
 import PunishmentReturns from './pages/returns/PunishmentReturns'
-import CreateEvent from './pages/admin/components/CreateEvent'
 import AdminPanel from './pages/admin/AdminPanel'
 import BotDashboard from './pages/dashboard/BotDashboard'
 
 import UserProfile from './pages/UserProfile'
 import MediaProfile from './pages/MediaProfile'
 import { ADMIN_SECTION_PERMISSIONS } from './rbac/catalog'
+import { APP_TITLE, formatDocumentTitle } from './utils/documentTitle'
+
+const routeTitles = [
+    { path: '/login', title: 'Вход' },
+    { path: '/hub', title: 'Хаб' },
+    { path: '/assistants/:id', title: 'Ассистенты' },
+    { path: '/assistants', title: 'Ассистенты' },
+    { path: '/media/:id', title: 'Медиа' },
+    { path: '/media', title: 'Медиа' },
+    { path: '/logs', title: 'Логи' },
+    { path: '/returns', title: 'Возвраты' },
+    { path: '/admin', title: 'Админ-панель' },
+    { path: '/bot', title: 'Статус бота' },
+]
+
+function getDocumentTitle(pathname: string) {
+    if (pathname === '/') {
+        return APP_TITLE
+    }
+
+    const matchedRoute = routeTitles.find(({ path }) =>
+        matchPath({ path, end: true }, pathname)
+    )
+
+    if (!matchedRoute) {
+        return formatDocumentTitle(['Страница не найдена'])
+    }
+
+    return formatDocumentTitle([matchedRoute.title])
+}
+
+function DocumentTitleSync() {
+    const location = useLocation()
+
+    useEffect(() => {
+        document.title = getDocumentTitle(location.pathname)
+    }, [location.pathname])
+
+    return null
+}
 
 function App() {
     return (
         <Router>
+            <DocumentTitleSync />
             <Routes>
                 <Route path="/login" element={<Login />} />
 
@@ -40,15 +81,6 @@ function App() {
                             }
                         />
                         <Route
-                            path="/events/new"
-                            element={
-                                <PermissionRoute requireAny={['events.create']}>
-                                    <CreateEvent />
-                                </PermissionRoute>
-                            }
-                        />
-
-                        <Route
                             path="/admin"
                             element={
                                 <PermissionRoute requireAny={ADMIN_SECTION_PERMISSIONS}>
@@ -60,7 +92,7 @@ function App() {
                         <Route
                             path="/bot"
                             element={
-                                <PermissionRoute requireAny={['monitoring.view', 'monitoring.refresh']}>
+                                <PermissionRoute requireAny={['monitoring.view']}>
                                     <BotDashboard />
                                 </PermissionRoute>
                             }

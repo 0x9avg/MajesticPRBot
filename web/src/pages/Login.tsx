@@ -36,7 +36,7 @@ export default function Login() {
 
             const payload = await response.json() as { access_token: string }
             const access_token = payload.access_token
-            // Store access token in memory (client.ts also mirrors to localStorage for ProtectedRoute)
+            // Store access token in memory only.
             setAccessToken(access_token)
             // Refresh token is HttpOnly cookie; clear any stale legacy localStorage value.
             localStorage.removeItem('refresh_token')
@@ -52,8 +52,7 @@ export default function Login() {
             }
 
             if (userResponse.ok) {
-                const userData = await userResponse.json()
-                localStorage.setItem('user', JSON.stringify(userData))
+                await userResponse.json()
             }
 
             navigate('/hub')

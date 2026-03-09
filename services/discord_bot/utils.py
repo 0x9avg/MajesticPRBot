@@ -1,9 +1,7 @@
-"""Utility functions for Discord Bot."""
-
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
-import time
 import logging
+import time
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Moscow timezone (UTC+3)
 MSK = timezone(timedelta(hours=3))
@@ -84,7 +82,7 @@ class UserPermissionsCache:
         self._cache.clear()
 
 
-def parse_to_unix(value: Union[str, datetime.datetime, None]) -> int:
+def parse_to_unix(value: Union[str, datetime, date, None]) -> int:
     """
     Convert API timestamp (ISO 8601) or datetime object to Unix timestamp.
 
@@ -111,9 +109,8 @@ def parse_to_unix(value: Union[str, datetime.datetime, None]) -> int:
             if value.tzinfo is None:
                 value = value.replace(tzinfo=MSK)
             return int(value.timestamp())
-        elif isinstance(value, datetime.date):
+        elif isinstance(value, date):
             # Convert date to datetime at midnight MSK
-            from datetime import time as dt_time
             dt = datetime.combine(value, dt_time.min).replace(tzinfo=MSK)
             return int(dt.timestamp())
     except Exception as e:

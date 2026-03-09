@@ -84,7 +84,7 @@ class AdminMainView(disnake.ui.View):
                 )
             )
 
-        if has_any(["monitoring.view", "monitoring.refresh"]):
+        if has_any(["monitoring.view", "streamers.status.update", "guild.settings.update"]):
             self.add_item(
                 disnake.ui.Button(
                     label="Сервис",

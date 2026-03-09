@@ -1,8 +1,7 @@
 import React from 'react';
 import { useState, useEffect } from 'react';
 import { Navigate, Outlet, useOutletContext } from 'react-router-dom';
-import type { UserContext } from '../types/auth';
-import { hydrateAccessTokenFromStorage, tryRefresh } from '../api/client';
+import { getAccessToken, tryRefresh } from '../api/client';
 
 void React;
 
@@ -34,7 +33,7 @@ export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
         let cancelled = false;
 
         async function checkAuth() {
-            const token = localStorage.getItem('access_token') || hydrateAccessTokenFromStorage();
+            const token = getAccessToken();
 
             if (!token) {
                 // No token at all — try refresh (might have HttpOnly cookie)
@@ -79,34 +78,19 @@ export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
 
     // Role-based access check
     if (allowedRoles && allowedRoles.length > 0) {
-        const token = localStorage.getItem('access_token') || hydrateAccessTokenFromStorage();
+        const token = getAccessToken();
         let tokenRole: string | null = null;
-        let cachedRole: string | null = null;
 
         if (token) {
             const payload = parseTokenPayload(token);
             tokenRole = typeof payload?.role === 'string' ? payload.role : null;
         }
 
-        const rawUser = localStorage.getItem('user');
-        if (rawUser) {
-            try {
-                const parsedUser = JSON.parse(rawUser) as UserContext;
-                cachedRole = parsedUser?.role ?? null;
-            } catch {
-                cachedRole = null;
-            }
-        }
-
-        if (!cachedRole && !tokenRole) {
+        if (!tokenRole) {
             return <Navigate to="/login" replace />;
         }
 
-        const hasAllowedRole =
-            (cachedRole ? allowedRoles.includes(cachedRole) : false)
-            || (tokenRole ? allowedRoles.includes(tokenRole) : false);
-
-        if (!hasAllowedRole) {
+        if (!allowedRoles.includes(tokenRole)) {
             return <Navigate to="/hub" replace />;
         }
     }

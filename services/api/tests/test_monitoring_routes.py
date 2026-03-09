@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from routes.monitoring import router as monitoring_router
+
 MSK = timezone(timedelta(hours=3))
 
 pytestmark = pytest.mark.anyio
@@ -20,7 +21,6 @@ def _developer_user() -> dict:
         "discord_id": 9099,
         "require_password_change": False,
         "permissions": {
-            "monitoring.refresh": True,
             "monitoring.view": True,
         },
     }
@@ -41,9 +41,7 @@ def _seed_streamer(
         "streamer_name": name,
         "is_online": online,
         "is_pinned": False,
-        "started_at": (
-            datetime.now(MSK).isoformat() if online else None
-        ),
+        "started_at": datetime.now(MSK).isoformat() if online else None,
         "priority": priority,
         "pr_slots": 2,
         "game_id": game_id,
@@ -58,48 +56,15 @@ def _seed_streamer(
     }
 
 
-async def _client(
-    build_api_app,
-    include_broker: bool = True,
-    current_user: dict | None = None,
-):
+async def _client(build_api_app, current_user: dict | None = None):
     app = build_api_app(
         monitoring_router,
-        include_broker=include_broker,
         current_user=current_user,
     )
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def test_refresh_monitoring_with_and_without_broker(
-    build_api_app, fake_broker
-) -> None:
-    dev_user = _developer_user()
-    async with await _client(
-        build_api_app,
-        include_broker=True,
-        current_user=dev_user,
-    ) as client:
-        ok = await client.post("/api/monitoring/refresh", json={"force": True})
-
-    assert ok.status_code == 200
-    assert any(call[0] == "monitoring.refresh" for call in fake_broker.calls)
-
-    async with await _client(
-        build_api_app,
-        include_broker=False,
-        current_user=dev_user,
-    ) as client:
-        unavailable = await client.post(
-            "/api/monitoring/refresh", json={"force": False}
-        )
-
-    assert unavailable.status_code == 503
-    assert unavailable.json()["code"] == "BROKER_UNAVAILABLE"
-
-
 async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> None:
-    # GTA online, main slot free
     _seed_streamer(
         fake_db,
         6001,
@@ -109,8 +74,6 @@ async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> 
         assignments=[],
         priority=0,
     )
-
-    # GTA online, both slots taken
     _seed_streamer(
         fake_db,
         6002,
@@ -123,8 +86,6 @@ async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> 
         ],
         priority=2,
     )
-
-    # Non-GTA online
     _seed_streamer(
         fake_db,
         6003,
@@ -134,8 +95,6 @@ async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> 
         assignments=[],
         priority=1,
     )
-
-    # Offline streamer
     _seed_streamer(
         fake_db, 6004, "offline", online=False, game_id=32982, assignments=[]
     )
@@ -148,8 +107,6 @@ async def test_get_monitoring_status_aggregates_data(build_api_app, fake_db) -> 
 
     assert response.status_code == 200
     data = response.json()["data"]
-
-    # Monitoring now builds from online streamer list.
     assert data["total_streamers"] == 3
     assert data["online_count"] == 3
     assert data["gta_count"] == 2

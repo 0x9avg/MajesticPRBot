@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AssistantsManagement from '../AssistantsManagement';
+import { setAccessToken } from '../../../../api/client';
 
 type StorageDict = Record<string, string>;
 
@@ -86,10 +87,11 @@ const createFetchMock = () =>
 describe('AssistantsManagement', () => {
     beforeEach(() => {
         vi.stubGlobal('localStorage', createLocalStorageMock());
-        localStorage.setItem('access_token', 'test-token');
+        setAccessToken('test-token');
     });
 
     afterEach(() => {
+        setAccessToken(null);
         vi.restoreAllMocks();
         vi.unstubAllGlobals();
     });

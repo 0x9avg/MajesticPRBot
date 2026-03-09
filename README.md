@@ -37,6 +37,11 @@
 - `services/discord_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `discord_service:<token>`.
 - `services/twitch_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `twitch_service:<token>`.
 
+Fail-fast настройки запуска:
+- API требует явные `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JWT_SECRET_KEY`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SERVICE_TOKENS`.
+- Discord Bot требует явные `DISCORD_TOKEN`, `GUILD_ID`, `API_BASE_URL`, `SERVICE_TOKEN`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`.
+- Twitch Bot требует явные `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `TWITCH_BOT_ID`, `API_BASE_URL`, `SERVICE_TOKEN`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`.
+
 ### 2. Запуск Сервисов (Ручной режим)
 
 Вам потребуется открыть 4 терминала.
@@ -76,6 +81,13 @@ cd web
 npm install
 npm run dev
 ```
+
+## 🔢 Версионирование
+
+- Единый источник версии проекта: корневой файл `VERSION`.
+- API читает эту версию и отдает ее в `/api/health` и `/api/health/ready`.
+- Веб-панель показывает ту же версию в админке через сборку Vite.
+- Для нового релиза достаточно изменить значение в `VERSION`.
 
 ## 🏗️ Структура
 

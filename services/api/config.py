@@ -8,7 +8,7 @@ import os
 import sys
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
-from typing import List
+from typing import ClassVar, List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +16,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """API Service configuration using Pydantic Settings."""
+
+    _PLACEHOLDER_VALUES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "",
+            "changeme",
+            "change_me",
+            "replace_me",
+            "replace_with_a_secure_jwt_secret_key",
+            "replace_with_discord_service_token",
+            "replace_with_twitch_service_token",
+        }
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -36,16 +48,16 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Database Settings
     # ==========================================================================
-    db_host: str = Field(default="localhost", validation_alias="DB_HOST")
-    db_port: int = Field(default=3306, validation_alias="DB_PORT")
-    db_user: str = Field(default="root", validation_alias="DB_USER")
-    db_password: str = Field(default="root", validation_alias="DB_PASSWORD")
-    db_name: str = Field(default="prmajesticbot", validation_alias="DB_NAME")
+    db_host: str = Field(default="", validation_alias="DB_HOST")
+    db_port: int = Field(default=0, validation_alias="DB_PORT")
+    db_user: str = Field(default="", validation_alias="DB_USER")
+    db_password: str = Field(default="", validation_alias="DB_PASSWORD")
+    db_name: str = Field(default="", validation_alias="DB_NAME")
 
     # ==========================================================================
     # JWT Settings
     # ==========================================================================
-    jwt_secret: str = Field(default="changeme", validation_alias="JWT_SECRET_KEY")
+    jwt_secret: str = Field(default="", validation_alias="JWT_SECRET_KEY")
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
@@ -53,18 +65,12 @@ class Settings(BaseSettings):
     # ==========================================================================
     # RabbitMQ Settings
     # ==========================================================================
-    rabbitmq_host: str = Field(default="localhost", validation_alias="RABBITMQ_HOST")
-    rabbitmq_port: int = Field(default=5672, validation_alias="RABBITMQ_PORT")
-    rabbitmq_user: str = Field(default="guest", validation_alias="RABBITMQ_USER")
-    rabbitmq_password: str = Field(
-        default="guest", validation_alias="RABBITMQ_PASSWORD"
-    )
-    rabbitmq_vhost: str = Field(default="/", validation_alias="RABBITMQ_VHOST")
+    rabbitmq_host: str = Field(default="", validation_alias="RABBITMQ_HOST")
+    rabbitmq_port: int = Field(default=0, validation_alias="RABBITMQ_PORT")
+    rabbitmq_user: str = Field(default="", validation_alias="RABBITMQ_USER")
+    rabbitmq_password: str = Field(default="", validation_alias="RABBITMQ_PASSWORD")
+    rabbitmq_vhost: str = Field(default="", validation_alias="RABBITMQ_VHOST")
     exchange_name: str = "prmajesticbot"
-
-    @property
-    def rabbitmq_url(self) -> str:
-        return f"amqp://{self.rabbitmq_user}:{self.rabbitmq_password}@{self.rabbitmq_host}:{self.rabbitmq_port}/{self.rabbitmq_vhost}"
 
     # ==========================================================================
     # CORS Settings
@@ -85,7 +91,6 @@ class Settings(BaseSettings):
     # Security Settings
     # ==========================================================================
     max_login_attempts: int = 5
-    login_attempt_window: int = 300  # seconds
     account_lockout_duration: int = 900  # seconds
 
     # Service tokens for bots (comma-separated list of pre-shared secrets)
@@ -94,11 +99,6 @@ class Settings(BaseSettings):
     # - only named entries are accepted
     service_tokens: str = Field(default="", validation_alias="SERVICE_TOKENS")
     required_service_principals: tuple[str, ...] = ("discord_service", "twitch_service")
-
-    @property
-    def service_token_list(self) -> List[str]:
-        """Return only token values from SERVICE_TOKENS."""
-        return list(self.service_token_map.values())
 
     @property
     def service_token_map(self) -> dict[str, str]:
@@ -147,6 +147,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"Invalid SERVICE_TOKENS entry '{item}': token is empty."
                 )
+            if self._looks_like_placeholder(value):
+                raise ValueError(
+                    f"Invalid SERVICE_TOKENS entry '{item}': token uses a placeholder value."
+                )
             if key in mapping:
                 raise ValueError(
                     f"Invalid SERVICE_TOKENS: duplicate service name '{key}'."
@@ -173,6 +177,85 @@ class Settings(BaseSettings):
         """Fail-fast validation for strict SERVICE_TOKENS contract."""
         self._parse_service_token_map_strict()
 
+    @classmethod
+    def _looks_like_placeholder(cls, value: str) -> bool:
+        normalized = value.strip().lower()
+        return (
+            normalized in cls._PLACEHOLDER_VALUES
+            or normalized.startswith("replace_with_")
+            or normalized.startswith("your_")
+            or normalized.endswith("_here")
+        )
+
+    @staticmethod
+    def _is_blank(value: str) -> bool:
+        return not value or not value.strip()
+
+    def validate_database_config(self) -> None:
+        """Fail-fast validation for required DB settings."""
+        errors: list[str] = []
+        if self._is_blank(self.db_host):
+            errors.append("DB_HOST is required.")
+        if self.db_port <= 0:
+            errors.append("DB_PORT must be a positive integer.")
+        if self._is_blank(self.db_user):
+            errors.append("DB_USER is required.")
+        if self._is_blank(self.db_password):
+            errors.append("DB_PASSWORD is required.")
+        if self._looks_like_placeholder(self.db_password):
+            errors.append("DB_PASSWORD must not use a placeholder value.")
+        if self._is_blank(self.db_name):
+            errors.append("DB_NAME is required.")
+
+        if errors:
+            raise ValueError("Invalid database configuration:\n- " + "\n- ".join(errors))
+
+    def validate_auth_config(self) -> None:
+        """Fail-fast validation for JWT/auth settings."""
+        errors: list[str] = []
+        if self._is_blank(self.jwt_secret):
+            errors.append("JWT_SECRET_KEY is required.")
+        elif self._looks_like_placeholder(self.jwt_secret):
+            errors.append("JWT_SECRET_KEY must not use a placeholder value.")
+
+        if errors:
+            raise ValueError("Invalid auth configuration:\n- " + "\n- ".join(errors))
+
+    def validate_broker_config(self) -> None:
+        """Fail-fast validation for RabbitMQ settings."""
+        errors: list[str] = []
+        if self._is_blank(self.rabbitmq_host):
+            errors.append("RABBITMQ_HOST is required.")
+        if self.rabbitmq_port <= 0:
+            errors.append("RABBITMQ_PORT must be a positive integer.")
+        if self._is_blank(self.rabbitmq_user):
+            errors.append("RABBITMQ_USER is required.")
+        if self._is_blank(self.rabbitmq_password):
+            errors.append("RABBITMQ_PASSWORD is required.")
+        if self._is_blank(self.rabbitmq_vhost):
+            errors.append("RABBITMQ_VHOST is required.")
+
+        if errors:
+            raise ValueError("Invalid RabbitMQ configuration:\n- " + "\n- ".join(errors))
+
+    def validate_service_startup(self) -> None:
+        """Validate the config needed for API service startup."""
+        errors: list[str] = []
+
+        for validator in (
+            self.validate_database_config,
+            self.validate_auth_config,
+            self.validate_broker_config,
+            self.validate_service_tokens_contract,
+        ):
+            try:
+                validator()
+            except ValueError as exc:
+                errors.append(str(exc))
+
+        if errors:
+            raise ValueError("\n".join(errors))
+
     # ==========================================================================
     # Cookie Settings for Refresh Token
     # ==========================================================================
@@ -180,11 +263,6 @@ class Settings(BaseSettings):
     cookie_samesite: str = "lax"
     cookie_path: str = "/api/auth"
     cookie_domain: str = Field(default="", validation_alias="COOKIE_DOMAIN")
-
-    # ==========================================================================
-    # Guild Settings (Single-tenant mode)
-    # ==========================================================================
-    guild_id: str = Field(default="0", validation_alias="GUILD_ID")
 
     # ==========================================================================
     # Game IDs
@@ -195,14 +273,16 @@ class Settings(BaseSettings):
     # Notification Templates
     # ==========================================================================
     allowed_event_types: List[str] = [
-        "stream_online",
+        "stream_online_gta",
+        "stream_online_other",
         "stream_offline",
         "category_to_gta",
         "category_from_gta",
     ]
 
     template_defaults: dict = {
-        "stream_online": "**{streamer_name}** начал стрим!",
+        "stream_online_gta": "**{streamer_name}** начал стрим по GTA 5!",
+        "stream_online_other": "**{streamer_name}** начал стрим!",
         "stream_offline": "**{streamer_name}** закончил стрим",
         "category_to_gta": "**{streamer_name}** сменил категорию на GTA 5!",
         "category_from_gta": "**{streamer_name}** ушел с GTA 5",
@@ -254,6 +334,14 @@ class Settings(BaseSettings):
                 "DB_PASSWORD is set to an insecure default. "
                 "Use a strong password in production."
             )
+        if not self.cookie_secure:
+            errors.append("COOKIE_SECURE must be true in production.")
+
+        normalized_panel_url = (self.web_panel_url or "").strip().lower()
+        if normalized_panel_url.startswith("http://"):
+            errors.append("WEB_PANEL_URL must use HTTPS in production.")
+        if "localhost" in normalized_panel_url or "127.0.0.1" in normalized_panel_url:
+            errors.append("WEB_PANEL_URL must not point to localhost in production.")
 
         if errors:
             for e in errors:

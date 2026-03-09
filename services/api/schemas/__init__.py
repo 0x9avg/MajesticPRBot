@@ -32,9 +32,6 @@ from schemas.guild import (
     GuildTemplatesUpdate,
 )
 
-# Monitoring
-from schemas.monitoring import MonitoringRefreshResponse
-
 # Spec
 from schemas.spec import (
     ActiveSpecResponse,
@@ -89,6 +86,4 @@ __all__ = [
     "SpecTransferRequest",
     "SpecSessionResponse",
     "ActiveSpecResponse",
-    # Monitoring
-    "MonitoringRefreshResponse",
 ]

@@ -139,7 +139,6 @@ celerybeat.pid
 .env
 .envrc
 .venv
-env/
 venv/
 ENV/
 env.bak/
@@ -218,6 +217,8 @@ web/build/
 web/.env.local
 web/.env.development.local
 web/.env.test.local
+deploy/env/*.env
+!deploy/env/*.env.example
 web/.env.production.local
 web/npm-debug.log*
 web/yarn-debug.log*

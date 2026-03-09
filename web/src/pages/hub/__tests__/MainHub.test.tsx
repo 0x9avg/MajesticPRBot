@@ -39,8 +39,7 @@ const makeUser = (role: UserContext['role']): UserContext => ({
             : {}),
         ...(role === 'developer'
             ? {
-                'monitoring.view': true,
-                'monitoring.refresh': true,
+                'monitoring.view': true
             }
             : {}),
     },

@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, X, Calendar as CalendarIcon, Check, Clock, Search } from 'lucide-react';
 import { getMskTodayStr, getMskNow, formatMskToLocal } from '../utils/datetime';
 
+const dateOnlyFormatOptions: Intl.DateTimeFormatOptions = {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+};
+
 // ==========================================
 // Custom Select Component
 // ==========================================
@@ -19,25 +25,27 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
     const [search, setSearch] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
     const searchRef = useRef<HTMLInputElement>(null);
+    const closeMenu = () => {
+        setIsOpen(false);
+        setSearch('');
+    };
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-                setIsOpen(false);
-                setSearch('');
+                closeMenu();
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    // Autofocus search when opens, clear when closes
+    // Autofocus search when opens
     useEffect(() => {
-        if (isOpen) {
-            setTimeout(() => searchRef.current?.focus(), 50);
-        } else {
-            setSearch('');
-        }
+        if (!isOpen) return undefined;
+
+        const timeoutId = window.setTimeout(() => searchRef.current?.focus(), 50);
+        return () => window.clearTimeout(timeoutId);
     }, [isOpen]);
 
     const filteredOptions = search.trim()
@@ -67,8 +75,7 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
             }
         } else {
             onChange(optionValue);
-            setIsOpen(false);
-            setSearch('');
+            closeMenu();
         }
     };
 
@@ -87,7 +94,13 @@ export const CustomSelect = ({ value, onChange, options, placeholder = "Select..
                     cursor-pointer flex items-center justify-between hover:border-white/20 hover:bg-[#323232] transition-colors
                     ${isOpen ? 'border-purple-500/50 ring-1 ring-purple-500/20' : ''}
                 `}
-                onClick={() => setIsOpen(!isOpen)}
+                onClick={() => {
+                    if (isOpen) {
+                        closeMenu();
+                    } else {
+                        setIsOpen(true);
+                    }
+                }}
             >
                 {icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-white/20">{icon}</div>}
                 <span className={`block truncate ${multiple && Array.isArray(value) && value.length === 0 ? 'text-white/40' : !value ? 'text-white/40' : 'text-white'} ${icon ? 'ml-6' : ''}`}>
@@ -346,7 +359,7 @@ export const CustomDatePicker = ({ value, onChange, placeholder = "DD.MM.YYYY" }
                 <div className="flex items-center gap-2 overflow-hidden">
                     <CalendarIcon className="w-4 h-4 text-white/40 shrink-0" />
                     <span className={value ? 'text-white' : 'text-white/40'}>
-                        {value ? formatMskToLocal(value, { day: '2-digit', month: '2-digit', year: 'numeric', hour: undefined, minute: undefined } as any) : placeholder}
+                        {value ? formatMskToLocal(value, dateOnlyFormatOptions) : placeholder}
                     </span>
                 </div>
                 {value ? (

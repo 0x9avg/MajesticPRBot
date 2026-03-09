@@ -51,8 +51,6 @@ class APIClient:
     ) -> Optional[Dict]:
         session = await self._get_session()
         url = f"{self.base_url}/api{endpoint}"
-        if endpoint == "/health":
-            url = f"{self.base_url}{endpoint}"
 
         try:
             async with session.request(method, url, json=data, params=params) as resp:
@@ -62,14 +60,14 @@ class APIClient:
                 result = await resp.json()
 
                 # Unwrap API Envelope
-                if isinstance(result, dict) and "status" in result and "data" in result:
-                    if result["status"] == "success" or resp.status < 400:
-                        return result["data"]
-                    else:
-                        # Envelope with error status
-                        error_msg = result.get("message", "Unknown API error")
-                        self.logger.warning(f"API Error ({resp.status}): {error_msg}")
-                        return result  # Return full envelope for custom error handling if needed
+                if isinstance(result, dict) and "status" in result:
+                    envelope_status = str(result.get("status"))
+                    if resp.status < 400 and envelope_status in {"success", "accepted"}:
+                        return result.get("data")
+
+                    error_msg = result.get("message", "Unknown API error")
+                    self.logger.warning(f"API Error ({resp.status}): {error_msg}")
+                    return result
 
                 if not isinstance(result, (dict, list)) and result is not None:
                     self.logger.warning(
@@ -99,8 +97,6 @@ class APIClient:
 
     async def get_health(self) -> Dict[str, Any]:
         """Get API health status."""
-        # Assuming there is a /health endpoint not under /api
-        # or we just returning a dummy structure if not exists, but better try /health
         try:
             result = await self._request("GET", "/health")
             if result:
@@ -109,11 +105,40 @@ class APIClient:
         except:  # noqa: E722
             return {"status": "unreachable"}
 
-    async def sync_streamers(self) -> Dict[str, Any]:
-        """Trigger streamers sync (via refreshing monitoring for now)."""
-        # Ideally this would tell Twitch Bot to sync.
-        # Fallback to refreshing monitoring.
-        return await self.refresh_monitoring(force=True)
+    async def trigger_twitch_sync(self) -> bool:
+        """Trigger full Twitch resync via API service command."""
+        result = await self._request("POST", "/services/twitch/sync")
+        return result is not None and not (
+            isinstance(result, dict)
+            and result.get("status")
+            in {"error", "conflict", "not_found", "validation_failed"}
+        )
+
+    async def get_service_overview(self) -> Optional[Dict[str, Any]]:
+        """Get aggregated runtime overview for API, bots, and core dependencies."""
+        result = await self._request("GET", "/services/overview")
+        return result if isinstance(result, dict) else None
+
+    async def report_service_status(
+        self,
+        *,
+        status: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Report current service heartbeat to the API."""
+        result = await self._request(
+            "POST",
+            "/services/heartbeat",
+            data={
+                "status": status,
+                "details": details or {},
+            },
+        )
+        return result is not None and not (
+            isinstance(result, dict)
+            and result.get("status")
+            in {"error", "conflict", "not_found", "validation_failed"}
+        )
 
     async def list_all_streamers(self) -> List[Dict]:
         """Get all streamers."""
@@ -288,10 +313,6 @@ class APIClient:
         return await self._request(
             "POST", f"/assistants/{user_id}/subtract-time", params={"seconds": seconds}
         )
-
-    async def refresh_monitoring(self, force: bool = False) -> Optional[Dict]:
-        """Request monitoring refresh."""
-        return await self._request("POST", "/monitoring/refresh", data={"force": force})
 
     async def get_dashboard_stats(self) -> Optional[Dict]:
         """Get dashboard stats."""

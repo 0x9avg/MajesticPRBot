@@ -69,9 +69,9 @@ describe('Login', () => {
             expect(navigateMock).toHaveBeenCalledWith('/hub');
         });
 
-        expect(localStorage.getItem('access_token')).toBeTruthy();
+        expect(localStorage.getItem('access_token')).toBeNull();
         expect(localStorage.getItem('refresh_token')).toBeNull();
-        expect(localStorage.getItem('user')).toContain('tester');
+        expect(localStorage.getItem('user')).toBeNull();
     });
 
     it('shows backend error on failed login', async () => {
@@ -97,7 +97,7 @@ describe('Login', () => {
     });
 
     it('clears auth and shows session message when /auth/me returns 401', async () => {
-        localStorage.setItem('access_token', buildAccessToken());
+        setAccessToken(buildAccessToken());
         localStorage.setItem('refresh_token', 'old-refresh');
         localStorage.setItem('user', '{"username":"old"}');
 
@@ -129,7 +129,6 @@ describe('Login', () => {
             expect(screen.getByText('Сессия недействительна. Выполните вход снова.')).toBeInTheDocument();
         });
 
-        expect(localStorage.getItem('access_token')).toBeNull();
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toBeNull();
         expect(navigateMock).not.toHaveBeenCalled();

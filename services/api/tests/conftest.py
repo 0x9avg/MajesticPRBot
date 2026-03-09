@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -183,10 +184,6 @@ class FakeBroker:
             ("guild.rates.updated", {"payload": payload, "trace_id": trace_id})
         )
 
-    async def emit_monitoring_refresh(self, trace_id: str) -> None:
-        self.calls.append(("monitoring.refresh", {"trace_id": trace_id}))
-
-
 class FakeAuth:
     secret_key = "test-secret"
     algorithm = "HS256"
@@ -292,6 +289,8 @@ class FakeDB:
         self.sessions: list[dict[str, Any]] = []
         self.auth_logs: list[dict[str, Any]] = []
         self.raise_on_create_user: Exception | None = None
+        self.raise_on_create_or_update_assistant: Exception | None = None
+        self.raise_on_log_admin_action: Exception | None = None
 
         # Assistants/permissions
         self.assistants_by_id: dict[int, dict[str, Any]] = {}
@@ -384,7 +383,6 @@ class FakeDB:
                 "admin.users.create": True,
                 "logs.admin.view": True,
                 "monitoring.view": True,
-                "monitoring.refresh": True,
                 "notifications.render": True,
                 "streamers.status.update": True,
                 "spec.claim.probation": True,
@@ -418,6 +416,17 @@ class FakeDB:
             "assigned_pr_count": 0,
             "unassigned_media_count": 0,
             "events_today_count": 0,
+        }
+        self.service_overview_stats: dict[str, Any] = {
+            "streamers_total": 0,
+            "streamers_online": 0,
+            "gta_online": 0,
+            "active_spec_sessions": 0,
+            "probation_sessions": 0,
+            "active_events": 0,
+            "assistants_total": 0,
+            "web_users_total": 0,
+            "admin_actions_24h": 0,
         }
 
         # Returns
@@ -455,6 +464,38 @@ class FakeDB:
         self.users_by_username[username] = user
         self.users_by_discord[discord_id] = user
         self.users_by_id[discord_id] = user
+        return discord_id
+
+    async def create_user_with_assistant(
+        self,
+        discord_id: int,
+        username: str,
+        password_hash: str,
+        nickname: str,
+        role: str,
+        appointed_at: date | None = None,
+        experience_days: int = 0,
+        created_by: int | None = None,
+    ) -> int:
+        await self.create_user(
+            discord_id=discord_id,
+            username=username,
+            password_hash=password_hash,
+            created_by=created_by,
+        )
+        try:
+            await self.create_or_update_assistant(
+                pr_id=discord_id,
+                nickname=nickname,
+                role=role,
+                experience_days=experience_days,
+                appointed_at=appointed_at,
+            )
+        except Exception:
+            self.users_by_username.pop(username, None)
+            self.users_by_discord.pop(discord_id, None)
+            self.users_by_id.pop(discord_id, None)
+            raise
         return discord_id
 
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
@@ -532,9 +573,13 @@ class FakeDB:
     # Common logging
     # ---------------------------------------------------------------------
     async def log_admin_action(self, **kwargs: Any) -> None:
+        if self.raise_on_log_admin_action:
+            raise self.raise_on_log_admin_action
         self.logged_actions.append(kwargs)
 
     async def log_admin_action_v2(self, **kwargs: Any) -> None:
+        if self.raise_on_log_admin_action:
+            raise self.raise_on_log_admin_action
         self.logged_actions.append(kwargs)
 
     async def get_admin_logs(
@@ -812,6 +857,8 @@ class FakeDB:
         experience_days: int = 0,
         appointed_at: date | None = None,
     ) -> bool:
+        if self.raise_on_create_or_update_assistant:
+            raise self.raise_on_create_or_update_assistant
         existing = self.assistants_by_id.get(pr_id, {})
         appointed_at_dt = (
             datetime.combine(appointed_at, datetime.min.time(), tzinfo=MSK)
@@ -1092,7 +1139,10 @@ class FakeDB:
     # ---------------------------------------------------------------------
     # Streamers / Spec
     # ---------------------------------------------------------------------
-    async def list_all_streamers(self) -> list[dict[str, Any]]:
+    async def list_all_streamers(
+        self,
+        include_assignments: bool = False,
+    ) -> list[dict[str, Any]]:
         return [deepcopy(s) for s in self.streamers_by_id.values()]
 
     async def list_online_streamers(self) -> list[dict[str, Any]]:
@@ -1174,6 +1224,7 @@ class FakeDB:
         game_name: str | None = None,
         stream_title: str | None = None,
         stream_thumbnail_url: str | None = None,
+        profile_image_url: str | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         streamer = self.streamers_by_id.get(streamer_id)
         if not streamer:
@@ -1187,6 +1238,7 @@ class FakeDB:
                 "game_name": game_name,
                 "stream_title": stream_title,
                 "stream_thumbnail_url": stream_thumbnail_url,
+                "profile_image_url": profile_image_url,
             }
         )
         return old_state, deepcopy(streamer)
@@ -1292,6 +1344,8 @@ class FakeDB:
         notification_sent: bool = False,
         pr_slots: int = 1,
         priority: int = 0,
+        is_pinned: bool = False,
+        points: float | None = None,
     ) -> int | None:
         if self.force_create_event_fail:
             return None
@@ -1304,7 +1358,8 @@ class FakeDB:
             "required_pr_count": required_pr_count,
             "pr_slots": pr_slots,
             "priority": priority,
-            "is_pinned": False,
+            "is_pinned": is_pinned,
+            "points": points,
             "start_time": start_time,
             "channel_id": None,
             "created_by": created_by,
@@ -1492,7 +1547,8 @@ class FakeDB:
                 "control_panel_channel_id": None,
                 "control_panel_message_id": None,
                 "notification_templates": {
-                    "stream_online": "Online: {streamer_name}",
+                    "stream_online_gta": "Online GTA: {streamer_name}",
+                    "stream_online_other": "Online: {streamer_name}",
                     "stream_offline": "Offline: {streamer_name}",
                     "category_to_gta": "To GTA: {streamer_name}",
                     "category_from_gta": "From GTA: {streamer_name}",
@@ -1510,15 +1566,18 @@ class FakeDB:
 
     async def update_guild_templates(
         self,
-        template_stream_online: str | None = None,
+        template_stream_online_gta: str | None = None,
+        template_stream_online_other: str | None = None,
         template_stream_offline: str | None = None,
         template_category_to_gta: str | None = None,
         template_category_from_gta: str | None = None,
     ) -> bool:
         await self.create_or_update_guild()
         templates = self.guild_settings.setdefault("notification_templates", {})
-        if template_stream_online is not None:
-            templates["stream_online"] = template_stream_online
+        if template_stream_online_gta is not None:
+            templates["stream_online_gta"] = template_stream_online_gta
+        if template_stream_online_other is not None:
+            templates["stream_online_other"] = template_stream_online_other
         if template_stream_offline is not None:
             templates["stream_offline"] = template_stream_offline
         if template_category_to_gta is not None:
@@ -1557,6 +1616,9 @@ class FakeDB:
     # ---------------------------------------------------------------------
     async def get_dashboard_stats(self) -> dict[str, Any]:
         return deepcopy(self.dashboard_stats)
+
+    async def get_service_overview_stats(self) -> dict[str, Any]:
+        return deepcopy(self.service_overview_stats)
 
 
 @pytest.fixture()
@@ -1646,6 +1708,7 @@ def build_api_app(
         *routers: Any,
         include_broker: bool = True,
         current_user: dict[str, Any] | None = None,
+        current_service: dict[str, Any] | None = None,
     ) -> FastAPI:
         app = FastAPI()
         for router in routers:
@@ -1654,11 +1717,25 @@ def build_api_app(
         app.state.database = fake_db
         app.state.auth = fake_auth
         app.state.broker = fake_broker if include_broker else None
+        app.state._service_registry = {}
+        app.state._startup_complete = True
+        app.state._perf_start_time = time.perf_counter()
 
         app.state.test_current_user = current_user or deepcopy(default_current_user)
+        app.state.test_current_service = current_service or {
+            "principal_type": "service",
+            "service_name": "discord_service",
+            "permissions": {
+                "monitoring.view": True,
+                "streamers.status.update": True,
+            },
+        }
 
         async def _override_current_user() -> dict[str, Any]:
             return app.state.test_current_user
+
+        async def _override_current_service() -> dict[str, Any]:
+            return app.state.test_current_service
 
         async def _override_db(request: Request) -> FakeDB:
             return request.app.state.database
@@ -1672,6 +1749,7 @@ def build_api_app(
         # Use async dependency overrides to avoid anyio threadpool hangs in this env.
         app.dependency_overrides[dependencies.get_current_user] = _override_current_user
         app.dependency_overrides[dependencies.get_current_principal] = _override_current_user
+        app.dependency_overrides[dependencies.get_current_service] = _override_current_service
         app.dependency_overrides[dependencies.get_db] = _override_db
         app.dependency_overrides[dependencies.get_auth] = _override_auth
 
@@ -1759,11 +1837,13 @@ def set_current_user(app: FastAPI):
                 "guild.settings.update": True,
                 "guild.templates.view": True,
                 "guild.templates.update": True,
-                "guild.rates.view": True,
-                "guild.rates.update": True,
-                "notifications.render": True,
-            },
-        }
+            "guild.rates.view": True,
+            "guild.rates.update": True,
+            "notifications.render": True,
+            "monitoring.view": True,
+            "streamers.status.update": True,
+        },
+    }
         base_user.update(overrides)
         app.state.test_current_user = base_user
         return base_user

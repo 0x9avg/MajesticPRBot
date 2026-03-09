@@ -60,7 +60,8 @@ async def render_notification(
 
     # Validate event type
     valid_types = [
-        "stream_online",
+        "stream_online_gta",
+        "stream_online_other",
         "stream_offline",
         "category_to_gta",
         "category_from_gta",
@@ -111,8 +112,7 @@ async def render_notification(
     )
 
     # Determine if claim button should be shown
-    is_gta = str(streamer.get("game_id")) == Config.gta5_game_id
-    show_claim_button = is_gta and event_type in ["stream_online", "category_to_gta"]
+    show_claim_button = event_type in ["stream_online_gta", "category_to_gta"]
 
     # Build component spec (Discord bot will interpret this)
     component_spec = {

@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import type { Assistant } from '../types/domain';
 import type { UserContext } from '../types/auth';
 import { unwrapApiData } from '../types/api';
-import { apiFetch, setAccessToken, getAccessToken, onLogout } from '../api/client';
+import { apiFetch, setAccessToken, onLogout } from '../api/client';
 
 void React;
 
@@ -88,9 +88,8 @@ export default function MainLayout() {
                     console.warn("Failed to fetch extended assistant data", e);
                 }
 
-                // Update state and storage
+                // Update state
                 setUser(finalUserData);
-                localStorage.setItem('user', JSON.stringify(finalUserData));
 
             } catch (err) {
                 console.error('Failed to update user data:', err);
@@ -99,37 +98,13 @@ export default function MainLayout() {
             }
         };
 
-        // Load initially from storage
-        const userJson = localStorage.getItem('user');
-        if (userJson) {
-            try {
-                const parsedUser = JSON.parse(userJson) as UserContext;
-                setUser({
-                    ...parsedUser,
-                    permissions: parsedUser.permissions || {},
-                });
-            } catch {
-                // ignore malformed local cache
-            }
-        }
-
-        // Restore access token from localStorage on mount (page refresh)
-        if (!getAccessToken()) {
-            const storedToken = localStorage.getItem('access_token');
-            if (storedToken) {
-                setAccessToken(storedToken);
-            }
-        }
-
         // Then refresh from network
         fetchUserData();
     }, [navigate]);
 
     const handleLogout = async () => {
         try {
-            if (getAccessToken() || localStorage.getItem('access_token')) {
-                await apiFetch('/api/auth/logout/current', { method: 'POST' });
-            }
+            await apiFetch('/api/auth/logout/current', { method: 'POST' });
         } catch (err) {
             console.warn('Logout request failed:', err);
         } finally {
@@ -146,14 +121,14 @@ export default function MainLayout() {
         <div className="min-h-screen bg-[#1a1a1a] text-white flex flex-col font-sans overflow-hidden">
             <header className="fixed top-0 left-0 right-0 z-50 bg-[#1a1a1a]/80 backdrop-blur-md border-b border-white/5 h-16 flex items-center justify-between px-6 lg:px-12">
                 <div
-                    className="flex items-center gap-4 cursor-pointer hover:opacity-80 transition-opacity"
+                    className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
                     onClick={() => navigate('/hub')}
                 >
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#3b82f6] to-[#e81c5a] flex items-center justify-center shadow-lg shadow-primary/20 select-none">
                         <span className="font-bold text-white text-lg select-none">PR</span>
                     </div>
                     <h1 className="text-xl font-bold bg-gradient-to-r from-[#3b82f6] to-[#e81c5a] bg-clip-text text-transparent hidden sm:block select-none">
-                        Control Panel
+                        x Majestic
                     </h1>
                 </div>
 

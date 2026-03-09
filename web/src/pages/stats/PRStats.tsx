@@ -205,10 +205,10 @@ export function PRStats() {
 
         const labels: Record<string, string> = {
             developer: 'Разработчик',
-            manager: 'Менеджер',
-            senior_employee: 'Ст. сотрудник',
-            employee: 'Сотрудник',
-            junior_employee: 'Мл. сотрудник',
+            manager: 'Глав. ассистент',
+            senior_employee: 'Ст. ассистент',
+            employee: 'Ассистент',
+            junior_employee: 'Мл. ассистент',
         };
 
         const style = styles[role] || 'bg-white/10 text-white/60 border-white/10';

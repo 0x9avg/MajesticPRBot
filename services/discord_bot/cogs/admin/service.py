@@ -1,6 +1,4 @@
-"""Admin Service - System Tools.
-Force sync, refresh monitoring, recreate panels, bot status.
-"""
+"""Admin Service - runtime tools, sync actions, and service overview."""
 
 from __future__ import annotations
 
@@ -10,17 +8,160 @@ if TYPE_CHECKING:
     from api_client import APIClient
     from discord_bot import DiscordBot
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import disnake
 from disnake import MessageInteraction
 from disnake.ext import commands
 
 from .core import AdminControlPanelView, get_main_embed
+from versioning import APP_VERSION
 
-SERVICE_SECTION_PERMS = ["monitoring.view", "monitoring.refresh"]
+SERVICE_SECTION_PERMS = [
+    "monitoring.view",
+    "streamers.status.update",
+    "guild.settings.update",
+]
 SERVICE_VIEW_PERMS = ["monitoring.view"]
-SERVICE_REFRESH_PERMS = ["monitoring.refresh"]
+SERVICE_SYNC_PERMS = ["streamers.status.update"]
+SERVICE_PANEL_PERMS = ["guild.settings.update"]
+
+
+def _status_icon(value: str) -> str:
+    return {
+        "healthy": "🟢",
+        "online": "🟢",
+        "connected": "🟢",
+        "ready": "🟢",
+        "syncing": "🟡",
+        "degraded": "🟡",
+        "stale": "🟠",
+        "offline": "🔴",
+        "disconnected": "🔴",
+        "error": "🔴",
+    }.get(value, "⚪")
+
+
+def _severity_rank(value: str) -> int:
+    return {
+        "error": 3,
+        "offline": 3,
+        "disconnected": 3,
+        "stale": 2,
+        "degraded": 2,
+        "syncing": 1,
+        "healthy": 0,
+        "online": 0,
+        "connected": 0,
+        "ready": 0,
+    }.get(value, 1)
+
+
+def _severity_label(rank: int) -> str:
+    return {
+        3: "Критично",
+        2: "Деградация",
+        1: "Активность",
+        0: "Стабильно",
+    }.get(rank, "Неизвестно")
+
+
+def _severity_color(rank: int) -> int:
+    return {
+        3: 0xD32F2F,
+        2: 0xF57C00,
+        1: 0xFBC02D,
+        0: 0x009688,
+    }.get(rank, 0x607D8B)
+
+
+def _format_duration(seconds: int | float | None) -> str:
+    if seconds is None:
+        return "n/a"
+
+    total = max(0, int(seconds))
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    if days:
+        return f"{days}д {hours}ч {minutes}м"
+    if hours:
+        return f"{hours}ч {minutes}м"
+    if minutes:
+        return f"{minutes}м {secs}с"
+    return f"{secs}с"
+
+
+def _format_bool(value: object) -> str:
+    return "да" if bool(value) else "нет"
+
+
+def _format_heartbeat_age(value: object) -> str:
+    if value is None:
+        return "нет heartbeat"
+    if not isinstance(value, (int, float)):
+        return "unknown"
+    return _format_duration(int(value))
+
+
+def _build_incident_summary(
+    api_stats: dict,
+    discord_service: dict,
+    twitch_service: dict,
+) -> tuple[int, list[str]]:
+    incidents: list[tuple[int, str]] = []
+
+    api_status = str(api_stats.get("status", "unknown"))
+    if api_status != "healthy":
+        incidents.append(
+            (_severity_rank(api_status), f"{_status_icon(api_status)} API: `{api_status}`")
+        )
+
+    db_status = str(api_stats.get("components", {}).get("database", {}).get("status", "unknown"))
+    if db_status != "connected":
+        incidents.append(
+            (_severity_rank(db_status), f"{_status_icon(db_status)} БД: `{db_status}`")
+        )
+
+    broker_status = str(api_stats.get("components", {}).get("broker", {}).get("status", "unknown"))
+    if broker_status != "connected":
+        incidents.append(
+            (
+                _severity_rank(broker_status),
+                f"{_status_icon(broker_status)} RabbitMQ: `{broker_status}`",
+            )
+        )
+
+    for name, service in (
+        ("Discord", discord_service),
+        ("Twitch", twitch_service),
+    ):
+        service_status = str(service.get("status", "offline"))
+        if service_status not in {"online"}:
+            incidents.append(
+                (
+                    _severity_rank(service_status),
+                    f"{_status_icon(service_status)} {name}: `{service_status}`",
+                )
+            )
+
+    twitch_sync_status = str(twitch_service.get("details", {}).get("last_sync_status", "unknown"))
+    if twitch_sync_status in {"error", "syncing"}:
+        incidents.append(
+            (
+                _severity_rank(twitch_sync_status),
+                f"{_status_icon(twitch_sync_status)} Twitch sync: `{twitch_sync_status}`",
+            )
+        )
+
+    incidents.sort(key=lambda item: item[0], reverse=True)
+    if not incidents:
+        return 0, ["🟢 Инцидентов не обнаружено"]
+
+    highest = incidents[0][0]
+    return highest, [item[1] for item in incidents[:4]]
+
 
 # =============================================================================
 # Service Embed
@@ -34,35 +175,45 @@ async def get_service_embed(bot) -> disnake.Embed:
     # Calculate uptime if available
     uptime_str = "N/A"
     if hasattr(bot, "_start_time"):
-        delta = datetime.now() - bot._start_time
+        delta = datetime.now(timezone.utc) - bot._start_time
         days = delta.days
         hours, rem = divmod(delta.seconds, 3600)
         minutes = rem // 60
         uptime_str = f"{days}д {hours}ч {minutes}м"
 
-    # Get stats
-    try:
-        streamers = await bot.api_client.list_all_streamers()
-        streamer_count = len(streamers)
-        dashboard = await bot.api_client.get_dashboard_stats()
-        session_count = (
-            int(dashboard.get("assigned_pr_count", 0))
-            if isinstance(dashboard, dict)
-            else 0
-        )
-    except Exception:
-        streamer_count, session_count = "?", "?"
+    service_overview = await bot.api_client.get_service_overview()
+    api_status = service_overview.get("api", {}) if isinstance(service_overview, dict) else {}
+    domain = service_overview.get("domain", {}) if isinstance(service_overview, dict) else {}
+    services = {
+        item.get("service_name"): item
+        for item in (service_overview.get("services", []) if isinstance(service_overview, dict) else [])
+        if isinstance(item, dict)
+    }
+    discord_service = services.get("discord_service", {})
+    twitch_service = services.get("twitch_service", {})
+    severity_rank, incidents = _build_incident_summary(
+        api_status,
+        discord_service,
+        twitch_service,
+    )
+    service_state = _severity_label(severity_rank)
 
     embed = disnake.Embed(
         title="🛠️ Сервисное Меню",
         description=(
-            f"**Статус бота:**\n"
-            f"📶 Пинг API: `{ping}ms`\n"
+            f"**Состояние контура:** `{service_state}`\n"
+            f"{incidents[0]}\n\n"
+            f"**Discord Bot**\n"
+            f"📶 Gateway: `{ping}ms`\n"
             f"⏱️ Uptime: `{uptime_str}`\n"
-            f"🎥 Стримеров: `{streamer_count}`\n"
-            f"📌 Активных сессий: `{session_count}`"
+            f"📦 Версия: `v{APP_VERSION}`\n\n"
+            f"**Коротко**\n"
+            f"API: `{api_status.get('status', 'unknown')}`\n"
+            f"Стримеров online: `{domain.get('streamers_online', '?')}` / `{domain.get('streamers_total', '?')}`\n"
+            f"Активных спеков: `{domain.get('active_spec_sessions', '?')}`\n"
+            f"Событий: `{domain.get('active_events', '?')}`"
         ),
-        color=0x607D8B,
+        color=_severity_color(severity_rank),
     )
     return embed
 
@@ -85,7 +236,7 @@ class ServiceView(disnake.ui.View):
         def has_any(required: list[str]) -> bool:
             return any(bool(permissions_map.get(key, False)) for key in required)
 
-        if has_any(SERVICE_REFRESH_PERMS):
+        if has_any(SERVICE_SYNC_PERMS):
             self.add_item(
                 disnake.ui.Button(
                     label="🔄 Синхронизация Twitch",
@@ -94,28 +245,21 @@ class ServiceView(disnake.ui.View):
                     row=0,
                 )
             )
-            self.add_item(
-                disnake.ui.Button(
-                    label="🔄 Обновить мониторинг",
-                    custom_id="admin_svc_refresh",
-                    style=disnake.ButtonStyle.secondary,
-                    row=0,
-                )
-            )
+        if has_any(SERVICE_PANEL_PERMS):
             self.add_item(
                 disnake.ui.Button(
                     label="🔄 Пересоздать панели",
                     custom_id="admin_svc_respawn",
                     style=disnake.ButtonStyle.secondary,
-                    row=1,
+                    row=0,
                 )
             )
 
         if has_any(SERVICE_VIEW_PERMS):
             self.add_item(
                 disnake.ui.Button(
-                    label="📊 Статистика API",
-                    custom_id="admin_svc_api_stats",
+                    label="📊 Статус сервисов",
+                    custom_id="admin_svc_service_stats",
                     style=disnake.ButtonStyle.secondary,
                     row=1,
                 )
@@ -148,7 +292,7 @@ class AdminService(commands.Cog):
         self.api = bot.api_client
         # Record start time for uptime
         if not hasattr(bot, "_start_time"):
-            bot._start_time = datetime.now()
+            bot._start_time = datetime.now(timezone.utc)
 
     @commands.Cog.listener("on_button_click")
     async def on_service_button(self, interaction: MessageInteraction):
@@ -187,92 +331,146 @@ class AdminService(commands.Cog):
             elif custom_id == "admin_svc_sync":
                 if not await self.bot.ensure_user_permissions(
                     interaction,
-                    require_any=SERVICE_REFRESH_PERMS,
+                    require_any=SERVICE_SYNC_PERMS,
                     error_message="❌ Нет прав на запуск синхронизации.",
                 ):
                     return
-                await self.bot.api_client.sync_streamers()
-                await interaction.followup.send(
-                    "✅ Синхронизация запущена! Стримеры будут обновлены.",
-                    ephemeral=True,
-                )
+                sync_started = await self.bot.api_client.trigger_twitch_sync()
+                if sync_started:
+                    await interaction.followup.send(
+                        "✅ Полная синхронизация Twitch запущена. Бот пересоберет подписки и заново обновит статусы всех стримеров.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        "❌ Не удалось запустить синхронизацию. Проверь API и RabbitMQ.",
+                        ephemeral=True,
+                    )
 
-            elif custom_id == "admin_svc_refresh":
-                if not await self.bot.ensure_user_permissions(
-                    interaction,
-                    require_any=SERVICE_REFRESH_PERMS,
-                    error_message="❌ Нет прав на обновление мониторинга.",
-                ):
-                    return
-                # Monitoring is now ephemeral/on-demand, no persistent messages to refresh
-                await interaction.followup.send(
-                    "ℹ️ Мониторинг теперь работает по запросу (кнопка 'Открыть мониторинг').",
-                    ephemeral=True,
-                )
-
-            elif custom_id == "admin_svc_api_stats":
+            elif custom_id == "admin_svc_service_stats":
                 if not await self.bot.ensure_user_permissions(
                     interaction,
                     require_any=SERVICE_VIEW_PERMS,
                     error_message="❌ Нет прав на просмотр системной статистики.",
                 ):
                     return
-                stats = await self.bot.api_client.get_health()
-
-                # Format uptime
-                uptime = stats.get("uptime_seconds", 0)
-                hours, remainder = divmod(uptime, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                uptime_str = f"{hours}h {minutes}m {seconds}s"
-
-                # Status emoji
-                status = stats.get("status", "unknown")
-                status_emoji = (
-                    "🟢"
-                    if status == "healthy"
-                    else "🟡" if status == "degraded" else "🔴"
+                overview = await self.bot.api_client.get_service_overview() or {}
+                api_stats = overview.get("api", {})
+                domain = overview.get("domain", {})
+                services = {
+                    item.get("service_name"): item
+                    for item in overview.get("services", [])
+                    if isinstance(item, dict)
+                }
+                twitch = services.get("twitch_service", {})
+                discord_service = services.get("discord_service", {})
+                api_status = api_stats.get("status", "unknown")
+                db = api_stats.get("components", {}).get("database", {})
+                broker = api_stats.get("components", {}).get("broker", {})
+                twitch_details = twitch.get("details", {})
+                discord_details = discord_service.get("details", {})
+                severity_rank, incidents = _build_incident_summary(
+                    api_stats,
+                    discord_service,
+                    twitch,
                 )
-
-                # Components
-                components = stats.get("components", {})
-                db_emoji = "✅" if components.get("database") == "connected" else "❌"
-                broker_emoji = "✅" if components.get("broker") == "connected" else "❌"
-
-                # Entity stats
-                entity_stats = stats.get("stats", {})
+                uptime_str = _format_duration(api_stats.get("uptime_seconds"))
+                service_state = _severity_label(severity_rank)
+                incident_text = "\n".join(incidents)
+                sync_duration = _format_duration(
+                    twitch_details.get("last_sync_duration_seconds")
+                )
 
                 embed = disnake.Embed(
-                    title="📊 Статистика API",
-                    description=f"{status_emoji} **Статус**: {status.capitalize()}",
-                    color=0x00BCD4 if status == "healthy" else 0xFFC107,
-                )
-                embed.add_field(name="⏱️ Аптайм", value=uptime_str, inline=True)
-                embed.add_field(
-                    name="📦 Версия", value=stats.get("version", "?"), inline=True
-                )
-                embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
-
-                embed.add_field(
-                    name="💾 Компоненты",
-                    value=f"{db_emoji} База данных\n{broker_emoji} RabbitMQ",
-                    inline=True,
+                    title="📊 Статус сервисов",
+                    description=(
+                        f"**Общий статус:** `{service_state}`\n"
+                        f"**Инциденты:**\n{incident_text}"
+                    ),
+                    color=_severity_color(severity_rank),
                 )
                 embed.add_field(
-                    name="📈 Сущности",
+                    name="🧭 Контур",
                     value=(
-                        f"**Стримеров**: {entity_stats.get('streamers_total', 0)}\n"
-                        f"**Онлайн**: {entity_stats.get('streamers_online', 0)}\n"
-                        f"**Активных спеков**: {entity_stats.get('active_specs', 0)}"
+                        f"{_status_icon(api_status)} API: `{api_status}`\n"
+                        f"{_status_icon(discord_service.get('status', 'offline'))} Discord: `{discord_service.get('status', 'offline')}`\n"
+                        f"{_status_icon(twitch.get('status', 'offline'))} Twitch: `{twitch.get('status', 'offline')}`"
                     ),
                     inline=True,
                 )
+                embed.add_field(
+                    name="📦 API",
+                    value=(
+                        f"Версия: `v{api_stats.get('version', '?')}`\n"
+                        f"Аптайм: `{uptime_str}`\n"
+                        f"Обновлено: `{overview.get('generated_at', 'unknown')}`"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="🧩 Зависимости",
+                    value=(
+                        f"{_status_icon(db.get('status', 'unknown'))} DB: `{db.get('status', 'unknown')}` ({db.get('latency_ms', '?')} ms)\n"
+                        f"{_status_icon(broker.get('status', 'unknown'))} RabbitMQ: `{broker.get('status', 'unknown')}`"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="📈 Домен",
+                    value=(
+                        f"Стримеров: `{domain.get('streamers_total', 0)}`\n"
+                        f"Online: `{domain.get('streamers_online', 0)}`\n"
+                        f"GTA: `{domain.get('gta_online', 0)}`\n"
+                        f"Спеки: `{domain.get('active_spec_sessions', 0)}`\n"
+                        f"Стажёрские: `{domain.get('probation_sessions', 0)}`\n"
+                        f"События: `{domain.get('active_events', 0)}`"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="🤖 Discord",
+                    value=(
+                        f"Gateway: `{discord_details.get('gateway_latency_ms', round(self.bot.latency * 1000))} ms`\n"
+                        f"Target guild: `{_format_bool(discord_details.get('target_guild_connected', True))}`\n"
+                        f"Broker: `{_format_bool(discord_details.get('broker_connected', False))}`\n"
+                        f"Heartbeat age: `{_format_heartbeat_age(discord_service.get('heartbeat_age_seconds'))}`"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="🛰️ Twitch",
+                    value=(
+                        f"Sync: `{twitch_details.get('last_sync_status', 'unknown')}`\n"
+                        f"Длительность sync: `{sync_duration}`\n"
+                        f"Стримеров: `{twitch_details.get('tracked_streamers', 0)}`\n"
+                        f"Online: `{twitch_details.get('online_streamers', 0)}`\n"
+                        f"Подписок: `{twitch_details.get('subscription_targets', 0)}`\n"
+                        f"Heartbeat age: `{_format_heartbeat_age(twitch.get('heartbeat_age_seconds'))}`"
+                    ),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="🗂️ Управление",
+                    value=(
+                        f"Ассистентов: `{domain.get('assistants_total', 0)}`\n"
+                        f"Web users: `{domain.get('web_users_total', 0)}`\n"
+                        f"Admin actions 24h: `{domain.get('admin_actions_24h', 0)}`"
+                    ),
+                    inline=True,
+                )
+                if twitch_details.get("last_sync_error"):
+                    embed.add_field(
+                        name="⚠️ Последняя ошибка Twitch sync",
+                        value=f"`{twitch_details.get('last_sync_error')}`",
+                        inline=False,
+                    )
 
                 await interaction.followup.send(embed=embed, ephemeral=True)
 
             elif custom_id == "admin_svc_respawn":
                 if not await self.bot.ensure_user_permissions(
                     interaction,
-                    require_any=SERVICE_REFRESH_PERMS,
+                    require_any=SERVICE_PANEL_PERMS,
                     error_message="❌ Нет прав на пересоздание сервисных панелей.",
                 ):
                     return

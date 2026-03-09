@@ -44,6 +44,7 @@ class UnsubscribeBot(Client):
 
 async def main():
     logger.info("Initializing Twitch Client...")
+    Config.validate_twitch_credentials()
     bot = UnsubscribeBot()
     try:
         await bot.start()

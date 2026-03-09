@@ -22,7 +22,7 @@ export const ADMIN_TABS: AdminTabDefinition[] = [
         ],
     },
     { id: 'guild', label: 'Сервер', requireAny: ['guild.settings.update', 'guild.templates.update', 'guild.rates.update'] },
-    { id: 'system', label: 'Система', requireAny: ['monitoring.view', 'monitoring.refresh'] },
+    { id: 'system', label: 'Система', requireAny: ['monitoring.view'] },
 ];
 
 export const ADMIN_SECTION_PERMISSIONS: PermissionKey[] = ADMIN_TABS.flatMap((tab) => tab.requireAny);

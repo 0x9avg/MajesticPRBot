@@ -11,6 +11,7 @@ import PendingRequests from './components/PendingRequests';
 import type { OutletUserContext } from '../../types/auth';
 import { hasAny } from '../../rbac/guards';
 import { ADMIN_TABS } from '../../rbac/catalog';
+import { APP_VERSION } from '../../config/app';
 
 export function AdminPanel() {
     const { user } = useOutletContext<OutletUserContext>();
@@ -79,8 +80,8 @@ export function AdminPanel() {
 
                     <div className="mt-auto pt-4 border-t border-white/5">
                         <div className="px-4 py-3 bg-white/5 rounded-xl border border-white/5">
-                            <div className="text-xs text-white/40 mb-1">Версия сервера</div>
-                            <div className="font-mono text-white/80 text-sm">v1.1.0-DEV</div>
+                            <div className="text-xs text-white/40 mb-1">Текущая версия</div>
+                            <div className="font-mono text-white/80 text-sm">v{APP_VERSION}</div>
                         </div>
                     </div>
                 </div>

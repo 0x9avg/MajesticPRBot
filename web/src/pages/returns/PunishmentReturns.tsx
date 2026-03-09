@@ -475,7 +475,7 @@ export default function PunishmentReturns() {
         } finally {
             setQueueLoading(false);
         }
-    }, []);
+    }, [showToast]);
 
     const fetchHistory = React.useCallback(async (page = 1, filtersOverride?: HistoryFiltersState) => {
         setHistoryLoading(true);
@@ -509,7 +509,7 @@ export default function PunishmentReturns() {
         } finally {
             setHistoryLoading(false);
         }
-    }, []);
+    }, [showToast]);
 
     React.useEffect(() => {
         if (activeTab === 'queue') {

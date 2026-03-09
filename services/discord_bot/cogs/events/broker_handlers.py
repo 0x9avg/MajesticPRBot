@@ -32,7 +32,12 @@ class BrokerHandlers(commands.Cog):
         @broker.on("stream.state.online")
         async def on_stream_online(data):
             self.logger.info(f"Event: stream online - {data.get('streamer_name')}")
-            await self._handle_notification("stream_online", data)
+            # Determine notification type based on game category
+            game_id = str(data.get("game_id", ""))
+            if game_id == Config.gta5_game_id:
+                await self._handle_notification("stream_online_gta", data)
+            else:
+                await self._handle_notification("stream_online_other", data)
 
         @broker.on("stream.state.offline")
         async def on_stream_offline(data):

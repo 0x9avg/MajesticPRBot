@@ -62,12 +62,19 @@ class Database:
     """
 
     def __init__(
-        self, db_host: str, db_user: str, db_password: str, db_name: str, logger
+        self,
+        db_host: str,
+        db_port: int,
+        db_user: str,
+        db_password: str,
+        db_name: str,
+        logger,
     ) -> None:
         """Initialize database configuration.
 
         Args:
             db_host: MySQL server hostname
+            db_port: MySQL server port
             db_user: Database username
             db_password: Database password
             db_name: Database name
@@ -75,6 +82,7 @@ class Database:
         """
         self.pool: Optional[aiomysql.Pool] = None
         self.db_host = db_host
+        self.db_port = db_port
         self.db_user = db_user
         self.db_password = db_password
         self.db_name = db_name
@@ -185,6 +193,7 @@ class Database:
 
             self.pool = await aiomysql.create_pool(
                 host=self.db_host,
+                port=self.db_port,
                 user=self.db_user,
                 password=self.db_password,
                 db=self.db_name,
@@ -238,65 +247,25 @@ class Database:
                             streamer_name VARCHAR(25) NOT NULL,
                             is_online BOOLEAN DEFAULT FALSE,
                             is_pinned BOOLEAN DEFAULT FALSE,
-                            allow_juniors BOOLEAN DEFAULT TRUE,
                             stream_title VARCHAR(255),
                             stream_thumbnail_url VARCHAR(512),
                             profile_image_url VARCHAR(512),
                             stream_game_id BIGINT UNSIGNED,
                             stream_game_name VARCHAR(255),
-                            stream_started_at TIMESTAMP NULL,
+                            stream_started_at DATETIME NULL,
                             priority INT DEFAULT 0,
                             pr_slots INT DEFAULT 1,
+                            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            added_by_id BIGINT UNSIGNED,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            allow_juniors BOOLEAN DEFAULT TRUE,
                             priority_override INT DEFAULT NULL,
                             pr_slots_override INT DEFAULT NULL,
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            added_by_id BIGINT UNSIGNED,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                            UNIQUE(streamer_name)
+                            UNIQUE(streamer_name),
+                            INDEX idx_streamers_online_order (is_online, is_pinned, priority, streamer_name)
                         )
                         """
                     )
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
-                        )
-                    except Exception:
-                        pass
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers DROP COLUMN IF EXISTS stream_points_override"
-                        )
-                    except Exception:
-                        pass  # Column may not exist
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN pr_slots INT DEFAULT 1"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN allow_juniors BOOLEAN DEFAULT TRUE"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN priority_override INT DEFAULT NULL"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE streamers ADD COLUMN pr_slots_override INT DEFAULT NULL"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
 
                     # =========================================================
                     # 2. Settings Table
@@ -307,7 +276,7 @@ class Database:
                             id INT PRIMARY KEY DEFAULT 1,
                             notification_channel_id BIGINT UNSIGNED,
                             monitoring_channel_id BIGINT UNSIGNED,
-                            monitoring_message_ids BIGINT UNSIGNED,
+                            monitoring_message_id BIGINT,
                             pr_actions_channel_id BIGINT UNSIGNED,
                             control_panel_channel_id BIGINT UNSIGNED,
                             control_panel_message_id BIGINT UNSIGNED,
@@ -331,8 +300,8 @@ class Database:
                             pr_id BIGINT UNSIGNED PRIMARY KEY,
                             nickname VARCHAR(100),
                             role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL DEFAULT 'employee',
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            appointed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            appointed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             auto_points_total FLOAT NOT NULL DEFAULT 0,
                             manual_points_adjustment FLOAT NOT NULL DEFAULT 0,
                             total_points FLOAT GENERATED ALWAYS AS (
@@ -341,68 +310,8 @@ class Database:
                             penalty_points FLOAT NOT NULL DEFAULT 0,
                             penalty_percent FLOAT NOT NULL DEFAULT 0,
                             warnings_units INT UNSIGNED NOT NULL DEFAULT 0,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                         )
-                        """
-                    )
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN appointed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN auto_points_total FLOAT NOT NULL DEFAULT 0"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN manual_points_adjustment FLOAT NOT NULL DEFAULT 0"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            ALTER TABLE assistants
-                            ADD COLUMN total_points FLOAT
-                            GENERATED ALWAYS AS (
-                                ROUND(COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0), 4)
-                            ) STORED
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN penalty_points FLOAT NOT NULL DEFAULT 0"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN penalty_percent FLOAT NOT NULL DEFAULT 0"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN warnings_units INT UNSIGNED NOT NULL DEFAULT 0"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE assistants ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-                        )
-                    except Exception:
-                        pass
-                    await cursor.execute(
-                        """
-                        UPDATE assistants
-                        SET appointed_at = COALESCE(appointed_at, added_at, CURRENT_TIMESTAMP)
                         """
                     )
 
@@ -417,10 +326,11 @@ class Database:
                             
                             target_type ENUM('streamer', 'event', 'manual') NOT NULL DEFAULT 'streamer',
                             target_id BIGINT UNSIGNED NULL,
+                            target_name VARCHAR(255) NULL,
                             is_probation BOOLEAN DEFAULT FALSE,
                             
-                            started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                            ended_at TIMESTAMP NULL,
+                            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            ended_at DATETIME NULL,
                             end_reason ENUM('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown') NULL,
                             
                             # Priority snapshot & override
@@ -451,7 +361,7 @@ class Database:
                             credited_points FLOAT NOT NULL DEFAULT 0,
                             
                             # Soft-delete
-                            deleted_at TIMESTAMP NULL,
+                            deleted_at DATETIME NULL,
                             deleted_by_id BIGINT UNSIGNED NULL,
                             delete_reason VARCHAR(255) NULL,
                             
@@ -473,88 +383,15 @@ class Database:
                             UNIQUE INDEX uq_one_active_session_per_pr (active_pr_id),
                             INDEX idx_pr_started (pr_id, started_at),
                             INDEX idx_pr_ended (pr_id, ended_at),
-                            INDEX idx_target_started (target_type, target_id, started_at)
+                            INDEX idx_target_started (target_type, target_id, started_at),
+                            INDEX idx_target_active (target_type, target_id, ended_at, deleted_at),
+                            INDEX idx_pr_active (pr_id, ended_at, deleted_at)
                         )
                         """
                     )
-                    try:
-                        await cursor.execute(
-                            """
-                            ALTER TABLE spec_sessions
-                            ADD COLUMN session_admin_comment VARCHAR(255) NULL
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            ALTER TABLE spec_sessions
-                            CHANGE COLUMN manual_comment session_admin_comment VARCHAR(255) NULL
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            UPDATE spec_sessions
-                            SET session_admin_comment = manual_comment
-                            WHERE session_admin_comment IS NULL
-                              AND manual_comment IS NOT NULL
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            ALTER TABLE spec_sessions
-                            DROP COLUMN manual_comment
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            ALTER TABLE spec_sessions
-                            ADD COLUMN credited_points FLOAT NOT NULL DEFAULT 0
-                            """
-                        )
-                    except Exception:
-                        pass
 
-                    # Migration: Sanitize and alter end_reason to tight ENUM
-                    try:
-                        await cursor.execute(
-                            """
-                            UPDATE spec_sessions
-                            SET end_reason = 'manual_unclaim'
-                            WHERE end_reason IN ('manual', 'swap', 'transfer', 'manual_assignment_clear')
-                            """
-                        )
-                        await cursor.execute(
-                            """
-                            UPDATE spec_sessions
-                            SET end_reason = 'unknown'
-                            WHERE end_reason IS NOT NULL
-                              AND end_reason NOT IN ('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown')
-                            """
-                        )
-                        await cursor.execute(
-                            """
-                            ALTER TABLE spec_sessions
-                            MODIFY COLUMN end_reason ENUM('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown') NULL
-                            """
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"Error migrating end_reason to ENUM: {e}")
-
-
-
-
-                    # 6. Events Table
+                    # =========================================================
+                    # 5. Events Table
                     # =========================================================
                     await cursor.execute(
                         """
@@ -562,85 +399,39 @@ class Database:
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                             name VARCHAR(255) NOT NULL,
                             description TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            start_time TIMESTAMP NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            start_time DATETIME NULL,
                             is_active BOOLEAN DEFAULT TRUE,
                             notification_sent BOOLEAN DEFAULT FALSE,
                             required_pr_count INT DEFAULT 1,
                             priority INT DEFAULT 0,
                             pr_slots INT DEFAULT 1,
                             created_by BIGINT UNSIGNED,
+                            is_pinned BOOLEAN DEFAULT FALSE,
                             event_kind ENUM('regular','spec_request') NOT NULL DEFAULT 'regular',
                             approval_status ENUM('approved','pending','rejected') NOT NULL DEFAULT 'approved',
                             requested_by BIGINT UNSIGNED NULL,
                             approved_by BIGINT UNSIGNED NULL,
-                            approved_at TIMESTAMP NULL,
+                            approved_at DATETIME NULL,
                             rejected_by BIGINT UNSIGNED NULL,
-                            rejected_at TIMESTAMP NULL
+                            rejected_at DATETIME NULL,
+                            points FLOAT NULL,
+                            INDEX idx_events_active_order (is_active, is_pinned, priority, start_time),
+                            INDEX idx_events_kind_status_active (event_kind, approval_status, is_active),
+                            INDEX idx_events_requested_by_active (requested_by, is_active)
                         )
                         """
                     )
                     
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE events DROP COLUMN channel_id"
-                        )
-                    except Exception:
-                        pass
-                    
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE events DROP COLUMN message_id"
-                        )
-                    except Exception:
-                        pass
-
-                    # Migration: Add columns if they don't exist
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE events ADD COLUMN priority INT DEFAULT 0"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE events ADD COLUMN pr_slots INT DEFAULT 1"
-                        )
-                    except Exception:
-                        pass  # Column likely exists
-
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE events ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"
-                        )
-                    except Exception:
-                        pass
-
-                    # Spec-request feature: new columns
-                    for stmt in [
-                        "ALTER TABLE events ADD COLUMN event_kind ENUM('regular','spec_request') NOT NULL DEFAULT 'regular'",
-                        "ALTER TABLE events ADD COLUMN approval_status ENUM('approved','pending','rejected') NOT NULL DEFAULT 'approved'",
-                        "ALTER TABLE events ADD COLUMN requested_by BIGINT UNSIGNED NULL",
-                        "ALTER TABLE events ADD COLUMN approved_by BIGINT UNSIGNED NULL",
-                        "ALTER TABLE events ADD COLUMN approved_at TIMESTAMP NULL",
-                        "ALTER TABLE events ADD COLUMN rejected_by BIGINT UNSIGNED NULL",
-                        "ALTER TABLE events ADD COLUMN rejected_at TIMESTAMP NULL",
-                    ]:
-                        try:
-                            await cursor.execute(stmt)
-                        except Exception:
-                            pass
-
                     # =========================================================
-                    # 6.5. Event Participants Table (Deferred spec_sessions)
+                    # 5.5. Event Participants Table
                     # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS event_participants (
                             event_id INT UNSIGNED NOT NULL,
                             pr_id BIGINT UNSIGNED NOT NULL,
-                            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             PRIMARY KEY (event_id, pr_id),
                             FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
                         )
@@ -648,7 +439,7 @@ class Database:
                     )
 
                     # =========================================================
-                    # 7. Web Auth Table (ex Users)
+                    # 6. Web Auth Table
                     # =========================================================
                     await cursor.execute(
                         """
@@ -659,21 +450,16 @@ class Database:
                             is_active BOOLEAN DEFAULT TRUE,
                             require_password_change BOOLEAN DEFAULT TRUE,
                             failed_login_attempts INT DEFAULT 0,
-                            last_failed_login TIMESTAMP NULL,
                             last_login TIMESTAMP NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_failed_login TIMESTAMP NULL
                         )
                         """
                     )
 
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE web_auth ADD COLUMN last_failed_login TIMESTAMP NULL"
-                        )
-                    except Exception:
-                        pass
-
-                    # Sessions (System)
+                    # =========================================================
+                    # 7. Sessions Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS sessions (
@@ -697,47 +483,9 @@ class Database:
                         """
                     )
 
-                    # ----------------------------------------------------------
-                    # Session table migration (legacy -> new schema)
-                    # ----------------------------------------------------------
-                    session_migration_columns = {
-                        "family_id": "ALTER TABLE sessions ADD COLUMN family_id VARCHAR(32) NOT NULL DEFAULT ''",
-                        "refresh_token_hash": "ALTER TABLE sessions ADD COLUMN refresh_token_hash VARCHAR(64) NOT NULL DEFAULT ''",
-                        "replaced_by_hash": "ALTER TABLE sessions ADD COLUMN replaced_by_hash VARCHAR(64) NULL",
-                        "last_ip": "ALTER TABLE sessions ADD COLUMN last_ip VARCHAR(45) NULL",
-                        "device_label": "ALTER TABLE sessions ADD COLUMN device_label VARCHAR(128) NULL",
-                    }
-                    for col_name, alter_sql in session_migration_columns.items():
-                        try:
-                            await cursor.execute(alter_sql)
-                        except Exception:
-                            pass  # Column already exists
-
-                    # Add index on family_id if missing
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE sessions ADD INDEX idx_family_id (family_id)"
-                        )
-                    except Exception:
-                        pass
-
-                    # Add index on refresh_token_hash if missing
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE sessions ADD INDEX idx_refresh_token_hash (refresh_token_hash)"
-                        )
-                    except Exception:
-                        pass
-
-                    # Relax legacy columns to avoid NOT NULL errors during inserts if they still exist
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE sessions MODIFY COLUMN refresh_token VARCHAR(512) NULL"
-                        )
-                    except Exception:
-                        pass
-
-                    # Auth Logs (System)
+                    # =========================================================
+                    # 8. Auth Logs Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS auth_logs (
@@ -759,6 +507,9 @@ class Database:
                     # ----------------------------------------------------------
                     await self._migrate_web_auth_pk_to_discord_id(cursor)
 
+                    # =========================================================
+                    # 9. Role Permissions Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS role_permissions (
@@ -769,6 +520,9 @@ class Database:
                         """
                     )
 
+                    # =========================================================
+                    # 10. Service Principals Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS service_principals (
@@ -776,7 +530,8 @@ class Database:
                             token_hash VARCHAR(64) NOT NULL UNIQUE,
                             permissions JSON NOT NULL,
                             is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_service_token_hash (token_hash)
                         )
                         """
                     )
@@ -784,17 +539,20 @@ class Database:
                     # service_principals hash-only migration, guarded fail-fast
                     await self._migrate_service_principals_hash_only(cursor)
 
+                    # =========================================================
+                    # 11. Admin Logs Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS admin_logs (
-                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            actor_name VARCHAR(255) NOT NULL,
-                            actor_role VARCHAR(50),
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                             action VARCHAR(100) NOT NULL,
                             target_type VARCHAR(50),
                             target_id VARCHAR(100),
                             details JSON NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            actor_name VARCHAR(255) NOT NULL,
+                            actor_role VARCHAR(50),
                             INDEX idx_created_at (created_at),
                             INDEX idx_action_created (action, created_at),
                             INDEX idx_actor_created (actor_name, created_at),
@@ -803,112 +561,9 @@ class Database:
                         """
                     )
 
-                    # Admin logs migration (legacy -> compact universal schema)
-                    # Keep this migration idempotent for environments with mixed schema history.
-                    for statement in [
-                        "ALTER TABLE admin_logs ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-                        "ALTER TABLE admin_logs ADD COLUMN actor_name VARCHAR(255) NULL",
-                        "ALTER TABLE admin_logs ADD COLUMN actor_role VARCHAR(50) NULL",
-                        "ALTER TABLE admin_logs ADD COLUMN details JSON NULL",
-                        "ALTER TABLE admin_logs MODIFY action VARCHAR(100) NOT NULL",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
-                    # Backfill actor fields from legacy columns when present
-                    try:
-                        await cursor.execute(
-                            """
-                            UPDATE admin_logs
-                            SET actor_name = COALESCE(actor_name, admin_name)
-                            WHERE actor_name IS NULL
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            """
-                            UPDATE admin_logs
-                            SET actor_role = COALESCE(actor_role, admin_role)
-                            WHERE actor_role IS NULL
-                            """
-                        )
-                    except Exception:
-                        pass
-
-                    # Ensure details is always present and preserve legacy ip in meta
-                    await cursor.execute(
-                        """
-                        UPDATE admin_logs
-                        SET details = COALESCE(details, JSON_OBJECT())
-                        WHERE details IS NULL
-                        """
-                    )
-                    try:
-                        await cursor.execute(
-                            """
-                            UPDATE admin_logs
-                            SET details = JSON_SET(
-                                COALESCE(details, JSON_OBJECT()),
-                                '$.meta.ip',
-                                ip_address
-                            )
-                            WHERE ip_address IS NOT NULL
-                              AND ip_address != ''
-                            """
-                        )
-                    except Exception:
-                        pass
-
-                    # Finalize constraints
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE admin_logs MODIFY actor_name VARCHAR(255) NOT NULL"
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        await cursor.execute(
-                            "ALTER TABLE admin_logs MODIFY details JSON NOT NULL"
-                        )
-                    except Exception:
-                        pass
-
-                    # Drop legacy indexes/columns where they still exist
-                    for statement in [
-                        "ALTER TABLE admin_logs DROP INDEX idx_admin_name",
-                        "ALTER TABLE admin_logs DROP INDEX idx_action",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
-                    for statement in [
-                        "ALTER TABLE admin_logs DROP COLUMN admin_name",
-                        "ALTER TABLE admin_logs DROP COLUMN admin_role",
-                        "ALTER TABLE admin_logs DROP COLUMN ip_address",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
-                    # Create compact-schema indexes if missing
-                    for statement in [
-                        "ALTER TABLE admin_logs ADD INDEX idx_created_at (created_at)",
-                        "ALTER TABLE admin_logs ADD INDEX idx_action_created (action, created_at)",
-                        "ALTER TABLE admin_logs ADD INDEX idx_actor_created (actor_name, created_at)",
-                        "ALTER TABLE admin_logs ADD INDEX idx_target_created (target_type, target_id, created_at)",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
+                    # =========================================================
+                    # 12. Punishment Returns Table
+                    # =========================================================
                     await cursor.execute(
                         """
                         CREATE TABLE IF NOT EXISTS punishment_returns (
@@ -936,62 +591,6 @@ class Database:
                             INDEX idx_returns_static (`static`),
                             INDEX idx_returns_server (server)
                         )
-                        """
-                    )
-
-                    for statement in [
-                        "ALTER TABLE punishment_returns MODIFY COLUMN discord_message_url VARCHAR(512) NULL",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
-                    # High+medium indexes
-                    for statement in [
-                        "ALTER TABLE spec_sessions ADD INDEX idx_target_active (target_type, target_id, ended_at, deleted_at)",
-                        "ALTER TABLE spec_sessions ADD INDEX idx_pr_active (pr_id, ended_at, deleted_at)",
-                        "ALTER TABLE events ADD INDEX idx_events_active_order (is_active, is_pinned, priority, start_time)",
-                        "ALTER TABLE events ADD INDEX idx_events_kind_status_active (event_kind, approval_status, is_active)",
-                        "ALTER TABLE events ADD INDEX idx_events_requested_by_active (requested_by, is_active)",
-                        "ALTER TABLE streamers ADD INDEX idx_streamers_online_order (is_online, is_pinned, priority, streamer_name)",
-                    ]:
-                        try:
-                            await cursor.execute(statement)
-                        except Exception:
-                            pass
-
-                    # =========================================================
-                    # Deterministic backfill for automatic points component
-                    # (must run AFTER events table + migrations exist)
-                    # =========================================================
-                    # - each session stores its factual credited_points;
-                    # - assistants.auto_points_total mirrors sum of credited sessions.
-                    # Note: must account for spec_request events that are not yet approved.
-                    await cursor.execute(
-                        """
-                        UPDATE spec_sessions ss
-                        LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
-                        SET ss.credited_points = ROUND(
-                            CASE
-                                WHEN ss.ended_at IS NULL OR ss.deleted_at IS NOT NULL THEN 0
-                                WHEN e.event_kind = 'spec_request' AND e.approval_status != 'approved' THEN 0
-                                ELSE (COALESCE(ss.duration_seconds, 0) / 3600.0) * COALESCE(ss.applied_hourly_rate, 0)
-                            END,
-                            4
-                        )
-                        """
-                    )
-                    await cursor.execute(
-                        """
-                        UPDATE assistants a
-                        LEFT JOIN (
-                            SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
-                            FROM spec_sessions
-                            WHERE deleted_at IS NULL
-                            GROUP BY pr_id
-                        ) s ON s.pr_id = a.pr_id
-                        SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
                         """
                     )
 
@@ -1074,10 +673,10 @@ class Database:
                         SELECT
                             pr_id,
                             work_date AS date,
-                            SUM(CASE WHEN applied_priority_level = 0 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p0_seconds,
-                            SUM(CASE WHEN applied_priority_level = 1 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p1_seconds,
-                            SUM(CASE WHEN applied_priority_level = 2 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p2_seconds,
-                            SUM(CASE WHEN applied_priority_level = 3 AND NOT is_probation THEN seconds_in_day ELSE 0 END) AS p3_seconds,
+                            SUM(CASE WHEN applied_priority_level = 0 AND 0 = is_probation THEN seconds_in_day ELSE 0 END) AS p0_seconds,
+                            SUM(CASE WHEN applied_priority_level = 1 AND 0 = is_probation THEN seconds_in_day ELSE 0 END) AS p1_seconds,
+                            SUM(CASE WHEN applied_priority_level = 2 AND 0 = is_probation THEN seconds_in_day ELSE 0 END) AS p2_seconds,
+                            SUM(CASE WHEN applied_priority_level = 3 AND 0 = is_probation THEN seconds_in_day ELSE 0 END) AS p3_seconds,
                             SUM(CASE WHEN is_probation THEN seconds_in_day ELSE 0 END) AS probation_seconds,
                             SUM(points_in_day) AS total_points
                         FROM spec_session_day_slices
@@ -1092,7 +691,7 @@ class Database:
                     await self._init_default_service_principals(conn)
                     await self._ensure_singleton_settings(conn)
 
-                    self.logger.info("Database initialized successfully (V2 Final)")
+                    self.logger.info("Database schema initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize database: {e}", exc_info=True)
             raise
@@ -1477,7 +1076,6 @@ class Database:
                 "guild.rates.view",
                 "guild.rates.update",
                 "monitoring.view",
-                "monitoring.refresh",
                 "notifications.render",
             }
 
@@ -1553,7 +1151,6 @@ class Database:
                 **manager_perms,
                 "notifications.render": True,
                 "monitoring.view": True,
-                "monitoring.refresh": True,
                 "streamers.status.update": True,
             }
 
@@ -1646,16 +1243,15 @@ class Database:
             "guild.templates.update": True,
             "guild.rates.update": True,
             "monitoring.view": True,
-            "monitoring.refresh": True,
             "notifications.render": True,
             "dashboard.view": True,
+            "streamers.status.update": True,
         }
         twitch_scope = {
             "streamers.view": True,
             "streamers.create": True,
             "streamers.status.update": True,
             "spec.unclaim.any": True,
-            "monitoring.refresh": True,
         }
         if "discord" in name:
             return discord_scope
@@ -2807,6 +2403,10 @@ class Database:
                 set_parts.append("is_pinned = %s")
                 params.append(is_pinned)
 
+            if points is not None:
+                set_parts.append("points = %s")
+                params.append(points)
+
             if not set_parts:
                 return False
 
@@ -2876,14 +2476,32 @@ class Database:
             raise
 
     @db_retry()
-    async def list_all_streamers(self) -> List[Dict[str, Any]]:
+    async def list_all_streamers(
+        self,
+        include_assignments: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Получение всех стримеров из базы данных.
-        Returns basic streamer data without assignments (for "All Media" tab).
+        By default returns basic streamer data without assignments.
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    if not include_assignments:
+                        await cursor.execute(
+                            """
+                            SELECT 
+                                s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
+                                s.is_pinned, s.allow_juniors, s.profile_image_url,
+                                s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
+                                s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                                s.added_at, s.added_by_id, s.updated_at
+                            FROM streamers s
+                            ORDER BY s.priority DESC, s.streamer_name ASC
+                            """
+                        )
+                        return await cursor.fetchall()
+
                     await cursor.execute(
                         """
                         SELECT 
@@ -2891,12 +2509,41 @@ class Database:
                             s.is_pinned, s.allow_juniors, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
                             s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
-                            s.added_at, s.added_by_id, s.updated_at
+                            s.added_at, s.added_by_id, s.updated_at,
+                            MIN(ss.pr_id) as assigned_pr_id,
+                            COALESCE(
+                                JSON_ARRAYAGG(
+                                    CASE WHEN a.pr_id IS NOT NULL THEN
+                                        JSON_OBJECT(
+                                            'pr_id', CAST(a.pr_id AS CHAR),
+                                            'nickname', a.nickname,
+                                            'is_probation', COALESCE(ss.is_probation, FALSE),
+                                            'assigned_at', ss.started_at
+                                        )
+                                    ELSE NULL END
+                                ),
+                                JSON_ARRAY()
+                            ) as assignments
                         FROM streamers s
-                        ORDER BY s.priority DESC, s.streamer_name ASC
+                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer'
+                             AND ss.target_id = s.streamer_id
+                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                        GROUP BY s.streamer_id
+                        ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
                     )
-                    return await cursor.fetchall()
+                    results = await cursor.fetchall()
+                    for row in results:
+                        if isinstance(row.get("assignments"), str):
+                            row["assignments"] = json.loads(row["assignments"])
+                        if row.get("assignments"):
+                            row["assignments"] = [
+                                assignment
+                                for assignment in row["assignments"]
+                                if assignment is not None
+                            ]
+                    return results
         except Exception as e:
             self.logger.error(f"Failed to list streamers: {e}", exc_info=True)
             raise
@@ -3778,6 +3425,8 @@ class Database:
         notification_sent=False,
         pr_slots: int = 1,
         priority: int = 0,
+        is_pinned: bool = False,
+        points: Optional[float] = None,
     ) -> int:
         """Создание нового события."""
         try:
@@ -3799,8 +3448,8 @@ class Database:
                         INSERT INTO events (
                             name, description,
                             required_pr_count, created_by, start_time, notification_sent,
-                            pr_slots, priority
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            pr_slots, priority, is_pinned, points
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             name,
@@ -3811,6 +3460,8 @@ class Database:
                             notification_sent,
                             pr_slots,
                             priority,
+                            is_pinned,
+                            points,
                         ),
                     )
                     await conn.commit()
@@ -3828,7 +3479,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent,
-                               required_pr_count, priority, pr_slots, is_pinned,
+                               required_pr_count, priority, pr_slots, is_pinned, points,
                                event_kind, approval_status, requested_by, approved_by, approved_at, rejected_by, rejected_at
                         FROM events
                         ORDER BY is_active DESC, is_pinned DESC, created_at DESC
@@ -3867,7 +3518,7 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent,
-                               required_pr_count, priority, pr_slots, is_pinned,
+                               required_pr_count, priority, pr_slots, is_pinned, points,
                                event_kind, approval_status, requested_by, approved_by, approved_at, rejected_by, rejected_at
                         FROM events
                         WHERE is_active = TRUE
@@ -3920,7 +3571,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned FROM events WHERE id = %s",
+                        "SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned, points FROM events WHERE id = %s",
                         (event_id,),
                     )
                     return await cursor.fetchone()
@@ -6070,7 +5721,8 @@ class Database:
     @db_retry()
     async def update_guild_templates(
         self,
-        template_stream_online: Optional[str] = None,
+        template_stream_online_gta: Optional[str] = None,
+        template_stream_online_other: Optional[str] = None,
         template_stream_offline: Optional[str] = None,
         template_category_to_gta: Optional[str] = None,
         template_category_from_gta: Optional[str] = None,
@@ -6096,8 +5748,10 @@ class Database:
                 current_templates = {}
 
             # Update only the provided fields
-            if template_stream_online is not None:
-                current_templates["stream_online"] = template_stream_online
+            if template_stream_online_gta is not None:
+                current_templates["stream_online_gta"] = template_stream_online_gta
+            if template_stream_online_other is not None:
+                current_templates["stream_online_other"] = template_stream_online_other
             if template_stream_offline is not None:
                 current_templates["stream_offline"] = template_stream_offline
             if template_category_to_gta is not None:
@@ -6367,6 +6021,65 @@ class Database:
                     return discord_id
         except Exception as e:
             self.logger.error(f"Failed to create user {username}: {e}", exc_info=True)
+            raise
+
+    @db_retry()
+    async def create_user_with_assistant(
+        self,
+        discord_id: int,
+        username: str,
+        password_hash: str,
+        nickname: str,
+        role: str,
+        appointed_at: Optional[date] = None,
+        experience_days: int = 0,
+        created_by: Optional[int] = None,
+    ) -> int:
+        """Create web_auth and assistant records in a single transaction."""
+        try:
+            async with self.pool.acquire() as conn:
+                try:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(
+                            """
+                            INSERT INTO web_auth (discord_id, username, password_hash, created_at)
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                            """,
+                            (discord_id, username, password_hash),
+                        )
+
+                        if appointed_at is not None:
+                            appointed_at_dt = datetime.combine(
+                                appointed_at,
+                                datetime.min.time(),
+                                tzinfo=timezone(timedelta(hours=3)),
+                            )
+                            await cursor.execute(
+                                """
+                                INSERT INTO assistants (pr_id, nickname, role, appointed_at)
+                                VALUES (%s, %s, %s, %s)
+                                """,
+                                (discord_id, nickname, role, appointed_at_dt),
+                            )
+                        else:
+                            await cursor.execute(
+                                """
+                                INSERT INTO assistants (pr_id, nickname, role, appointed_at)
+                                VALUES (%s, %s, %s, DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %s DAY))
+                                """,
+                                (discord_id, nickname, role, experience_days),
+                            )
+
+                        await conn.commit()
+                        return discord_id
+                except Exception:
+                    await conn.rollback()
+                    raise
+        except Exception as e:
+            self.logger.error(
+                f"Failed to create user+assistant {username}: {e}",
+                exc_info=True,
+            )
             raise
 
     @db_retry()
@@ -6824,6 +6537,87 @@ class Database:
                 "assigned_pr_count": 0,
                 "unassigned_media_count": 0,
                 "events_today_count": 0,
+            }
+
+    @db_retry()
+    async def get_service_overview_stats(self) -> Dict[str, int]:
+        """Get service-facing domain counters for the service overview panel."""
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS streamers_total,
+                            COALESCE(SUM(CASE WHEN is_online = TRUE THEN 1 ELSE 0 END), 0) AS streamers_online,
+                            COALESCE(SUM(CASE WHEN is_online = TRUE AND stream_game_id = %s THEN 1 ELSE 0 END), 0) AS gta_online
+                        FROM streamers
+                        """,
+                        (Config.gta5_game_id,),
+                    )
+                    streamer_stats = await cursor.fetchone() or {}
+
+                    await cursor.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS active_spec_sessions,
+                            COALESCE(SUM(CASE WHEN is_probation = TRUE THEN 1 ELSE 0 END), 0) AS probation_sessions
+                        FROM spec_sessions
+                        WHERE ended_at IS NULL AND deleted_at IS NULL
+                        """
+                    )
+                    spec_stats = await cursor.fetchone() or {}
+
+                    await cursor.execute(
+                        "SELECT COUNT(*) AS active_events FROM events WHERE is_active = TRUE"
+                    )
+                    event_stats = await cursor.fetchone() or {}
+
+                    await cursor.execute(
+                        "SELECT COUNT(*) AS assistants_total FROM assistants"
+                    )
+                    assistant_stats = await cursor.fetchone() or {}
+
+                    await cursor.execute(
+                        "SELECT COUNT(*) AS web_users_total FROM web_auth"
+                    )
+                    user_stats = await cursor.fetchone() or {}
+
+                    await cursor.execute(
+                        """
+                        SELECT COUNT(*) AS admin_actions_24h
+                        FROM admin_logs
+                        WHERE created_at >= (UTC_TIMESTAMP() - INTERVAL 1 DAY)
+                        """
+                    )
+                    log_stats = await cursor.fetchone() or {}
+
+                    return {
+                        "streamers_total": int(streamer_stats.get("streamers_total", 0)),
+                        "streamers_online": int(streamer_stats.get("streamers_online", 0)),
+                        "gta_online": int(streamer_stats.get("gta_online", 0)),
+                        "active_spec_sessions": int(spec_stats.get("active_spec_sessions", 0)),
+                        "probation_sessions": int(spec_stats.get("probation_sessions", 0)),
+                        "active_events": int(event_stats.get("active_events", 0)),
+                        "assistants_total": int(assistant_stats.get("assistants_total", 0)),
+                        "web_users_total": int(user_stats.get("web_users_total", 0)),
+                        "admin_actions_24h": int(log_stats.get("admin_actions_24h", 0)),
+                    }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get service overview stats: {e}",
+                exc_info=True,
+            )
+            return {
+                "streamers_total": 0,
+                "streamers_online": 0,
+                "gta_online": 0,
+                "active_spec_sessions": 0,
+                "probation_sessions": 0,
+                "active_events": 0,
+                "assistants_total": 0,
+                "web_users_total": 0,
+                "admin_actions_24h": 0,
             }
 
     # =========================================================================

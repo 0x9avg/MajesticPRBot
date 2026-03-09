@@ -15,6 +15,7 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 # Moscow timezone (UTC+3)
 MSK = timezone(timedelta(hours=3))
@@ -54,52 +55,62 @@ class BrokerConsumer:
         self.channel: Optional[aio_pika.Channel] = None
         self.queue: Optional[aio_pika.Queue] = None
         self.exchange: Optional[aio_pika.Exchange] = None
+        self._closing = False
 
     @property
     def url(self) -> str:
+        user = quote(self.user, safe="")
+        password = quote(self.password, safe="")
+        vhost = quote(self.vhost, safe="")
         return (
-            f"amqp://{self.user}:{self.password}@{self.host}:{self.port}/{self.vhost}"
+            f"amqp://{user}:{password}@{self.host}:{self.port}/{vhost}"
         )
 
     async def connect(self) -> None:
         """Connect to RabbitMQ and start consuming."""
-        try:
-            self.logger.info(f"Connecting to RabbitMQ at {self.host}...")
-            self.connection = await aio_pika.connect_robust(self.url)
-            self.channel = await self.connection.channel()
+        while not self._closing:
+            if self.connection and not self.connection.is_closed and self.queue:
+                return
 
-            # Set QoS to 1 to process one message at a time per consumer
-            await self.channel.set_qos(prefetch_count=1)
+            try:
+                self.logger.info(f"Connecting to RabbitMQ at {self.host}...")
+                self.connection = await aio_pika.connect_robust(self.url)
+                self.channel = await self.connection.channel()
 
-            # Declare exchange (idempotent)
-            self.exchange = await self.channel.declare_exchange(
-                self.exchange_name, ExchangeType.TOPIC, durable=True
-            )
+                # Set QoS to 1 to process one message at a time per consumer
+                await self.channel.set_qos(prefetch_count=1)
 
-            # Declare durable queue for this service
-            self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
+                # Declare exchange (idempotent)
+                self.exchange = await self.channel.declare_exchange(
+                    self.exchange_name, ExchangeType.TOPIC, durable=True
+                )
 
-            # Bind queue to relevant keys
-            # We want to know when streamers are added/removed/updated
-            await self.queue.bind(self.exchange, routing_key="streamer.added")
-            await self.queue.bind(self.exchange, routing_key="streamer.removed")
-            await self.queue.bind(self.exchange, routing_key="streamer.updated")
-            await self.queue.bind(self.exchange, routing_key="streamer.verify")
+                # Declare durable queue for this service
+                self.queue = await self.channel.declare_queue(
+                    self.queue_name, durable=True
+                )
 
-            # Start consuming
-            await self.queue.consume(self.process_message)
-            self.logger.info("✓ Broker Consumer started")
+                # Bind queue to relevant keys
+                await self.queue.bind(self.exchange, routing_key="streamer.added")
+                await self.queue.bind(self.exchange, routing_key="streamer.removed")
+                await self.queue.bind(self.exchange, routing_key="streamer.updated")
+                await self.queue.bind(self.exchange, routing_key="streamer.verify")
+                await self.queue.bind(self.exchange, routing_key="service.twitch.sync")
 
-        except Exception as e:
-            self.logger.error(f"Failed to connect consumer: {e}")
-            # Don't raise, just log. Retry logic via robust connection handles reconnects?
-            # Ideally retry logic here too.
-            await asyncio.sleep(5)
-            # Recursion risky without limit, but RobustConnection handles network disconnects.
-            # Initial connection failure needs handling.
+                # Start consuming
+                await self.queue.consume(self.process_message)
+                self.logger.info("✓ Broker Consumer started")
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to connect consumer: {e}")
+                if self._closing:
+                    return
+                self.logger.info("Retrying broker consumer connection in 5 seconds...")
+                await asyncio.sleep(5)
 
     async def disconnect(self) -> None:
         """Close connection."""
+        self._closing = True
         if self.connection:
             await self.connection.close()
 
@@ -122,7 +133,11 @@ class BrokerConsumer:
             self.logger.warning("Bot instance not set for consumer")
             return
 
-        if key == "streamer.verify":
+        if key == "service.twitch.sync":
+            self.logger.info("Processing service.twitch.sync request")
+            await self.bot.sync_streamers(reason="broker")
+
+        elif key == "streamer.verify":
             username = data.get("username")
             added_by = data.get("added_by", {})
             self.logger.info(f"Verifying streamer: {username}")

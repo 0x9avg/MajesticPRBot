@@ -1,5 +1,5 @@
 import React from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
 import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
@@ -190,7 +190,7 @@ const AssistantsManagement = () => {
         return ensureOptionExists(baseOptions, sessionEdit.target_id || undefined, prefix);
     }, [sessionEdit.target_type, sessionEdit.target_id, eventOptions, streamerOptions]);
 
-    const fetchAssistants = async () => {
+    const fetchAssistants = useCallback(async () => {
         const response = await apiFetch('/api/assistants');
         if (!response.ok) throw new Error('Не удалось загрузить ассистентов');
         const json = await response.json() as unknown;
@@ -201,9 +201,9 @@ const AssistantsManagement = () => {
         if (list.length > 0) {
             setSelectedPrId((prev) => prev ?? String(list[0].pr_id));
         }
-    };
+    }, []);
 
-    const fetchSessionTargetOptions = async () => {
+    const fetchSessionTargetOptions = useCallback(async () => {
         setOptionsLoading(true);
         setOptionsError(null);
         try {
@@ -264,17 +264,17 @@ const AssistantsManagement = () => {
         } finally {
             setOptionsLoading(false);
         }
-    };
+    }, []);
 
-    const fetchAssistantDetail = async (prId: string) => {
+    const fetchAssistantDetail = useCallback(async (prId: string) => {
         const response = await apiFetch(`/api/assistants/${prId}`);
         if (!response.ok) throw new Error('Не удалось загрузить профиль ассистента');
         const json = await response.json() as unknown;
         const data = unwrapApiData<Assistant>(json);
         setSelectedAssistant(data);
-    };
+    }, []);
 
-    const fetchAssistantSessions = async (prId: string) => {
+    const fetchAssistantSessions = useCallback(async (prId: string) => {
         const response = await apiFetch(`/api/assistants/${prId}/sessions?limit=50`);
 
         if (response.ok) {
@@ -321,9 +321,9 @@ const AssistantsManagement = () => {
         }
 
         throw new Error('Не удалось загрузить сессии ассистента');
-    };
+    }, []);
 
-    const refreshSelectedAssistant = async (prId: string) => {
+    const refreshSelectedAssistant = useCallback(async (prId: string) => {
         const [detailResult, sessionsResult, assistantsResult] = await Promise.allSettled([
             fetchAssistantDetail(prId),
             fetchAssistantSessions(prId),
@@ -346,7 +346,7 @@ const AssistantsManagement = () => {
                 'error',
             );
         }
-    };
+    }, [fetchAssistantDetail, fetchAssistantSessions, fetchAssistants, showToast]);
 
     useEffect(() => {
         const load = async () => {
@@ -360,7 +360,7 @@ const AssistantsManagement = () => {
             }
         };
         void load();
-    }, []);
+    }, [fetchAssistants, fetchSessionTargetOptions, showToast]);
 
     useEffect(() => {
         if (!selectedPrId) return;
@@ -375,7 +375,7 @@ const AssistantsManagement = () => {
             }
         };
         void loadSelected();
-    }, [selectedPrId]);
+    }, [refreshSelectedAssistant, selectedPrId, showToast]);
 
     const runMutation = async (
         endpoint: string,
@@ -856,10 +856,10 @@ const AssistantsManagement = () => {
                                         onChange={(v) => void handleRoleChange(v)}
                                         disabled={busy}
                                         options={[
-                                            { value: 'junior_employee', label: 'Стажер' },
-                                            { value: 'employee', label: 'Сотрудник' },
-                                            { value: 'senior_employee', label: 'Старший сотрудник' },
-                                            { value: 'manager', label: 'Менеджер' },
+                                            { value: 'junior_employee', label: 'Младший ассистент' },
+                                            { value: 'employee', label: 'Ассистент' },
+                                            { value: 'senior_employee', label: 'Старший ассистент' },
+                                            { value: 'manager', label: 'Глава ассистентов' },
                                             { value: 'developer', label: 'Разработчик' },
                                         ]}
                                     />

@@ -1,7 +1,7 @@
 /**
  * Centralized API client with silent refresh and single-flight mutex.
  *
- * Access token is stored in-memory (not in localStorage) for security.
+ * Access token is stored in-memory only.
  * Refresh token is stored as an HttpOnly cookie (set by the API).
  *
  * Refresh strategy:
@@ -26,26 +26,11 @@ type LogoutCallback = () => void;
 // In-memory token store
 // ---------------------------------------------------------------------------
 
-function readAccessTokenFromStorage(): string | null {
-    if (typeof window === 'undefined') return null;
-    try {
-        return localStorage.getItem('access_token');
-    } catch {
-        return null;
-    }
-}
-
-let _accessToken: string | null = readAccessTokenFromStorage();
+let _accessToken: string | null = null;
 let _logoutCallback: LogoutCallback | null = null;
 
 export function setAccessToken(token: string | null): void {
     _accessToken = token;
-    // Mirror to localStorage for ProtectedRoute reads (JWT role parsing)
-    if (token) {
-        localStorage.setItem('access_token', token);
-    } else {
-        localStorage.removeItem('access_token');
-    }
 }
 
 export function getAccessToken(): string | null {
@@ -53,8 +38,6 @@ export function getAccessToken(): string | null {
 }
 
 export function hydrateAccessTokenFromStorage(): string | null {
-    if (_accessToken) return _accessToken;
-    _accessToken = readAccessTokenFromStorage();
     return _accessToken;
 }
 
@@ -65,7 +48,6 @@ export function onLogout(cb: LogoutCallback): void {
 
 function triggerLogout(): void {
     _accessToken = null;
-    localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     localStorage.removeItem('user');
     _logoutCallback?.();
@@ -162,10 +144,6 @@ export async function apiFetch(
     url: string,
     init?: RequestInit,
 ): Promise<Response> {
-    if (!_accessToken) {
-        hydrateAccessTokenFromStorage();
-    }
-
     if (_accessToken) {
         const remaining = tokenExpiresInSeconds(_accessToken);
         if (remaining < 30) {

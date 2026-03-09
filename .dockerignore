@@ -1,0 +1,17 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__/
+*.py[codz]
+*.log
+.env
+**/.env
+venv/
+node_modules/
+web/node_modules/
+web/dist/
+logs/
+.vscode/
+.tio.tokens.json
+test_cases.csv
+streamers_all_table.json

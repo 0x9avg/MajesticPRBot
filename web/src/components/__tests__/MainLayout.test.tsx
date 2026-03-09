@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { setAccessToken } from '../../api/client';
 
 const navigateMock = vi.fn();
 
@@ -29,20 +30,45 @@ const baseUser = {
 describe('MainLayout', () => {
     beforeEach(() => {
         localStorage.clear();
+        setAccessToken(null);
         navigateMock.mockReset();
     });
 
-    it('loads cached user and logs out locally when token is absent', async () => {
-        localStorage.setItem('user', JSON.stringify(baseUser));
-        vi.stubGlobal(
-            'fetch',
-            vi.fn().mockResolvedValue(
-                new Response('{}', {
+    it('loads user from network and logs out locally', async () => {
+        setAccessToken('good-token');
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url.endsWith('/api/auth/me')) {
+                return new Response(JSON.stringify(baseUser), {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' },
-                })
-            )
-        );
+                });
+            }
+
+            if (url.endsWith('/api/assistants/1001')) {
+                return new Response(JSON.stringify({
+                    status: 'success',
+                    data: {
+                        nickname: 'Tester',
+                        role: 'manager',
+                    },
+                }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+
+            if (url.endsWith('/api/auth/logout/current')) {
+                return new Response('{}', {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+
+            return new Response('{}', { status: 404 });
+        });
+        vi.stubGlobal('fetch', fetchMock);
 
         render(<MainLayout />);
 
@@ -55,16 +81,14 @@ describe('MainLayout', () => {
         const ui = userEvent.setup();
         await ui.click(screen.getByTitle('Выйти'));
 
-        expect(localStorage.getItem('access_token')).toBeNull();
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toBeNull();
         expect(navigateMock).toHaveBeenCalledWith('/login', { replace: true });
     });
 
     it('clears auth and redirects when /auth/me responds 401', async () => {
-        localStorage.setItem('access_token', 'bad-token');
+        setAccessToken('bad-token');
         localStorage.setItem('refresh_token', 'refresh-token');
-        localStorage.setItem('user', JSON.stringify(baseUser));
 
         const fetchMock = vi.fn().mockResolvedValue(
             new Response(JSON.stringify({ detail: 'unauthorized' }), {
@@ -89,7 +113,6 @@ describe('MainLayout', () => {
             })
         );
 
-        expect(localStorage.getItem('access_token')).toBeNull();
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toBeNull();
     });

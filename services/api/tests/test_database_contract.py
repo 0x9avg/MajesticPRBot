@@ -119,6 +119,7 @@ async def test_create_user_returns_discord_id_pk_contract() -> None:
     conn = _DummyConn(cursor)
     db = Database(
         db_host="localhost",
+        db_port=3306,
         db_user="root",
         db_password="root",
         db_name="test",
@@ -145,6 +146,7 @@ async def test_get_service_principal_by_token_uses_hash_only_lookup() -> None:
     conn = _DummyConn(cursor)
     db = Database(
         db_host="localhost",
+        db_port=3306,
         db_user="root",
         db_password="root",
         db_name="test",

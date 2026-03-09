@@ -26,7 +26,7 @@ export function MainHub() {
     const canManageStreamers = hasAny(user, ['streamers.update', 'streamers.delete']);
     const canManageEvents = hasAny(user, ['events.manage', 'events.update']);
     const canViewAdminSection = hasAny(user, ADMIN_SECTION_PERMISSIONS);
-    const canViewBotDashboard = hasAny(user, ['monitoring.view', 'monitoring.refresh']);
+    const canViewBotDashboard = hasAny(user, ['monitoring.view']);
     const canViewReturns = hasAny(user, ['returns.view', 'returns.history.view']);
     const canClaimMain = hasPerm(user, 'spec.claim.main');
     const canClaimProbation = hasPerm(user, 'spec.claim.probation');

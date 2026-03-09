@@ -24,8 +24,6 @@ MSK = timezone(timedelta(hours=3))
 import twitchio
 from config import Config
 from twitchio import AutoClient, eventsub
-
-
 class TwitchBot(AutoClient):
     """
     Twitch Bot микросервис.
@@ -45,6 +43,17 @@ class TwitchBot(AutoClient):
         self.api = api_client
         self.logger = logger or Config.setup_logging("TwitchBot")
         self.subs: list[eventsub.SubscriptionPayload] = []
+        self._start_time = datetime.now(timezone.utc)
+        self._heartbeat_task: asyncio.Task | None = None
+        self._sync_lock = asyncio.Lock()
+        self._last_sync_started_at: datetime | None = None
+        self._last_sync_completed_at: datetime | None = None
+        self._last_sync_status = "starting"
+        self._last_sync_error: str | None = None
+        self._last_sync_duration_seconds: float | None = None
+        self._last_synced_streamers = 0
+        self._last_online_streamers = 0
+        self._last_subscription_targets = 0
 
         # Enable twitchio logging
         twitchio.utils.setup_logging(level=logging.INFO)
@@ -56,6 +65,14 @@ class TwitchBot(AutoClient):
             subscriptions=self.subs,
             force_subscribe=True,
         )
+
+    async def load_tokens(self, path: str | None = None) -> None:
+        """Persist TwitchIO tokens in a stable path suitable for containers."""
+        await super().load_tokens(path or Config.twitch_tokens_file)
+
+    async def save_tokens(self, path: str | None = None) -> None:
+        """Persist TwitchIO tokens in a stable path suitable for containers."""
+        await super().save_tokens(path or Config.twitch_tokens_file)
 
     @staticmethod
     def _convert_twitch_time_to_msk(time_val) -> Optional[str]:
@@ -122,82 +139,149 @@ class TwitchBot(AutoClient):
                 "thumbnail_url": None,
             }
 
-    async def sync_streamers(self):
-        """Sync streamers from API and subscribe to EventSub."""
+    def _service_status_details(self) -> dict[str, object]:
+        uptime_seconds = int(
+            max(
+                0,
+                (datetime.now(timezone.utc) - self._start_time).total_seconds(),
+            )
+        )
+        return {
+            "ready": self.user is not None,
+            "uptime_seconds": uptime_seconds,
+            "last_sync_status": self._last_sync_status,
+            "last_sync_started_at": self._convert_twitch_time_to_msk(self._last_sync_started_at)
+            if self._last_sync_started_at
+            else None,
+            "last_sync_completed_at": self._convert_twitch_time_to_msk(
+                self._last_sync_completed_at
+            )
+            if self._last_sync_completed_at
+            else None,
+            "last_sync_duration_seconds": self._last_sync_duration_seconds,
+            "last_sync_error": self._last_sync_error,
+            "tracked_streamers": self._last_synced_streamers,
+            "online_streamers": self._last_online_streamers,
+            "subscription_targets": self._last_subscription_targets,
+            "sync_in_progress": self._sync_lock.locked(),
+        }
+
+    async def report_service_status(self, status: str) -> None:
         try:
-            self.logger.debug("Deleting old EventSub subscriptions...")
-            await self.delete_all_eventsub_subscriptions()
+            await self.api.report_service_status(
+                status=status,
+                details=self._service_status_details(),
+            )
+        except Exception as e:
+            self.logger.debug(f"Service status report failed: {e}")
 
-            self.logger.info("Syncing streamers from API...")
-            streamers = await self.api.list_all_streamers()
-            self.logger.info(f"Found {len(streamers)} streamers")
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await self.report_service_status(
+                "syncing" if self._sync_lock.locked() else "online"
+            )
+            await asyncio.sleep(30)
 
-            streamer_ids = [
-                s["streamer_id"]
-                for s in streamers
-                if s["streamer_id"] != Config.twitch_bot_id
-            ]
+    async def sync_streamers(self, reason: str = "manual") -> dict[str, int]:
+        """Sync streamers from API and subscribe to EventSub."""
+        if self._sync_lock.locked():
+            self.logger.info(
+                "Full Twitch sync already in progress, skipping duplicate request"
+            )
+            return {
+                "streamers": self._last_synced_streamers,
+                "online": self._last_online_streamers,
+            }
 
-            # Batch fetch online status
-            online_streams = {}
-            for i in range(0, len(streamer_ids), 100):
-                chunk = streamer_ids[i : i + 100]
-                streams = await self.fetch_streams(user_ids=chunk)
-                for stream in streams:
-                    online_streams[str(stream.user.id)] = stream
-                await asyncio.sleep(0)
+        async with self._sync_lock:
+            sync_started_at = datetime.now(timezone.utc)
+            self._last_sync_started_at = sync_started_at
+            self._last_sync_status = "syncing"
+            self._last_sync_error = None
+            await self.report_service_status("syncing")
 
-            self.logger.info(f"Found {len(online_streams)} streamers online")
+            try:
+                self.logger.debug("Deleting old EventSub subscriptions...")
+                await self.delete_all_eventsub_subscriptions()
 
-            # Batch fetch user profiles (for profile_image_url)
-            user_profiles = {}
-            for i in range(0, len(streamer_ids), 100):
-                chunk = streamer_ids[i : i + 100]
-                users = await self.fetch_users(ids=chunk)
-                for user in users:
-                    user_profiles[str(user.id)] = user
-                await asyncio.sleep(0)
+                self.logger.info(f"Syncing streamers from API (reason={reason})...")
+                streamers = await self.api.list_all_streamers(include_assignments=True)
+                self.logger.info(f"Found {len(streamers)} streamers")
 
-            self.logger.info(f"Fetched {len(user_profiles)} user profiles")
+                streamer_ids = [
+                    s["streamer_id"]
+                    for s in streamers
+                    if s["streamer_id"] != Config.twitch_bot_id
+                ]
 
-            new_subs = []
-            offline_to_unclaim = []
+                online_streams = {}
+                for i in range(0, len(streamer_ids), 100):
+                    chunk = streamer_ids[i : i + 100]
+                    streams = await self.fetch_streams(user_ids=chunk)
+                    for stream in streams:
+                        online_streams[str(stream.user.id)] = stream
+                    await asyncio.sleep(0)
 
-            # Update each streamer and prepare subscriptions
-            for streamer in streamers:
-                streamer_id = streamer["streamer_id"]
+                self.logger.info(f"Found {len(online_streams)} streamers online")
 
-                if streamer_id == Config.twitch_bot_id:
-                    continue
+                user_profiles = {}
+                for i in range(0, len(streamer_ids), 100):
+                    chunk = streamer_ids[i : i + 100]
+                    users = await self.fetch_users(ids=chunk)
+                    for user in users:
+                        user_profiles[str(user.id)] = user
+                    await asyncio.sleep(0)
 
-                # Add to subscription list
-                new_subs.extend(
-                    [
-                        eventsub.StreamOnlineSubscription(
-                            broadcaster_user_id=str(streamer_id)
-                        ),
-                        eventsub.StreamOfflineSubscription(
-                            broadcaster_user_id=str(streamer_id)
-                        ),
-                        eventsub.ChannelUpdateSubscription(
-                            broadcaster_user_id=str(streamer_id)
-                        ),
-                    ]
-                )
+                self.logger.info(f"Fetched {len(user_profiles)} user profiles")
 
-            # Prepare bulk status updates
-            status_updates = []
-            for streamer in streamers:
-                streamer_id = streamer["streamer_id"]
-                if streamer_id == Config.twitch_bot_id:
-                    continue
+                new_subs = []
+                bulk_status_updates = []
+                pipeline_updates = []
+                stale_offline_to_unclaim = []
+                stale_nongta_to_unclaim = []
 
-                stream = online_streams.get(str(streamer_id))
-                user = user_profiles.get(str(streamer_id))
-                is_online = stream is not None
+                for streamer in streamers:
+                    streamer_id = streamer["streamer_id"]
 
-                status_updates.append(
-                    {
+                    if streamer_id == Config.twitch_bot_id:
+                        continue
+
+                    new_subs.extend(
+                        [
+                            eventsub.StreamOnlineSubscription(
+                                broadcaster_user_id=str(streamer_id)
+                            ),
+                            eventsub.StreamOfflineSubscription(
+                                broadcaster_user_id=str(streamer_id)
+                            ),
+                            eventsub.ChannelUpdateSubscription(
+                                broadcaster_user_id=str(streamer_id)
+                            ),
+                        ]
+                    )
+
+                for streamer in streamers:
+                    streamer_id = streamer["streamer_id"]
+                    if streamer_id == Config.twitch_bot_id:
+                        continue
+
+                    stream = online_streams.get(str(streamer_id))
+                    user = user_profiles.get(str(streamer_id))
+                    is_online = stream is not None
+                    old_is_online = bool(streamer.get("is_online"))
+                    old_game_id = (
+                        str(streamer.get("game_id"))
+                        if streamer.get("game_id") is not None
+                        else None
+                    )
+                    new_game_id = (
+                        str(stream.game_id)
+                        if is_online and getattr(stream, "game_id", None) is not None
+                        else None
+                    )
+                    assignments = streamer.get("assignments", []) or []
+
+                    update_payload = {
                         "streamer_id": streamer_id,
                         "is_online": is_online,
                         "started_at": (
@@ -219,67 +303,133 @@ class TwitchBot(AutoClient):
                             else None
                         ),
                     }
-                )
 
-                # Track offline streamers that still have assignments
-                if not is_online:
-                    assignments = streamer.get("assignments", [])
-                    if assignments:
-                        offline_to_unclaim.append(streamer_id)
+                    state_changed = old_is_online != is_online
+                    if is_online and old_game_id != new_game_id:
+                        state_changed = True
 
-            # Bulk update all statuses (API handles batching internally if needed)
-            if status_updates:
-                updated_count = await self.api.sync_streamers_status_bulk(
-                    status_updates
-                )
-                self.logger.info(f"✓ Bulk updated {updated_count} streamer statuses")
+                    if state_changed:
+                        pipeline_updates.append(update_payload)
+                    else:
+                        bulk_status_updates.append(update_payload)
 
-            # Unclaim offline streamers with active sessions
-            if offline_to_unclaim:
-                self.logger.info(f"Unclaiming {len(offline_to_unclaim)} offline streamers...")
-                for sid in offline_to_unclaim:
-                    try:
-                        await self.api.unclaim_streamer(sid, "stream_end")
-                        await asyncio.sleep(0.1)  # small delay to prevent rate limits
-                    except Exception as ex:
-                        self.logger.error(f"Failed to unclaim offline streamer {sid}: {ex}")
-                self.logger.info(f"✓ Unclaimed {len(offline_to_unclaim)} offline streamers")
+                        if assignments:
+                            if not is_online:
+                                stale_offline_to_unclaim.append(streamer_id)
+                            elif new_game_id and new_game_id != Config.gta5_game_id:
+                                stale_nongta_to_unclaim.append(streamer_id)
 
-            # Perform subscriptions in batches
-            if new_subs:
-                self.logger.info(f"Subscribing to {len(new_subs)} events...")
-
-                # Batch size for EventSub subscriptions (safe limit)
-                batch_size = 100
-                for i in range(0, len(new_subs), batch_size):
-                    batch = new_subs[i : i + batch_size]
-                    try:
-                        resp = await self.multi_subscribe(batch)
-                        if resp and resp.errors:
-                            self.logger.warning(
-                                f"Subscription errors in batch {i//batch_size}: {resp.errors}"
+                if pipeline_updates:
+                    self.logger.info(
+                        f"Applying {len(pipeline_updates)} stateful streamer updates..."
+                    )
+                    for update in pipeline_updates:
+                        try:
+                            await self.api.update_streamer_status(
+                                update["streamer_id"],
+                                update["is_online"],
+                                started_at=update.get("started_at"),
+                                game_id=update.get("game_id"),
+                                game_name=update.get("game_name"),
+                                stream_title=update.get("stream_title"),
+                                stream_thumbnail_url=update.get("stream_thumbnail_url"),
+                                profile_image_url=update.get("profile_image_url"),
                             )
-                    except Exception as ex:
-                        self.logger.error(
-                            f"Subscription batch {i//batch_size} failed: {ex}"
-                        )
+                        except Exception as ex:
+                            self.logger.error(
+                                f"Failed to apply stateful sync update for streamer {update['streamer_id']}: {ex}"
+                            )
 
-                    # Small delay between batches
-                    await asyncio.sleep(0.1)
+                if bulk_status_updates:
+                    updated_count = await self.api.sync_streamers_status_bulk(
+                        bulk_status_updates
+                    )
+                    self.logger.info(f"✓ Bulk updated {updated_count} streamer statuses")
 
-            self.logger.info(f"✓ Synced {len(streamers)} streamers")
+                stale_unclaims = [
+                    (streamer_id, "stream_end")
+                    for streamer_id in stale_offline_to_unclaim
+                ] + [
+                    (streamer_id, "category_change")
+                    for streamer_id in stale_nongta_to_unclaim
+                ]
 
-        except Exception as e:
-            self.logger.error(f"Error syncing streamers: {e}", exc_info=True)
-            raise
+                if stale_unclaims:
+                    self.logger.info(
+                        f"Recovering {len(stale_unclaims)} stale streamer assignments..."
+                    )
+                    for streamer_id, reason in stale_unclaims:
+                        try:
+                            await self.api.unclaim_streamer(streamer_id, reason)
+                            await asyncio.sleep(0.1)
+                        except Exception as ex:
+                            self.logger.error(
+                                f"Failed to recover stale assignment for streamer {streamer_id}: {ex}"
+                            )
+                    self.logger.info("✓ Recovered stale streamer assignments")
+
+                if new_subs:
+                    self.logger.info(f"Subscribing to {len(new_subs)} events...")
+                    batch_size = 100
+                    for i in range(0, len(new_subs), batch_size):
+                        batch = new_subs[i : i + batch_size]
+                        try:
+                            resp = await self.multi_subscribe(batch)
+                            if resp and resp.errors:
+                                self.logger.warning(
+                                    f"Subscription errors in batch {i//batch_size}: {resp.errors}"
+                                )
+                        except Exception as ex:
+                            self.logger.error(
+                                f"Subscription batch {i//batch_size} failed: {ex}"
+                            )
+                        await asyncio.sleep(0.1)
+
+                self._last_synced_streamers = len(streamers)
+                self._last_online_streamers = len(online_streams)
+                self._last_subscription_targets = len(new_subs)
+                self._last_sync_completed_at = datetime.now(timezone.utc)
+                self._last_sync_duration_seconds = round(
+                    (self._last_sync_completed_at - sync_started_at).total_seconds(), 2
+                )
+                self._last_sync_status = "online"
+
+                self.logger.info(f"✓ Synced {len(streamers)} streamers")
+                await self.report_service_status("online")
+                return {
+                    "streamers": len(streamers),
+                    "online": len(online_streams),
+                }
+            except Exception as e:
+                self._last_sync_completed_at = datetime.now(timezone.utc)
+                self._last_sync_duration_seconds = round(
+                    (self._last_sync_completed_at - sync_started_at).total_seconds(), 2
+                )
+                self._last_sync_status = "error"
+                self._last_sync_error = str(e)
+                await self.report_service_status("error")
+                self.logger.error(f"Error syncing streamers: {e}", exc_info=True)
+                raise
 
     async def event_ready(self) -> None:
         """Called when bot is ready."""
-        await self.sync_streamers()
+        await self.sync_streamers(reason="startup")
 
         self.logger.info(f"✓ Twitch bot ready as {self.user}")
+        await self.report_service_status("online")
+        if not self._heartbeat_task or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
-        await self.api.sync_streamers()
+    async def close(self) -> None:
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        self._heartbeat_task = None
+        await self.report_service_status("stopping")
+        await super().close()
 
     async def event_stream_online(self, payload: twitchio.StreamOnline) -> None:
         """Handle stream online event."""

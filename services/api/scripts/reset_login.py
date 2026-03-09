@@ -20,10 +20,12 @@ load_dotenv()
 
 async def reset():
     """Reset failed login attempts for all users."""
+    Config.validate_database_config()
     logger = Config.setup_logging("ResetScript")
 
     db = Database(
         db_host=Config.db_host,
+        db_port=Config.db_port,
         db_user=Config.db_user,
         db_password=Config.db_password,
         db_name=Config.db_name,

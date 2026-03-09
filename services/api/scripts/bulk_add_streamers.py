@@ -26,6 +26,7 @@ from config import Config
 
 def _get_service_token() -> str:
     """Extract a service token from Config.service_token_map."""
+    Config.validate_service_tokens_contract()
     token_map = Config.service_token_map
     # Prefer discord_service token; fall back to any available token
     for name in ("discord_service", "twitch_service"):
@@ -85,6 +86,8 @@ async def bulk_add(filepath: str) -> None:
 
     print(f"📂 Loaded {len(data)} entries from {filepath}")
 
+    if Config.api_port <= 0:
+        raise RuntimeError("API_PORT must be a positive integer.")
     base_url = f"http://{Config.api_host}:{Config.api_port}"
     token = _get_service_token()
     print(f"🔗 API URL: {base_url}")

@@ -4,6 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Twitch, User, Clock, Shield } from 'lucide-react';
 import type { Streamer } from '../types/domain';
 import { unwrapApiData } from '../types/api';
+import { formatDocumentTitle } from '../utils/documentTitle';
 import { apiFetch } from '../api/client';
 
 export default function MediaProfile() {
@@ -33,6 +34,17 @@ export default function MediaProfile() {
             fetchStreamer();
         }
     }, [id]);
+
+    useEffect(() => {
+        if (streamer?.streamer_name) {
+            document.title = formatDocumentTitle([streamer.streamer_name, 'Медиа']);
+            return;
+        }
+
+        if (error) {
+            document.title = formatDocumentTitle(['Медиа']);
+        }
+    }, [streamer?.streamer_name, error]);
 
     if (loading) {
         return (

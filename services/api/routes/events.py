@@ -94,6 +94,7 @@ async def create_event(
             notification_sent=(data.start_time is None),
             pr_slots=data.pr_slots,
             priority=data.priority,
+            is_pinned=data.is_pinned,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

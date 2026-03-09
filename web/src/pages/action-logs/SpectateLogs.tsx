@@ -11,9 +11,9 @@ import { unwrapApiData } from '../../types/api';
 import { formatMskToLocal } from '../../utils/datetime';
 import { apiFetch } from '../../api/client';
 
-export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
+type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
 
-export const ACTION_TRANSLATIONS: Record<string, string> = {
+const ACTION_TRANSLATIONS: Record<string, string> = {
     'user.create': 'Создан пользователь',
     'user.update': 'Обновлен пользователь',
     'streamer.add': 'Добавлен стример',
@@ -86,10 +86,10 @@ function priorityColor(p: number): string {
 
 function roleBadge(role: string | null): { label: string; color: string } {
     switch (role) {
-        case 'junior_employee': return { label: 'Стажер', color: 'bg-amber-500/20 text-amber-300' };
-        case 'employee': return { label: 'Сотрудник', color: 'bg-sky-500/20 text-sky-300' };
-        case 'senior_employee': return { label: 'Старший', color: 'bg-violet-500/20 text-violet-300' };
-        case 'manager': return { label: 'Менеджер', color: 'bg-rose-500/20 text-rose-300' };
+        case 'junior_employee': return { label: 'Мл. ассистент', color: 'bg-amber-500/20 text-amber-300' };
+        case 'employee': return { label: 'Ассистент', color: 'bg-sky-500/20 text-sky-300' };
+        case 'senior_employee': return { label: 'Ст. ассистент', color: 'bg-violet-500/20 text-violet-300' };
+        case 'manager': return { label: 'Глава ассистентов', color: 'bg-rose-500/20 text-rose-300' };
         case 'developer': return { label: 'Разработчик', color: 'bg-emerald-500/20 text-emerald-300' };
         default: return { label: role || '—', color: 'bg-white/10 text-white/50' };
     }
@@ -633,7 +633,7 @@ export function SpectateLogs() {
                                                             </span>
                                                             {!!log.is_probation && (
                                                                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-400/20">
-                                                                    Проб.
+                                                                    Стажерский
                                                                 </span>
                                                             )}
                                                         </div>

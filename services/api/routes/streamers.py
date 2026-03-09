@@ -52,6 +52,10 @@ async def list_streamers(
     db: "Database" = Depends(get_db),
     online_only: bool = Query(False, description="Filter only online streamers"),
     gta_only: bool = Query(False, description="Filter only GTA 5 streamers (used with online_only)"),
+    include_assignments: bool = Query(
+        False,
+        description="Include active assignment slots for all streamers",
+    ),
     _principal: dict = Depends(require_permission("streamers.view")),
 ):
     """Get all streamers."""
@@ -65,7 +69,9 @@ async def list_streamers(
                 if str(s.get("game_id")) == Config.gta5_game_id
             ]
     else:
-        streamers = await db.list_all_streamers()
+        streamers = await db.list_all_streamers(
+            include_assignments=include_assignments
+        )
 
     # Count stats
     online_count = sum(1 for s in streamers if s.get("is_online"))
@@ -467,6 +473,7 @@ async def update_streamer_status(
         game_name=data.game_name,
         stream_title=data.stream_title,
         stream_thumbnail_url=data.stream_thumbnail_url,
+        profile_image_url=data.profile_image_url,
     )
 
     if old_state is None:

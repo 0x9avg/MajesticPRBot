@@ -37,8 +37,10 @@ def format_table(headers, rows):
 
 
 async def dump_schema():
+    Config.validate_database_config()
     db = Database(
         db_host=Config.db_host,
+        db_port=Config.db_port,
         db_user=Config.db_user,
         db_password=Config.db_password,
         db_name=Config.db_name,

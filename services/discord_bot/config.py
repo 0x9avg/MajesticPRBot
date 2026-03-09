@@ -7,7 +7,7 @@ Uses pydantic-settings for type validation and .env loading.
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -16,7 +16,15 @@ from pydantic_settings import BaseSettings
 class Config(BaseSettings):
     """Discord Bot Service configuration using pydantic-settings."""
 
-    version: ClassVar[str] = "2.0.0 (Microservices)"
+    _PLACEHOLDER_VALUES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "",
+            "0",
+            "your_discord_bot_token_here",
+            "replace_with_discord_service_token",
+        }
+    )
+
     env: str = Field(
         default="development", validation_alias="ENV"
     )  # development, production
@@ -30,18 +38,18 @@ class Config(BaseSettings):
     # ==========================================================================
     # API Service Connection
     # ==========================================================================
-    api_base_url: str = Field(default="http://localhost:8000", alias="API_BASE_URL")
+    api_base_url: str = Field(default="", alias="API_BASE_URL")
     api_timeout: int = Field(default=30, alias="API_TIMEOUT")
     service_token: str = Field(default="", alias="SERVICE_TOKEN")
 
     # ==========================================================================
     # RabbitMQ Settings
     # ==========================================================================
-    rabbitmq_host: str = Field(default="localhost", alias="RABBITMQ_HOST")
-    rabbitmq_port: int = Field(default=5672, alias="RABBITMQ_PORT")
-    rabbitmq_user: str = Field(default="guest", alias="RABBITMQ_USER")
-    rabbitmq_password: str = Field(default="guest", alias="RABBITMQ_PASSWORD")
-    rabbitmq_vhost: str = Field(default="/", alias="RABBITMQ_VHOST")
+    rabbitmq_host: str = Field(default="", alias="RABBITMQ_HOST")
+    rabbitmq_port: int = Field(default=0, alias="RABBITMQ_PORT")
+    rabbitmq_user: str = Field(default="", alias="RABBITMQ_USER")
+    rabbitmq_password: str = Field(default="", alias="RABBITMQ_PASSWORD")
+    rabbitmq_vhost: str = Field(default="", alias="RABBITMQ_VHOST")
     rabbitmq_exchange: str = "prmajesticbot"
     rabbitmq_queue: str = "discord_bot"
 
@@ -62,15 +70,6 @@ class Config(BaseSettings):
     log_file: ClassVar[str] = "discord_bot.log"
     log_format: ClassVar[str] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-    # ==========================================================================
-    # Required Environment Variables for Validation
-    # ==========================================================================
-    required_env_vars: ClassVar[List[str]] = [
-        "DISCORD_TOKEN",
-        "GUILD_ID",
-        "SERVICE_TOKEN",
-    ]
-
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -78,16 +77,75 @@ class Config(BaseSettings):
         "extra": "ignore",
     }
 
-    def validate_env_vars(self) -> Optional[List[str]]:
-        """Check that all required environment variables are set."""
-        missing = []
-        if not self.discord_token:
-            missing.append("DISCORD_TOKEN")
-        if self.guild_id == "0":
-            missing.append("GUILD_ID")
-        if not self.service_token:
-            missing.append("SERVICE_TOKEN")
-        return missing if missing else None
+    @classmethod
+    def _looks_like_placeholder(cls, value: str) -> bool:
+        normalized = value.strip().lower()
+        return (
+            normalized in cls._PLACEHOLDER_VALUES
+            or normalized.startswith("replace_with_")
+            or normalized.startswith("your_")
+            or normalized.endswith("_here")
+        )
+
+    @staticmethod
+    def _is_blank(value: str) -> bool:
+        return not value or not value.strip()
+
+    def validate_api_config(self) -> None:
+        errors: list[str] = []
+        if self._is_blank(self.api_base_url):
+            errors.append("API_BASE_URL is required.")
+        if self.api_timeout <= 0:
+            errors.append("API_TIMEOUT must be a positive integer.")
+        if self._is_blank(self.service_token):
+            errors.append("SERVICE_TOKEN is required.")
+        elif self._looks_like_placeholder(self.service_token):
+            errors.append("SERVICE_TOKEN must not use a placeholder value.")
+
+        if errors:
+            raise ValueError("Invalid Discord API configuration:\n- " + "\n- ".join(errors))
+
+    def validate_broker_config(self) -> None:
+        errors: list[str] = []
+        if self._is_blank(self.rabbitmq_host):
+            errors.append("RABBITMQ_HOST is required.")
+        if self.rabbitmq_port <= 0:
+            errors.append("RABBITMQ_PORT must be a positive integer.")
+        if self._is_blank(self.rabbitmq_user):
+            errors.append("RABBITMQ_USER is required.")
+        if self._is_blank(self.rabbitmq_password):
+            errors.append("RABBITMQ_PASSWORD is required.")
+        if self._is_blank(self.rabbitmq_vhost):
+            errors.append("RABBITMQ_VHOST is required.")
+
+        if errors:
+            raise ValueError(
+                "Invalid Discord RabbitMQ configuration:\n- " + "\n- ".join(errors)
+            )
+
+    def validate_startup_config(self) -> None:
+        """Fail-fast validation for Discord bot startup settings."""
+        errors: list[str] = []
+
+        if self._is_blank(self.discord_token):
+            errors.append("DISCORD_TOKEN is required.")
+        elif self._looks_like_placeholder(self.discord_token):
+            errors.append("DISCORD_TOKEN must not use a placeholder value.")
+
+        guild_id = (self.guild_id or "").strip()
+        if not guild_id:
+            errors.append("GUILD_ID is required.")
+        elif not guild_id.isdigit() or int(guild_id) <= 0:
+            errors.append("GUILD_ID must be a positive Discord guild ID.")
+
+        for validator in (self.validate_api_config, self.validate_broker_config):
+            try:
+                validator()
+            except ValueError as exc:
+                errors.append(str(exc))
+
+        if errors:
+            raise ValueError("\n".join(errors))
 
     def get_log_level(self) -> int:
         level_map = {

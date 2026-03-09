@@ -16,10 +16,10 @@ async def main():
     """Main entry point."""
     logger = Config.setup_logging("Main")
 
-    # Validate config
-    missing = Config.validate_env_vars()
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+    try:
+        Config.validate_startup_config()
+    except ValueError as exc:
+        logger.error(str(exc))
         sys.exit(1)
 
     logger.info("✓ Environment variables validated")

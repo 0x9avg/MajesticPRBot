@@ -204,18 +204,26 @@ async def _claim_for_pr(
             )
 
     try:
-        await db.assign_pr_to_streamer(data.streamer_id, pr_id, is_probation=data.is_probation)
+        await db.assign_pr_to_streamer(
+            data.streamer_id,
+            pr_id,
+            is_probation=data.is_probation,
+            outbox_events=[
+                {
+                    "routing_key": "spec.claimed",
+                    "payload": {
+                        "event": "spec.claimed",
+                        "streamer_id": data.streamer_id,
+                        "streamer_name": streamer["streamer_name"],
+                        "pr_id": pr_id,
+                        "data": {"is_probation": data.is_probation},
+                        "trace_id": trace_id,
+                    },
+                }
+            ],
+        )
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
-
-    if broker:
-        await broker.emit_spec_claimed(
-            data.streamer_id,
-            streamer["streamer_name"],
-            pr_id,
-            data={"is_probation": data.is_probation},
-            trace_id=trace_id,
-        )
 
     return JSONResponse(
         content=success_envelope(
@@ -312,22 +320,12 @@ async def unclaim_streamer(
         data.streamer_id,
         pr_id=target_pr_id,
         end_reason=data.reason,
+        outbox_trace_id=trace_id,
     )
     if not results:
         raise HTTPException(status_code=400, detail="Стример не закреплен")
 
     result = results[0]
-    if broker:
-        for res in results:
-            await broker.emit_spec_unclaimed(
-                data.streamer_id,
-                streamer["streamer_name"],
-                res["pr_id"],
-                res.get("duration_seconds", 0),
-                data.reason,
-                trace_id=trace_id,
-            )
-
     return JSONResponse(
         content=success_envelope(
             data={
@@ -364,6 +362,7 @@ async def unclaim_streamer_for_pr(
         data.streamer_id,
         pr_id=pr_id,
         end_reason=data.reason,
+        outbox_trace_id=trace_id,
     )
     if not results:
         raise HTTPException(
@@ -372,17 +371,6 @@ async def unclaim_streamer_for_pr(
         )
 
     result = results[0]
-    if broker:
-        for res in results:
-            await broker.emit_spec_unclaimed(
-                data.streamer_id,
-                streamer["streamer_name"],
-                res["pr_id"],
-                res.get("duration_seconds", 0),
-                data.reason,
-                trace_id=trace_id,
-            )
-
     return JSONResponse(
         content=success_envelope(
             data={

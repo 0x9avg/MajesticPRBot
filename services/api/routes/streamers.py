@@ -19,6 +19,7 @@ from schemas.streamer import (
     StreamerStatusUpdate,
     StreamerUpdate,
 )
+from services.outbox import publish_integration_event
 
 router = APIRouter(prefix="/streamers", tags=["Streamers"])
 
@@ -156,6 +157,18 @@ async def create_streamer(
             stream_title=data.stream_title,
             stream_thumbnail_url=data.stream_thumbnail_url,
             profile_image_url=data.profile_image_url,
+            outbox_events=[
+                {
+                    "routing_key": "streamer.added",
+                    "payload": {
+                        "event": "streamer.added",
+                        "streamer_id": data.streamer_id,
+                        "streamer_name": data.streamer_name,
+                        "data": {"priority": data.priority, "pr_slots": data.pr_slots},
+                        "trace_id": trace_id,
+                    },
+                }
+            ],
         )
 
         streamer = await db.get_streamer(data.streamer_id)
@@ -164,14 +177,6 @@ async def create_streamer(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to retrieve created streamer {data.streamer_id}",
-            )
-
-        if broker:
-            await broker.emit_streamer_added(
-                data.streamer_id,
-                data.streamer_name,
-                {"priority": data.priority, "pr_slots": data.pr_slots},
-                trace_id=trace_id,
             )
 
         await db.log_admin_action_v2(
@@ -220,17 +225,22 @@ async def create_streamer(
     # Mode A: URL mode - needs Twitch verification
     username = data.twitch_url
 
-    if broker:
-        # Emit verification event so Twitch Bot can resolve ID
-        await broker.emit_streamer_verify(
-            username,
-            {
+    publish_ok = await publish_integration_event(
+        request.app,
+        routing_key="streamer.verify",
+        payload={
+            "event": "streamer.verify",
+            "username": username,
+            "added_by": {
                 "priority": data.priority,
                 "pr_slots": data.pr_slots,
                 "added_by_id": added_by_id,
             },
-            trace_id=trace_id,
-        )
+            "trace_id": trace_id,
+        },
+    )
+
+    if publish_ok:
 
         await db.log_admin_action_v2(
             actor_name=actor_name or "Unknown",
@@ -327,21 +337,21 @@ async def update_streamer(
             }
             update_data["allow_juniors"] = data.allow_juniors
 
-    if data.priority_override is not None:
-        if data.priority_override != streamer.get("priority_override"):
-            changes["priority_override"] = {
-                "old": streamer.get("priority_override"),
-                "new": data.priority_override,
+    if data.current_stream_priority_override is not None:
+        if data.current_stream_priority_override != streamer.get("current_stream_priority_override"):
+            changes["current_stream_priority_override"] = {
+                "old": streamer.get("current_stream_priority_override"),
+                "new": data.current_stream_priority_override,
             }
-            update_data["priority_override"] = data.priority_override
+            update_data["priority_override"] = data.current_stream_priority_override
 
-    if data.pr_slots_override is not None:
-        if data.pr_slots_override != streamer.get("pr_slots_override"):
-            changes["pr_slots_override"] = {
-                "old": streamer.get("pr_slots_override"),
-                "new": data.pr_slots_override,
+    if data.current_stream_pr_slots_override is not None:
+        if data.current_stream_pr_slots_override != streamer.get("current_stream_pr_slots_override"):
+            changes["current_stream_pr_slots_override"] = {
+                "old": streamer.get("current_stream_pr_slots_override"),
+                "new": data.current_stream_pr_slots_override,
             }
-            update_data["pr_slots_override"] = data.pr_slots_override
+            update_data["pr_slots_override"] = data.current_stream_pr_slots_override
 
     if update_data:
         # Update via database method
@@ -353,6 +363,18 @@ async def update_streamer(
             allow_juniors=update_data.get("allow_juniors"),
             priority_override=update_data.get("priority_override"),
             pr_slots_override=update_data.get("pr_slots_override"),
+            outbox_events=[
+                {
+                    "routing_key": "streamer.updated",
+                    "payload": {
+                        "event": "streamer.updated",
+                        "streamer_id": twitch_id,
+                        "streamer_name": streamer["streamer_name"],
+                        "data": update_data,
+                        "trace_id": trace_id,
+                    },
+                }
+            ],
         )
 
         # Retroactive update: propagate priority changes to active sessions
@@ -396,14 +418,6 @@ async def update_streamer(
     # Get updated streamer
     streamer = await db.get_streamer(twitch_id)
 
-    if broker:
-        await broker.emit_streamer_updated(
-            twitch_id,
-            streamer["streamer_name"],
-            update_data,
-            trace_id=trace_id,
-        )
-
     response_data = StreamerResponse(**streamer)
     return JSONResponse(
         content=success_envelope(
@@ -432,10 +446,20 @@ async def remove_streamer(
 
     streamer_name = streamer["streamer_name"]
 
-    await db.remove_streamer(twitch_id)
-
-    if broker:
-        await broker.emit_streamer_removed(twitch_id, streamer_name, trace_id=trace_id)
+    await db.remove_streamer(
+        twitch_id,
+        outbox_events=[
+            {
+                "routing_key": "streamer.removed",
+                "payload": {
+                    "event": "streamer.removed",
+                    "streamer_id": twitch_id,
+                    "streamer_name": streamer_name,
+                    "trace_id": trace_id,
+                },
+            }
+        ],
+    )
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -474,6 +498,7 @@ async def update_streamer_status(
         stream_title=data.stream_title,
         stream_thumbnail_url=data.stream_thumbnail_url,
         profile_image_url=data.profile_image_url,
+        outbox_trace_id=trace_id,
     )
 
     if old_state is None:
@@ -491,73 +516,36 @@ async def update_streamer_status(
             f"Atomic update: {streamer_name} | Online: {old_is_online}->{data.is_online} | GameID: {old_game_id}->{new_game_id}"
         )
 
-        # === AUTO-UNASSIGN LOGIC ===
-        should_unassign = False
-        unassign_reason = ""
+    # === AUTO-UNASSIGN LOGIC ===
+    should_unassign = False
+    unassign_reason = ""
 
-        # Case 1: Stream went OFFLINE
-        if not data.is_online and old_is_online:
+    # Case 1: Stream went OFFLINE
+    if not data.is_online and old_is_online:
+        should_unassign = True
+        unassign_reason = "stream_end"
+
+    # Case 2: Category changed FROM GTA while online
+    elif data.is_online and old_is_online:
+        was_gta = old_game_id == Config.gta5_game_id
+        is_gta = new_game_id == Config.gta5_game_id
+        if was_gta and not is_gta:
             should_unassign = True
-            unassign_reason = "stream_end"
+            unassign_reason = "category_change"
 
-        # Case 2: Category changed FROM GTA while online
-        elif data.is_online and old_is_online:
-            was_gta = old_game_id == Config.gta5_game_id
-            is_gta = new_game_id == Config.gta5_game_id
-            if was_gta and not is_gta:
-                should_unassign = True
-                unassign_reason = "category_change"
-
-        # Execute auto-unassign if needed
-        if should_unassign:
-            unassign_results = await db.unassign_pr_from_streamer(
-                twitch_id, pr_id=None, end_reason=unassign_reason
-            )
-            for result in unassign_results:
+    # Execute auto-unassign if needed
+    if should_unassign:
+        unassign_results = await db.unassign_pr_from_streamer(
+            twitch_id,
+            pr_id=None,
+            end_reason=unassign_reason,
+            outbox_trace_id=trace_id,
+        )
+        for result in unassign_results:
+            if broker:
                 broker.logger.info(
                     f"AUTO-UNASSIGN: {streamer_name} | Reason: {unassign_reason} | PR: {result['pr_id']} | Duration: {result['duration_seconds']}s"
                 )
-                await broker.emit_spec_unclaimed(
-                    streamer_id=twitch_id,
-                    streamer_name=streamer_name,
-                    pr_id=result["pr_id"],
-                    duration_seconds=result["duration_seconds"],
-                    reason=unassign_reason,
-                    trace_id=trace_id,
-                )
-
-        # === BROKER NOTIFICATIONS ===
-        # Only emit events if there was an actual state change
-        if data.is_online and not old_is_online:
-            # Stream went ONLINE
-            await broker.emit_stream_online(
-                streamer_id=twitch_id,
-                streamer_name=streamer_name,
-                game_id=data.game_id,
-                game_name=data.game_name,
-                stream_title=data.stream_title,
-                thumbnail_url=data.stream_thumbnail_url,
-                trace_id=trace_id,
-            )
-        elif not data.is_online and old_is_online:
-            # Stream went OFFLINE
-            await broker.emit_stream_offline(
-                streamer_id=twitch_id,
-                streamer_name=streamer_name,
-                trace_id=trace_id,
-            )
-        elif data.is_online and old_is_online and old_game_id != new_game_id:
-            # Category changed while online (atomic check prevents duplicates)
-            await broker.emit_category_change(
-                streamer_id=twitch_id,
-                streamer_name=streamer_name,
-                old_game_id=old_game_id,
-                new_game_id=new_game_id,
-                new_game_name=data.game_name,
-                stream_title=data.stream_title,
-                thumbnail_url=data.stream_thumbnail_url,
-                trace_id=trace_id,
-            )
 
     return JSONResponse(
         content=success_envelope(

@@ -1,5 +1,5 @@
 import React from 'react';
-import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench, Clock } from 'lucide-react';
+import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench, Clock, Shield } from 'lucide-react';
 import { useOutletContext } from 'react-router-dom';
 import UserRegistration from './components/UserRegistration';
 import MediaRegistration from './components/MediaRegistration';
@@ -8,6 +8,7 @@ import SiteManagement from './components/SiteManagement';
 import SystemInfo from './components/SystemInfo';
 import AssistantsManagement from './components/AssistantsManagement';
 import PendingRequests from './components/PendingRequests';
+import SanctionsQueueManagement from './components/SanctionsQueueManagement';
 import type { OutletUserContext } from '../../types/auth';
 import { hasAny } from '../../rbac/guards';
 import { ADMIN_TABS } from '../../rbac/catalog';
@@ -27,6 +28,7 @@ export function AdminPanel() {
         media: Radio,
         requests: Clock,
         assistants: Wrench,
+        sanctions: Shield,
         guild: Settings,
         system: Activity,
     };
@@ -94,6 +96,7 @@ export function AdminPanel() {
                     {activeTab === 'events' && <CreateEvent />}
                     {activeTab === 'requests' && <PendingRequests />}
                     {activeTab === 'assistants' && <AssistantsManagement />}
+                    {activeTab === 'sanctions' && <SanctionsQueueManagement />}
                     {activeTab === 'guild' && <SiteManagement />}
                     {activeTab === 'system' && <SystemInfo />}
                 </div>

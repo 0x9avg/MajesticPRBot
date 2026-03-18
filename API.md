@@ -1,101 +1,106 @@
 # API Endpoints
 Base URL: `/api`
 
-## Authentication (`/auth`)
+## Auth
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/auth/login` | Login and obtain refresh/access tokens (access token includes `sid`) |
-| POST | `/auth/logout` | Logout |
-| GET | `/auth/me` | Get current authenticated user info |
+| POST | `/auth/login` | Login and obtain refresh/access tokens |
+| POST | `/auth/logout` | Logout current session |
+| POST | `/auth/refresh` | Rotate refresh cookie and issue a new access token |
+| GET | `/auth/me` | Current authenticated principal |
 
-## Admin (`/admin`)
+## Assistants
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/admin/users` | Create web user + assistant profile (requires `can_register_users`, role hierarchy enforced) |
+| GET | `/assistants` | List assistants with computed totals from spec + sanction ledger |
+| POST | `/assistants` | Create or update assistant profile |
+| GET | `/assistants/{pr_id}` | Assistant profile and computed balances |
+| DELETE | `/assistants/{pr_id}` | Delete assistant |
+| PUT | `/assistants/{pr_id}/assign` | Compatibility assignment helper |
+| GET | `/assistants/{pr_id}/logs` | Assistant activity log |
+| GET | `/assistants/{pr_id}/sessions` | Detailed spec sessions |
+| GET | `/assistants/{pr_id}/capabilities` | Role capabilities |
+| POST | `/assistants/{pr_id}/session` | Create manual spec session |
+| PATCH | `/assistants/{pr_id}/sessions/{session_id}` | Patch spec session |
+| DELETE | `/assistants/{pr_id}/sessions/{session_id}` | Soft-delete spec session |
+| GET | `/assistants/{pr_id}/day-status?date=YYYY-MM-DD` | Day metrics, immunities, streak state |
+| GET | `/assistants/{pr_id}/sanctions/summary?date=YYYY-MM-DD` | Active sanctions snapshot on date |
+| GET | `/assistants/{pr_id}/sanctions/active` | Active sanctions with workoff items and progress |
 
-## Assistants (`/assistants`)
+## Day Adjustments
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/assistants` | List all assistants |
-| POST | `/assistants` | Register a new assistant |
-| GET | `/assistants/{pr_id}` | Get assistant details |
-| DELETE | `/assistants/{pr_id}` | Remove an assistant |
-| PUT | `/assistants/{pr_id}/assign` | Update assistant assignment (Manual) |
-| GET | `/assistants/{pr_id}/logs` | Get logs for an assistant |
-| GET | `/assistants/{pr_id}/capabilities` | Get assistant capabilities |
-| POST | `/assistants/{pr_id}/reset` | Reset assistant stats/state |
-| PUT | `/assistants/{pr_id}/daily-stats` | Update daily statistics |
-| POST | `/assistants/{pr_id}/session` | Manage assistant session |
+| POST | `/assistant-day-points` | Upsert one day-point delta per assistant/day |
+| PUT | `/assistant-day-mchat` | Upsert one mchat total per assistant/day |
 
-## Spec System (`/spec`)
+## Sanctions
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/spec/claim` | Claim a streamer (Start spec) |
-| POST | `/spec/unclaim` | Unclaim a streamer (End spec) |
-| GET | `/spec/sessions/{pr_id}` | Get recent spec sessions for a PR |
-| GET | `/spec/by-pr/{pr_id}` | Get current streamer assigned to a PR |
+| POST | `/assistant-sanctions` | Issue manual sanction for current MSK day with optional `workoff_items[]` |
+| POST | `/assistant-sanctions/{id}/reliefs` | Add partial/full relief to sanction |
+| POST | `/assistant-sanctions/{id}/replace` | Replace sanction through relief + re-issue |
+| GET | `/sanctions/{id}/workoff-progress` | Workoff progress for sanction |
 
-## Monitoring (`/monitoring`)
+## Sanction Operations
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/monitoring/status` | Get full monitoring dashboard data |
-| POST | `/monitoring/refresh` | Trigger dashboard refresh |
+| GET | `/sanction-operations` | List sanction operations (cancelled hidden by default) |
+| POST | `/sanction-operations` | Create sanction operation for current MSK day and place it into issuance queue |
+| GET | `/sanction-operations/{id}` | Operation detail with members and issue state |
+| PATCH | `/sanction-operations/{id}` | Edit queued operation metadata, workoff items or explicit members |
+| POST | `/sanction-operations/{id}/members` | Add assistant into explicit operation list |
+| DELETE | `/sanction-operations/{id}/members/{assistant_id}` | Remove assistant from explicit operation list |
+| POST | `/sanction-operations/{id}/issue-now` | Send async command to worker and issue operation immediately without immunity checks |
+| POST | `/sanction-operations/{id}/cancel` | Cancel operation before processing |
 
-## Streamers (`/streamers`)
+## Monthly Sanction Settings
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/streamers` | List all streamers |
-| POST | `/streamers` | Add a new streamer |
+| GET | `/sanction-settings/{month_start}` | Get monthly immunity/default-relief/workoff settings |
+| PUT | `/sanction-settings/{month_start}` | Update monthly settings |
+| GET | `/sanction-settings/{month_start}/check-rules` | Get check escalation rules |
+| PUT | `/sanction-settings/{month_start}/check-rules` | Replace check escalation rules |
+
+## Streamers
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/streamers` | List streamers. Current-stream overrides are exposed only as `current_stream_priority_override` and `current_stream_pr_slots_override` |
+| POST | `/streamers` | Add streamer |
 | GET | `/streamers/{twitch_id}` | Get streamer details |
-| PATCH | `/streamers/{twitch_id}` | Update streamer details |
-| DELETE | `/streamers/{twitch_id}` | Delete a streamer |
-| PATCH | `/streamers/{twitch_id}/status` | Update streamer status (Online/Game/etc) |
-| POST | `/streamers/sync_status` | Batch sync streamer statuses |
+| PATCH | `/streamers/{twitch_id}` | Update streamer. Accepts only `current_stream_priority_override` and `current_stream_pr_slots_override` for per-stream overrides |
+| DELETE | `/streamers/{twitch_id}` | Delete streamer |
+| PATCH | `/streamers/{twitch_id}/status` | Update online/game status |
+| POST | `/streamers/sync_status` | Bulk sync streamer statuses |
 
-## Events (`/events`)
+## Spec
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/events/active` | Get active events |
-| GET | `/events/scheduled` | Get scheduled events |
-| POST | `/events` | Create a new event |
-| GET | `/events/{event_id}` | Get event details |
-| GET | `/events/{event_id}/participants` | Get event participants |
-| POST | `/events/{event_id}/join` | Join an event |
-| POST | `/events/{event_id}/leave` | Leave an event |
-| POST | `/events/{event_id}/end` | End an event |
-| PATCH | `/events/{event_id}/notification-sent` | Mark notification as sent |
-| PATCH | `/events/{event_id}/message` | Update event message ID |
-| GET | `/events/user/{user_id}/active` | Get active event participation for a user |
+| POST | `/spec/claim` | Claim streamer slot |
+| POST | `/spec/unclaim` | Unclaim streamer slot |
+| GET | `/spec/sessions/{pr_id}` | Recent self sessions |
+| GET | `/spec/by-pr/{pr_id}` | Current assignment for PR |
 
-## Guild Settings (`/guild`)
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/guild` | Get guild general settings |
-| GET | `/guild/settings` | Get specific settings |
-| PATCH | `/guild/settings` | Update settings |
-| GET | `/guild/templates` | Get notification templates |
-| PATCH | `/guild/templates` | Update notification templates |
-| GET | `/guild/templates/{event_type}` | Get specific template |
-| GET | `/guild/rates` | Get payment/salary rates |
-| PATCH | `/guild/rates` | Update rates |
+## Events / Guild / Monitoring / Returns
+These sections remain active. Event participant identity is canonicalized as `pr_id` across event lists, `/events/{id}/participants`, `/events/scheduled`, join/leave responses, and end-event payloads. See route files under `services/api/routes/`.
 
-## Notifications (`/notifications`)
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/notifications/channel` | Get configured notification channel ID |
-| GET | `/notifications/render/{event_type}` | Render a notification message and component |
+## Queue / Worker Contract
+- `sanction_operations` are created during the day already in `queued` status and keep an explicit final member list.
+- `live_without_active_session` is used only as a seed mode when the batch list is first generated.
+- `POST /sanction-operations/{id}/issue-now` publishes a RabbitMQ task; API does not execute issuance synchronously.
+- `issue-now` ignores immunities and issues sanctions to all members still present in the operation.
+- After `00:00` MSK the worker processes all `queued` operations for `operation_date = yesterday`.
+- Immunity is evaluated only by `spec_hours_on_day`.
+- Night order:
+  1. queued operation issuance
+  2. check-rule escalation
+  3. default auto-relief for sanctions active before the run
+- Freshly-issued nightly sanctions do not participate in same-night auto-relief.
+- Workoff is stored as `workoff_items[]` with `metric`, `multiplier`, `period_start`, `period_end` and fixed target amounts on issued sanctions.
 
-## Stats (`/stats`)
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/stats/dashboard` | Get high-level dashboard statistics |
+## Deprecated Legacy Paths
+- `/assistants/{pr_id}/sanctions`
+- `/assistants/{pr_id}/warnings`
+- `/assistants/{pr_id}/points/adjust`
+- old `/assistants/{pr_id}/daily-stats` and reset-style contracts
 
-## Notes
-- Access token now contains `sid` (session ID). Tokens without `sid` are rejected and require relogin.
-- `/auth/logout` revokes user sessions, so previously issued access tokens become invalid.
-- Active sessions count for clients should be read from `/stats/dashboard` field `assigned_pr_count`.
-- `POST /admin/users` authorization rules:
-  - `403`: current user lacks `can_register_users`.
-  - `403`: target role is disallowed by role hierarchy.
-  - `400`: invalid role value or duplicates (`username`, `discord_id` in `web_auth` or `assistants`).
-  - `500`: internal creation error (generic message without DB internals).
+These remain legacy-only and should not be used by new clients.

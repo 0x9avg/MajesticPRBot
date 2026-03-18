@@ -18,12 +18,9 @@ from schemas.assistant import (
     AssistantCreate,
     AssistantDeletedResponse,
     AssistantFull,
-    AssistantPointsAdjustRequest,
     AssistantSavedResponse,
-    AssistantSanctionsUpdateRequest,
     AssistantSessionRecord,
     AssistantSessionPatchRequest,
-    AssistantWarningsUpdateRequest,
     DailyStatsResponse,
     DailyStatsUpdate,
     ManualSpecSession,
@@ -441,179 +438,6 @@ async def create_manual_session(
     )
 
 
-@router.post("/{pr_id}/points/adjust")
-async def adjust_assistant_points(
-    request: Request,
-    pr_id: int,
-    data: AssistantPointsAdjustRequest,
-    user: dict = Depends(require_permission("assistants.points.manage")),
-    db: "Database" = Depends(get_db),
-):
-    """Admin-only manual points adjustment (manual component only)."""
-    trace_id = get_trace_id(request)
-    assistant = await db.get_assistant(pr_id)
-    if not assistant:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-
-    result = await db.adjust_assistant_points(
-        pr_id=pr_id,
-        delta=data.delta,
-        source=data.source or "manual_adjust",
-    )
-    if not result:
-        raise HTTPException(status_code=500, detail="Не удалось скорректировать баллы")
-
-    await db.log_admin_action_v2(
-        actor_name=user.get("nickname", user.get("username", "unknown")),
-        actor_role=user.get("role"),
-        action="assistant.spec_points.adjust.permanent",
-        target_type="assistant",
-        target_id=str(pr_id),
-        details={
-            "summary": f"Adjusted manual points for assistant {pr_id}",
-            "changes": {
-                "before": result.get("before"),
-                "after": result.get("after"),
-                "delta": result.get("delta"),
-                "source": data.source or "manual_adjust",
-            },
-            "meta": {
-                "trace_id": trace_id,
-                "request_path": str(request.url.path),
-                "method": request.method,
-                "actor_id": user.get("id"),
-                "ip": request.client.host if request.client else None,
-            },
-        },
-    )
-
-    return JSONResponse(
-        content=success_envelope(
-            data=result,
-            message="Баллы ассистента скорректированы",
-            code="ASSISTANT_POINTS_ADJUSTED",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.patch("/{pr_id}/sanctions")
-async def patch_assistant_sanctions(
-    request: Request,
-    pr_id: int,
-    data: AssistantSanctionsUpdateRequest,
-    user: dict = Depends(require_permission("assistants.sanctions.manage")),
-    db: "Database" = Depends(get_db),
-):
-    """Admin-only sanctions update."""
-    trace_id = get_trace_id(request)
-    assistant = await db.get_assistant(pr_id)
-    if not assistant:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-    if data.penalty_points is None and data.penalty_percent is None:
-        raise HTTPException(status_code=400, detail="Нет полей для обновления санкций")
-
-    result = await db.update_assistant_sanctions(
-        pr_id=pr_id,
-        penalty_points=data.penalty_points,
-        penalty_percent=data.penalty_percent,
-    )
-    if not result:
-        raise HTTPException(status_code=500, detail="Не удалось обновить санкции")
-
-    await db.log_admin_action_v2(
-        actor_name=user.get("nickname", user.get("username", "unknown")),
-        actor_role=user.get("role"),
-        action="assistant.sanctions.update",
-        target_type="assistant",
-        target_id=str(pr_id),
-        details={
-            "summary": f"Updated sanctions for assistant {pr_id}",
-            "changes": {
-                "before": result.get("before"),
-                "after": result.get("after"),
-                "source": "sanction_update",
-            },
-            "meta": {
-                "trace_id": trace_id,
-                "request_path": str(request.url.path),
-                "method": request.method,
-                "actor_id": user.get("id"),
-                "ip": request.client.host if request.client else None,
-            },
-        },
-    )
-
-    return JSONResponse(
-        content=success_envelope(
-            data=result,
-            message="Санкции ассистента обновлены",
-            code="ASSISTANT_SANCTIONS_UPDATED",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.post("/{pr_id}/warnings")
-async def update_assistant_warnings(
-    request: Request,
-    pr_id: int,
-    data: AssistantWarningsUpdateRequest,
-    user: dict = Depends(require_permission("assistants.warnings.manage")),
-    db: "Database" = Depends(get_db),
-):
-    """Admin-only warnings update (oral/strict as units)."""
-    trace_id = get_trace_id(request)
-    assistant = await db.get_assistant(pr_id)
-    if not assistant:
-        raise HTTPException(status_code=404, detail="Ассистент не найден")
-
-    result = await db.update_assistant_warnings(
-        pr_id=pr_id,
-        oral_delta=data.oral_delta,
-        strict_delta=data.strict_delta,
-    )
-    if not result:
-        raise HTTPException(status_code=400, detail="Изменение выговоров не применено")
-
-    await db.log_admin_action_v2(
-        actor_name=user.get("nickname", user.get("username", "unknown")),
-        actor_role=user.get("role"),
-        action="assistant.warnings.update",
-        target_type="assistant",
-        target_id=str(pr_id),
-        details={
-            "summary": f"Updated warnings for assistant {pr_id}",
-            "changes": {
-                "before": result.get("before"),
-                "after": result.get("after"),
-                "delta": {
-                    "oral_delta": data.oral_delta,
-                    "strict_delta": data.strict_delta,
-                    "units_delta": result.get("units_delta"),
-                },
-                "source": "warning_update",
-            },
-            "meta": {
-                "trace_id": trace_id,
-                "request_path": str(request.url.path),
-                "method": request.method,
-                "actor_id": user.get("id"),
-                "ip": request.client.host if request.client else None,
-            },
-        },
-    )
-
-    return JSONResponse(
-        content=success_envelope(
-            data=result,
-            message="Выговоры ассистента обновлены",
-            code="ASSISTANT_WARNINGS_UPDATED",
-            trace_id=trace_id,
-        )
-    )
-
-
 @router.patch("/{pr_id}/sessions/{session_id}")
 async def patch_assistant_session(
     request: Request,
@@ -631,48 +455,15 @@ async def patch_assistant_session(
 
     try:
         result = await db.update_assistant_session(
-            pr_id=pr_id, session_id=session_id, patch=patch
+            pr_id=pr_id,
+            session_id=session_id,
+            patch=patch,
+            outbox_trace_id=trace_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-
-    # Emit broker event if session was closed manually by admin
-    before = result.get("before") or {}
-    after = result.get("after") or {}
-    if before.get("ended_at") is None and after.get("ended_at") is not None:
-        broker = getattr(request.app.state, "broker", None)
-        if broker:
-            target_type = after.get("target_type")
-            target_id = after.get("target_id")
-            target_name = after.get("target_name")
-            duration = after.get("duration_seconds") or 0
-
-            if target_type == "streamer" and target_id is not None:
-                await broker.emit_spec_unclaimed(
-                    streamer_id=int(target_id),
-                    streamer_name=target_name or "Unknown",
-                    pr_id=pr_id,
-                    duration_seconds=duration,
-                    reason="admin_closed",
-                    trace_id=trace_id,
-                )
-            elif target_type == "event" and target_id is not None:
-                ended_dt = after.get("ended_at")
-                ended_str = (
-                    ended_dt.isoformat()
-                    if hasattr(ended_dt, "isoformat")
-                    else str(ended_dt)
-                )
-                await broker.emit_event_left(
-                    event_id=int(target_id),
-                    event_name=target_name or "Unknown",
-                    pr_id=pr_id,
-                    duration_seconds=duration,
-                    ended_at=ended_str,
-                    trace_id=trace_id,
-                )
 
     await db.log_admin_action_v2(
         actor_name=user.get("nickname", user.get("username", "unknown")),

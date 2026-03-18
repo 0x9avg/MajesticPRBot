@@ -119,15 +119,19 @@ async def update_guild_settings(
         pr_actions_channel_id=data.pr_actions_channel_id,
         control_panel_channel_id=data.control_panel_channel_id,
         control_panel_message_id=data.control_panel_message_id,
+        outbox_events=[
+            {
+                "routing_key": "guild.settings.updated",
+                "payload": {
+                    "event": "guild.settings.updated",
+                    "data": data.model_dump(exclude_none=True),
+                    "trace_id": trace_id,
+                },
+            }
+        ],
     )
 
     settings = await db.get_guild()
-
-    if broker:
-        await broker.emit_guild_settings_updated(
-            data.model_dump(exclude_none=True),
-            trace_id=trace_id,
-        )
 
     response_data = GuildSettingsOnlyResponse(**settings)
     return JSONResponse(
@@ -218,15 +222,19 @@ async def update_guild_templates(
         template_stream_offline=data.stream_offline,
         template_category_to_gta=data.category_to_gta,
         template_category_from_gta=data.category_from_gta,
+        outbox_events=[
+            {
+                "routing_key": "guild.templates.updated",
+                "payload": {
+                    "event": "guild.templates.updated",
+                    "data": data.model_dump(exclude_none=True),
+                    "trace_id": trace_id,
+                },
+            }
+        ],
     )
 
     settings = await db.get_guild()
-
-    if broker:
-        await broker.emit_guild_templates_updated(
-            data.model_dump(exclude_none=True),
-            trace_id=trace_id,
-        )
 
     # Parse notification_templates JSON and map to schema fields
     raw_templates = settings.get("notification_templates") if settings else None
@@ -340,15 +348,19 @@ async def update_guild_rates(
         p2_rate=data.p2_rate,
         p3_rate=data.p3_rate,
         probation_rate=data.probation_rate,
+        outbox_events=[
+            {
+                "routing_key": "guild.rates.updated",
+                "payload": {
+                    "event": "guild.rates.updated",
+                    "data": data.model_dump(exclude_none=True),
+                    "trace_id": trace_id,
+                },
+            }
+        ],
     )
 
     settings = await db.get_guild()
-
-    if broker:
-        await broker.emit_guild_rates_updated(
-            data.model_dump(exclude_none=True),
-            trace_id=trace_id,
-        )
 
     response_data = GuildRatesResponse(**settings)
     return JSONResponse(

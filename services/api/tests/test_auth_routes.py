@@ -129,3 +129,78 @@ async def test_me_returns_current_user_info(build_api_app) -> None:
     payload = response.json()
     assert payload["username"] == "creator"
     assert payload["permissions"]["admin.users.create"] is True
+
+
+async def test_refresh_rotates_cookie_and_returns_new_access_token(
+    build_api_app, fake_db
+) -> None:
+    _seed_auth_user(fake_db, "manager")
+
+    async with await _client(build_api_app) as auth_client:
+        login_response = await auth_client.post(
+            "/api/auth/login",
+            json={"username": "manager", "password": "secret"},
+            headers={"User-Agent": "pytest-agent"},
+        )
+        assert login_response.status_code == 200
+        first_cookie = login_response.cookies.get("refresh_token")
+        assert first_cookie is not None
+
+        refresh_response = await auth_client.post(
+            "/api/auth/refresh",
+            headers={"User-Agent": "pytest-agent"},
+        )
+
+    assert refresh_response.status_code == 200
+    payload = refresh_response.json()
+    assert payload["access_token"].startswith("access-1001-manager-manager-sid")
+    assert refresh_response.cookies.get("refresh_token") is not None
+    assert refresh_response.cookies.get("refresh_token") != first_cookie
+    assert len(fake_db.sessions) == 2
+    assert fake_db.sessions[0]["revoked"] is True
+    assert fake_db.sessions[0]["replaced_by_hash"] is not None
+    assert fake_db.sessions[1]["revoked"] is False
+
+
+async def test_refresh_returns_token_invalid_when_cookie_is_missing(
+    build_api_app, fake_db
+) -> None:
+    _seed_auth_user(fake_db, "manager")
+
+    async with await _client(build_api_app) as auth_client:
+        response = await auth_client.post("/api/auth/refresh")
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["detail"]["code"] == "TOKEN_INVALID"
+    assert "отсутствует" in payload["detail"]["message"]
+
+
+async def test_refresh_reuse_detection_revokes_family(
+    build_api_app, fake_db
+) -> None:
+    _seed_auth_user(fake_db, "manager")
+
+    async with await _client(build_api_app) as auth_client:
+        login_response = await auth_client.post(
+            "/api/auth/login",
+            json={"username": "manager", "password": "secret"},
+        )
+        original_refresh_cookie = login_response.cookies.get("refresh_token")
+        assert original_refresh_cookie is not None
+
+        first_refresh = await auth_client.post("/api/auth/refresh")
+        assert first_refresh.status_code == 200
+
+        auth_client.cookies.set(
+            "refresh_token",
+            original_refresh_cookie,
+            domain="test.local",
+            path="/api/auth",
+        )
+        reuse_response = await auth_client.post("/api/auth/refresh")
+
+    assert reuse_response.status_code == 401
+    payload = reuse_response.json()
+    assert payload["detail"]["code"] == "REFRESH_REUSE_DETECTED"
+    assert all(session["revoked"] is True for session in fake_db.sessions)

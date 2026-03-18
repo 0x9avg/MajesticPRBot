@@ -516,18 +516,6 @@ async def seed():
                     )
                     """
                 )
-                await cursor.execute(
-                    """
-                    UPDATE assistants a
-                    LEFT JOIN (
-                        SELECT pr_id, ROUND(COALESCE(SUM(credited_points), 0), 4) AS computed_auto_points
-                        FROM spec_sessions
-                        GROUP BY pr_id
-                    ) s ON s.pr_id = a.pr_id
-                    SET a.auto_points_total = COALESCE(s.computed_auto_points, 0)
-                    """
-                )
-
                 assistant_adjustments: dict[int, dict[str, Any]] = {}
                 seeded_sanctions = 0
                 for pr_id in all_pr_ids:
@@ -548,23 +536,42 @@ async def seed():
                     )
                     warnings_units = random.choice([0, 0, 1, 2, 3, 4, 5])
 
-                    await cursor.execute(
-                        """
-                        UPDATE assistants
-                        SET manual_points_adjustment = %s,
-                            penalty_points = %s,
-                            penalty_percent = %s,
-                            warnings_units = %s
-                        WHERE pr_id = %s
-                        """,
-                        (
-                            manual_adjustment,
-                            penalty_points,
-                            penalty_percent,
-                            warnings_units,
-                            pr_id,
-                        ),
-                    )
+                    work_date = datetime.now(timezone.utc).date()
+                    month_start = work_date.replace(day=1)
+                    if manual_adjustment != 0.0:
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistant_day_point_adjustments (assistant_id, work_date, delta_points)
+                            VALUES (%s, %s, %s)
+                            ON DUPLICATE KEY UPDATE delta_points = VALUES(delta_points)
+                            """,
+                            (pr_id, work_date, manual_adjustment),
+                        )
+
+                    def _seed_sanction(kind: str, amount: float) -> None:
+                        if amount <= 0:
+                            return
+                        seed_operations.append((kind, amount))
+
+                    seed_operations: list[tuple[str, float]] = []
+                    _seed_sanction("point", penalty_points)
+                    _seed_sanction("percent", penalty_percent)
+                    strict_warnings = warnings_units // 2
+                    oral_warnings = warnings_units % 2
+                    _seed_sanction("strict", float(strict_warnings))
+                    _seed_sanction("oral", float(oral_warnings))
+
+                    for kind, amount in seed_operations:
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistant_sanctions (
+                                assistant_id, kind, amount_total, issued_at, source_type, basis_date, settings_month
+                            )
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, 'manual', %s, %s)
+                            """,
+                            (pr_id, kind, amount, work_date, month_start),
+                        )
+
                     assistant_adjustments[pr_id] = {
                         "manual_points_adjustment": manual_adjustment,
                         "penalty_points": penalty_points,

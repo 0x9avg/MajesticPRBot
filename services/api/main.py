@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     app.state._perf_start_time = time.perf_counter()
     app.state._startup_complete = False
     app.state._broker_retry_task = None
+    app.state._outbox_relay_task = None
     app.state._service_registry = {}
 
     Config.validate_service_startup()
@@ -94,6 +95,13 @@ async def lifespan(app: FastAPI):
         refresh_token_expire_days=Config.refresh_token_expire_days,
     )
     logger.info("✓ Auth service initialized")
+
+    from services.outbox import outbox_enabled, outbox_relay_loop
+
+    if outbox_enabled(app):
+        app.state._outbox_relay_task = asyncio.create_task(outbox_relay_loop(app))
+        logger.info("✓ Outbox relay started")
+
     app.state._startup_complete = True
 
     logger.info(f"✓ {Config.app_name} started on {Config.api_host}:{Config.api_port}")
@@ -108,6 +116,13 @@ async def lifespan(app: FastAPI):
         app.state._broker_retry_task.cancel()
         try:
             await app.state._broker_retry_task
+        except asyncio.CancelledError:
+            pass
+
+    if app.state._outbox_relay_task and not app.state._outbox_relay_task.done():
+        app.state._outbox_relay_task.cancel()
+        try:
+            await app.state._outbox_relay_task
         except asyncio.CancelledError:
             pass
 

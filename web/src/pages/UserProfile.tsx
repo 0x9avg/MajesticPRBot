@@ -105,6 +105,12 @@ export default function UserProfile() {
         );
     }
 
+    const warningsDisplay = user.active_warnings_display ?? '0/2 0/2';
+    const grossPoints = user.gross_points ?? 0;
+    const netPoints = user.net_points ?? grossPoints;
+    const activePointPenalty = user.active_point_penalty ?? 0;
+    const activePercentPenalty = user.active_percent_penalty ?? 0;
+
     const StatusBadge = () => {
         const isFree = user.status === 'free';
         const color = isFree ? 'text-[#4ade80]' : 'text-[#facc15]';
@@ -220,7 +226,7 @@ export default function UserProfile() {
 
                             <StatCard
                                 label="Общие баллы"
-                                value={(user.total_points ?? 0).toFixed(2)}
+                                value={grossPoints.toFixed(2)}
                                 color="text-blue-400"
                                 icon={Coins}
                                 valueClassName="text-blue-400"
@@ -228,7 +234,7 @@ export default function UserProfile() {
 
                             <StatCard
                                 label="После санкций"
-                                value={(user.display_points ?? user.total_points ?? 0).toFixed(2)}
+                                value={netPoints.toFixed(2)}
                                 color="text-green-400"
                                 icon={Coins}
                                 valueClassName="text-green-400"
@@ -236,14 +242,14 @@ export default function UserProfile() {
 
                             <StatCard
                                 label="Выговоры"
-                                value={user.warnings_display ?? '0/2 0/2'}
-                                color={(user.warnings_display ?? '0/2 0/2') === '0/2 0/2' ? 'text-white/50' : 'text-rose-400'}
+                                value={warningsDisplay}
+                                color={warningsDisplay === '0/2 0/2' ? 'text-white/50' : 'text-rose-400'}
                                 icon={Shield}
                             />
 
                             <StatCard
                                 label="Штрафные баллы"
-                                value={user.penalty_points ?? 0}
+                                value={activePointPenalty}
                                 color="text-amber-400"
                                 icon={Coins}
                                 valueClassName="text-amber-300"
@@ -251,7 +257,7 @@ export default function UserProfile() {
 
                             <StatCard
                                 label="Штраф, %"
-                                value={`${user.penalty_percent ?? 0}%`}
+                                value={`${activePercentPenalty}%`}
                                 color="text-amber-400"
                                 icon={BadgePercent}
                                 valueClassName="text-amber-300"

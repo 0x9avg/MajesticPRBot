@@ -9,10 +9,32 @@ import json
 import time
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import aiomysql
 from config import Config  # NOTE: kept for potential future use by views migration
+
+SPEC_SESSION_END_REASONS = (
+    "manual_unclaim",
+    "stream_end",
+    "category_change",
+    "admin_closed",
+    "event_end",
+    "event_rejected",
+    "unknown",
+)
+SPEC_SESSION_END_REASON_VALUES_SQL = ", ".join(
+    f"'{reason}'" for reason in SPEC_SESSION_END_REASONS
+)
+SPEC_SESSION_END_REASON_UNKNOWN = "unknown"
+SPEC_SESSION_END_REASON_ADMIN_CLOSED = "admin_closed"
+BROKER_OUTBOX_STATUS_PENDING = "pending"
+BROKER_OUTBOX_STATUS_PROCESSING = "processing"
+BROKER_OUTBOX_STATUS_SENT = "sent"
+SANCTIONS_GLOBAL_LOCK_NAME = "prmajesticbot:sanctions:global"
+CURRENT_SANCTION_POLICY_MONTH = date(2000, 1, 1)
+FIXED_SIZE_SANCTION_KINDS = {"check", "oral", "strict"}
+WARNING_SANCTION_KINDS = {"oral", "strict"}
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
@@ -302,15 +324,8 @@ class Database:
                             role ENUM('junior_employee', 'employee', 'senior_employee', 'manager', 'developer') NOT NULL DEFAULT 'employee',
                             added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             appointed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            auto_points_total FLOAT NOT NULL DEFAULT 0,
-                            manual_points_adjustment FLOAT NOT NULL DEFAULT 0,
-                            total_points FLOAT GENERATED ALWAYS AS (
-                                ROUND(COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0), 4)
-                            ) STORED,
-                            penalty_points FLOAT NOT NULL DEFAULT 0,
-                            penalty_percent FLOAT NOT NULL DEFAULT 0,
-                            warnings_units INT UNSIGNED NOT NULL DEFAULT 0,
-                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            dismissed_at DATETIME NULL
                         )
                         """
                     )
@@ -319,7 +334,7 @@ class Database:
                     # 4. Spec Sessions Table
                     # =========================================================
                     await cursor.execute(
-                        """
+                        f"""
                         CREATE TABLE IF NOT EXISTS spec_sessions (
                             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                             pr_id BIGINT UNSIGNED NOT NULL,
@@ -331,7 +346,7 @@ class Database:
                             
                             started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             ended_at DATETIME NULL,
-                            end_reason ENUM('manual_unclaim', 'stream_end', 'category_change', 'admin_closed', 'event_end', 'event_rejected', 'unknown') NULL,
+                            end_reason ENUM({SPEC_SESSION_END_REASON_VALUES_SQL}) NULL,
                             
                             # Priority snapshot & override
                             priority_auto TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -595,14 +610,270 @@ class Database:
                     )
 
                     # =========================================================
+                    # 13. Day-Based Manual Adjustments
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_day_point_adjustments (
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            work_date DATE NOT NULL,
+                            delta_points FLOAT NOT NULL DEFAULT 0,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            PRIMARY KEY (assistant_id, work_date),
+                            INDEX idx_day_point_adjustments_work_date (work_date)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_day_mchat (
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            work_date DATE NOT NULL,
+                            mchat_count INT UNSIGNED NOT NULL DEFAULT 0,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            PRIMARY KEY (assistant_id, work_date),
+                            INDEX idx_day_mchat_work_date (work_date)
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 14. Complaints
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS complaints (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            assistant_id BIGINT UNSIGNED NULL,
+                            status ENUM('pending', 'claimed', 'completed', 'cancelled') NOT NULL DEFAULT 'pending',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            claimed_at DATETIME NULL,
+                            completed_at DATETIME NULL,
+                            cancelled_at DATETIME NULL,
+                            INDEX idx_complaints_assistant_status (assistant_id, status),
+                            INDEX idx_complaints_completed (completed_at)
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 15. Monthly Sanction Policies
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS monthly_sanction_settings (
+                            month_start DATE PRIMARY KEY,
+                            check_cycle_size INT UNSIGNED NOT NULL DEFAULT 5,
+                            check_immunity_hours_per_day FLOAT NOT NULL DEFAULT 4,
+                            point_immunity_hours_per_day FLOAT NOT NULL DEFAULT 5,
+                            percent_immunity_hours_per_day FLOAT NOT NULL DEFAULT 6,
+                            check_relief_hours_per_day FLOAT NOT NULL DEFAULT 4,
+                            point_relief_hours_per_day FLOAT NOT NULL DEFAULT 5,
+                            percent_relief_hours_per_day FLOAT NOT NULL DEFAULT 6,
+                            check_relief_min_streak_days INT UNSIGNED NOT NULL DEFAULT 2,
+                            point_relief_min_streak_days INT UNSIGNED NOT NULL DEFAULT 2,
+                            percent_relief_min_streak_days INT UNSIGNED NOT NULL DEFAULT 2,
+                            percent_relief_step_amount FLOAT NOT NULL DEFAULT 3,
+                            daily_norm_spec FLOAT NOT NULL DEFAULT 4,
+                            daily_norm_complaints INT UNSIGNED NOT NULL DEFAULT 0,
+                            daily_norm_mchat INT UNSIGNED NOT NULL DEFAULT 0,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS monthly_check_rules (
+                            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            month_start DATE NOT NULL,
+                            range_start INT UNSIGNED NOT NULL,
+                            range_end INT UNSIGNED NULL,
+                            penalty_kind ENUM('point', 'percent', 'oral', 'strict') NOT NULL,
+                            penalty_amount FLOAT NOT NULL,
+                            INDEX idx_check_rules_month (month_start, range_start, range_end)
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 16. Sanction Operations
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS sanction_operations (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            operation_date DATE NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            created_by_id BIGINT UNSIGNED NULL,
+                            penalty_kind ENUM('check', 'point', 'percent', 'oral', 'strict') NOT NULL,
+                            penalty_amount FLOAT NOT NULL,
+                            auto_relief_date DATE NULL,
+                            recipient_mode ENUM('all_active', 'live_without_active_session', 'selected_only') NOT NULL,
+                            status ENUM('queued', 'processing', 'completed', 'cancelled', 'failed') NOT NULL DEFAULT 'queued',
+                            processing_mode ENUM('manual_now', 'nightly_auto') NULL,
+                            processed_by_id BIGINT UNSIGNED NULL,
+                            queued_at DATETIME NULL,
+                            processed_at DATETIME NULL,
+                            cancelled_at DATETIME NULL,
+                            failure_reason TEXT NULL,
+                            INDEX idx_sanction_operations_date_status (operation_date, status),
+                            INDEX idx_sanction_operations_creator (created_by_id, created_at),
+                            INDEX idx_sanction_operations_processed_by (processed_by_id, processed_at)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS sanction_operation_members (
+                            operation_id BIGINT UNSIGNED NOT NULL,
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            issue_status ENUM('pending', 'issued', 'skipped_immunity', 'failed') NOT NULL DEFAULT 'pending',
+                            issue_reason VARCHAR(255) NULL,
+                            issued_sanction_id BIGINT UNSIGNED NULL,
+                            PRIMARY KEY (operation_id, assistant_id),
+                            INDEX idx_operation_members_status (operation_id, issue_status),
+                            INDEX idx_operation_members_sanction (issued_sanction_id)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS sanction_operation_workoffs (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            operation_id BIGINT UNSIGNED NOT NULL,
+                            metric ENUM('spec', 'complaints', 'mchat') NOT NULL,
+                            multiplier FLOAT NOT NULL,
+                            period_start DATE NOT NULL,
+                            period_end DATE NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE KEY uq_operation_workoff_metric (operation_id, metric),
+                            INDEX idx_operation_workoffs_period (period_start, period_end)
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 17. Sanction Ledger
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_sanctions (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            kind ENUM('check', 'point', 'percent', 'oral', 'strict') NOT NULL,
+                            amount_total FLOAT NOT NULL,
+                            auto_relief_date DATE NULL,
+                            issued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            source_type ENUM('manual', 'queued_batch', 'check_cycle', 'legacy_migration') NOT NULL,
+                            operation_id BIGINT UNSIGNED NULL,
+                            basis_date DATE NULL,
+                            settings_month DATE NULL,
+                            check_rule_hit_no INT UNSIGNED NULL,
+                            replaced_by_sanction_id BIGINT UNSIGNED NULL,
+                            INDEX idx_assistant_sanctions_assistant_kind (assistant_id, kind, issued_at),
+                            INDEX idx_assistant_sanctions_basis_date (basis_date),
+                            INDEX idx_assistant_sanctions_settings_month (settings_month),
+                            INDEX idx_assistant_sanctions_operation (operation_id)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_sanction_workoffs (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            sanction_id BIGINT UNSIGNED NOT NULL,
+                            metric ENUM('spec', 'complaints', 'mchat') NOT NULL,
+                            multiplier FLOAT NOT NULL,
+                            period_start DATE NOT NULL,
+                            period_end DATE NOT NULL,
+                            target_amount FLOAT NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE KEY uq_assistant_sanction_workoff_metric (sanction_id, metric),
+                            INDEX idx_assistant_sanction_workoffs_period (period_start, period_end)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_sanction_reliefs (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            sanction_id BIGINT UNSIGNED NOT NULL,
+                            amount FLOAT NOT NULL,
+                            relieved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            basis_date DATE NULL,
+                            relief_type ENUM('default', 'custom_workoff', 'cycle_reset', 'month_reset', 'manual', 'replacement', 'auto_expire') NOT NULL,
+                            INDEX idx_assistant_sanction_reliefs_sanction (sanction_id, relieved_at),
+                            INDEX idx_assistant_sanction_reliefs_basis (basis_date, relief_type)
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 18. Integration Delivery Outbox
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS broker_outbox (
+                            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                            routing_key VARCHAR(255) NOT NULL,
+                            payload JSON NOT NULL,
+                            status ENUM('pending', 'processing', 'sent') NOT NULL DEFAULT 'pending',
+                            attempts INT UNSIGNED NOT NULL DEFAULT 0,
+                            available_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            processing_started_at DATETIME NULL,
+                            sent_at DATETIME NULL,
+                            last_error TEXT NULL,
+                            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_broker_outbox_delivery (status, available_at, id),
+                            INDEX idx_broker_outbox_created (created_at)
+                        )
+                        """
+                    )
+
+                    # =========================================================
                     # VIEWS (Requires multiple tables)
                     # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW active_assignments_v AS
+                        SELECT
+                            ss.id AS session_id,
+                            ss.pr_id,
+                            ss.target_type,
+                            ss.target_id,
+                            CASE
+                                WHEN ss.target_name IS NOT NULL THEN ss.target_name
+                                WHEN ss.target_type = 'streamer' THEN s.streamer_name
+                                WHEN ss.target_type = 'event' THEN e.name
+                                ELSE NULL
+                            END AS target_name,
+                            ss.is_probation,
+                            ss.started_at,
+                            e.event_kind,
+                            e.approval_status
+                        FROM spec_sessions ss
+                        LEFT JOIN streamers s
+                            ON ss.target_type = 'streamer'
+                            AND ss.target_id = s.streamer_id
+                        LEFT JOIN events e
+                            ON ss.target_type = 'event'
+                            AND ss.target_id = e.id
+                        WHERE ss.ended_at IS NULL
+                          AND ss.deleted_at IS NULL
+                        """
+                    )
+
                     # Day-Slicing View (Recursive CTE)
                     await cursor.execute(
                         """
                         CREATE OR REPLACE VIEW spec_session_day_slices AS
-                        WITH RECURSIVE day_slices AS (
-                            # Anchor: start of each completed, non-deleted session
+                        WITH RECURSIVE eligible_sessions AS (
                             SELECT
                                 ss.id AS session_id,
                                 ss.pr_id,
@@ -611,21 +882,50 @@ class Database:
                                 ss.is_probation,
                                 ss.applied_priority_level,
                                 ss.applied_hourly_rate,
-                                ss.started_at,
-                                ss.ended_at,
-                                # slice_start = started_at for the first day
-                                ss.started_at AS slice_start,
-                                # slice_end = midnight of the next day, or ended_at (whichever is earlier)
-                                LEAST(
-                                    DATE_ADD(DATE(ss.started_at), INTERVAL 1 DAY),
-                                    ss.ended_at
-                                ) AS slice_end
+                                CASE
+                                    WHEN ss.target_type = 'event'
+                                         AND e.event_kind = 'spec_request'
+                                         AND e.approval_status = 'approved'
+                                    THEN GREATEST(
+                                        ss.started_at,
+                                        COALESCE(e.approved_at, ss.started_at)
+                                    )
+                                    ELSE ss.started_at
+                                END AS effective_started_at,
+                                ss.ended_at
                             FROM spec_sessions ss
                             LEFT JOIN events e
-                              ON ss.target_type = 'event' AND e.id = ss.target_id
+                              ON ss.target_type = 'event'
+                             AND e.id = ss.target_id
                             WHERE ss.ended_at IS NOT NULL
                               AND ss.deleted_at IS NULL
-                              AND (ss.target_type <> 'event' OR e.approval_status = 'approved')
+                              AND (
+                                  ss.target_type <> 'event'
+                                  OR e.event_kind <> 'spec_request'
+                                  OR e.approval_status = 'approved'
+                              )
+                        ),
+                        day_slices AS (
+                            # Anchor: start of each completed, non-deleted session
+                            SELECT
+                                es.session_id,
+                                es.pr_id,
+                                es.target_type,
+                                es.target_id,
+                                es.is_probation,
+                                es.applied_priority_level,
+                                es.applied_hourly_rate,
+                                es.effective_started_at AS started_at,
+                                es.ended_at,
+                                # slice_start = effective_started_at for the first day
+                                es.effective_started_at AS slice_start,
+                                # slice_end = midnight of the next day, or ended_at (whichever is earlier)
+                                LEAST(
+                                    DATE_ADD(DATE(es.effective_started_at), INTERVAL 1 DAY),
+                                    es.ended_at
+                                ) AS slice_end
+                            FROM eligible_sessions es
+                            WHERE es.effective_started_at < es.ended_at
                             
                             UNION ALL
                             
@@ -684,17 +984,740 @@ class Database:
                         """
                     )
 
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW assistant_day_spec_totals AS
+                        SELECT
+                            pr_id AS assistant_id,
+                            work_date,
+                            SUM(seconds_in_day) AS spec_seconds_on_day,
+                            ROUND(SUM(seconds_in_day) / 3600.0, 4) AS spec_hours_on_day,
+                            ROUND(SUM(points_in_day), 4) AS spec_points_auto
+                        FROM spec_session_day_slices
+                        GROUP BY pr_id, work_date
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE OR REPLACE VIEW sanction_balances AS
+                        SELECT
+                            s.id AS sanction_id,
+                            s.assistant_id,
+                            s.kind,
+                            s.amount_total,
+                            s.auto_relief_date,
+                            s.issued_at,
+                            s.source_type,
+                            s.operation_id AS source_batch_id,
+                            s.basis_date,
+                            s.settings_month AS policy_month,
+                            s.check_rule_hit_no AS cycle_no,
+                            ROUND(COALESCE(SUM(sr.amount), 0), 4) AS relieved_amount,
+                            GREATEST(ROUND(s.amount_total - COALESCE(SUM(sr.amount), 0), 4), 0) AS active_amount
+                        FROM assistant_sanctions s
+                        LEFT JOIN assistant_sanction_reliefs sr ON sr.sanction_id = s.id
+                        GROUP BY
+                            s.id,
+                            s.assistant_id,
+                            s.kind,
+                            s.amount_total,
+                            s.auto_relief_date,
+                            s.issued_at,
+                            s.source_type,
+                            s.operation_id,
+                            s.basis_date,
+                            s.settings_month,
+                            s.check_rule_hit_no
+                        """
+                    )
+
                     await cursor.execute("SET sql_notes = 1")
                     await conn.commit()
 
                     await self._init_default_permissions(conn)
                     await self._init_default_service_principals(conn)
                     await self._ensure_singleton_settings(conn)
+                    await self._init_cutover_schema(conn)
 
                     self.logger.info("Database schema initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize database: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _month_start_for(value: date) -> date:
+        return value.replace(day=1)
+
+    @staticmethod
+    def _normalize_db_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.replace(tzinfo=None)
+        return value
+
+    @classmethod
+    def _approved_session_start(
+        cls,
+        started_at: Optional[datetime],
+        approved_at: Optional[datetime],
+    ) -> Optional[datetime]:
+        normalized_started = cls._normalize_db_datetime(started_at)
+        normalized_approved = cls._normalize_db_datetime(approved_at)
+        if normalized_started is None:
+            return None
+        if normalized_approved is None:
+            return normalized_started
+        return max(normalized_started, normalized_approved)
+
+    async def _acquire_named_lock(
+        self,
+        cursor,
+        *,
+        lock_name: str,
+        timeout_seconds: int = 30,
+    ) -> bool:
+        await cursor.execute(
+            "SELECT GET_LOCK(%s, %s) AS acquired",
+            (lock_name, int(timeout_seconds)),
+        )
+        row = await cursor.fetchone()
+        if isinstance(row, dict):
+            return bool(row.get("acquired"))
+        return bool(row[0]) if row else False
+
+    async def _release_named_lock(self, cursor, *, lock_name: str) -> None:
+        try:
+            await cursor.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+            await cursor.fetchone()
+        except Exception:
+            self.logger.debug("Failed to release named lock %s", lock_name, exc_info=True)
+
+    async def _enqueue_outbox_message_with_cursor(
+        self,
+        cursor,
+        *,
+        routing_key: str,
+        payload: Dict[str, Any],
+    ) -> int:
+        await cursor.execute(
+            """
+            INSERT INTO broker_outbox (routing_key, payload)
+            VALUES (%s, %s)
+            """,
+            (str(routing_key), json.dumps(payload, default=str)),
+        )
+        return int(cursor.lastrowid)
+
+    async def _enqueue_outbox_messages_with_cursor(
+        self,
+        cursor,
+        outbox_events: Optional[List[Dict[str, Any]]],
+    ) -> List[int]:
+        message_ids: List[int] = []
+        for event in outbox_events or []:
+            routing_key = str(event.get("routing_key") or "").strip()
+            payload = event.get("payload")
+            if not routing_key or not isinstance(payload, dict):
+                continue
+            message_id = await self._enqueue_outbox_message_with_cursor(
+                cursor,
+                routing_key=routing_key,
+                payload=payload,
+            )
+            message_ids.append(message_id)
+        return message_ids
+
+    @db_retry()
+    async def enqueue_outbox_message(self, routing_key: str, payload: Dict[str, Any]) -> int:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                message_id = await self._enqueue_outbox_message_with_cursor(
+                    cursor,
+                    routing_key=routing_key,
+                    payload=payload,
+                )
+                await conn.commit()
+                return message_id
+
+    @db_retry()
+    async def requeue_stuck_outbox_messages(self, *, max_age_seconds: int = 300) -> int:
+        cutoff = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None) - timedelta(
+            seconds=max(1, int(max_age_seconds))
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE broker_outbox
+                    SET status = 'pending',
+                        available_at = CURRENT_TIMESTAMP,
+                        processing_started_at = NULL
+                    WHERE status = 'processing'
+                      AND processing_started_at IS NOT NULL
+                      AND processing_started_at <= %s
+                    """,
+                    (cutoff,),
+                )
+                await conn.commit()
+                return int(cursor.rowcount or 0)
+
+    @db_retry()
+    async def list_pending_outbox_messages(self, limit: int = 100) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(
+                    """
+                    SELECT id, routing_key, payload, attempts, created_at
+                    FROM broker_outbox
+                    WHERE status = 'pending'
+                      AND available_at <= CURRENT_TIMESTAMP
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),),
+                )
+                rows = await cursor.fetchall() or []
+                for row in rows:
+                    payload = row.get("payload")
+                    if isinstance(payload, str):
+                        row["payload"] = json.loads(payload)
+                return rows
+
+    @db_retry()
+    async def claim_outbox_message(self, message_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE broker_outbox
+                    SET status = 'processing',
+                        attempts = attempts + 1,
+                        processing_started_at = CURRENT_TIMESTAMP,
+                        last_error = NULL
+                    WHERE id = %s
+                      AND status = 'pending'
+                      AND available_at <= CURRENT_TIMESTAMP
+                    """,
+                    (int(message_id),),
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+
+    @db_retry()
+    async def mark_outbox_message_sent(self, message_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE broker_outbox
+                    SET status = 'sent',
+                        sent_at = CURRENT_TIMESTAMP,
+                        processing_started_at = NULL,
+                        last_error = NULL
+                    WHERE id = %s
+                    """,
+                    (int(message_id),),
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+
+    @db_retry()
+    async def mark_outbox_message_failed(
+        self,
+        message_id: int,
+        *,
+        error: str,
+        retry_delay_seconds: int = 5,
+    ) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE broker_outbox
+                    SET status = 'pending',
+                        available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL %s SECOND),
+                        processing_started_at = NULL,
+                        last_error = %s
+                    WHERE id = %s
+                    """,
+                    (max(1, int(retry_delay_seconds)), str(error)[:65535], int(message_id)),
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+
+    async def _init_cutover_schema(self, conn) -> None:
+        """Idempotent additive migration path for the assistant_sanctions/workoff cutover."""
+        async with conn.cursor() as cursor:
+            try:
+                await cursor.execute(
+                    "ALTER TABLE settings MODIFY COLUMN monitoring_message_id BIGINT UNSIGNED"
+                )
+            except Exception:
+                pass
+
+            table_renames = [
+                ("monthly_sanction_settings", "monthly_sanction_settings"),
+                ("monthly_check_rules", "monthly_check_rules"),
+                ("sanction_operations", "sanction_operations"),
+                ("sanction_operation_members", "sanction_operation_members"),
+                ("sanction_operation_workoffs", "sanction_operation_workoffs"),
+                ("assistant_sanctions", "assistant_sanctions"),
+                ("assistant_sanction_workoffs", "assistant_sanction_workoffs"),
+                ("assistant_sanction_reliefs", "assistant_sanction_reliefs"),
+            ]
+            for old_name, new_name in table_renames:
+                if await self._table_exists(cursor, old_name) and not await self._table_exists(cursor, new_name):
+                    await cursor.execute(f"RENAME TABLE {old_name} TO {new_name}")
+
+            column_renames = [
+                ("monthly_check_rules", "cycle_from", "range_start", "INT UNSIGNED NOT NULL"),
+                ("monthly_check_rules", "cycle_to", "range_end", "INT UNSIGNED NULL"),
+                ("monthly_check_rules", "sanction_kind", "penalty_kind", "ENUM('point', 'percent', 'oral', 'strict') NOT NULL"),
+                ("monthly_check_rules", "sanction_amount", "penalty_amount", "FLOAT NOT NULL"),
+                ("sanction_operations", "basis_date", "operation_date", "DATE NOT NULL"),
+                ("sanction_operations", "sanction_kind", "penalty_kind", "ENUM('check', 'point', 'percent', 'oral', 'strict') NOT NULL"),
+                ("sanction_operations", "sanction_amount", "penalty_amount", "FLOAT NOT NULL"),
+                ("sanction_operations", "audience_mode", "recipient_mode", "ENUM('all_active', 'live_without_active_session', 'selected_only') NOT NULL"),
+                ("sanction_operation_members", "batch_id", "operation_id", "BIGINT UNSIGNED NOT NULL"),
+                ("sanction_operation_members", "execution_status", "issue_status", "ENUM('pending', 'issued', 'skipped_immunity', 'failed') NOT NULL DEFAULT 'pending'"),
+                ("sanction_operation_members", "execution_reason", "issue_reason", "VARCHAR(255) NULL"),
+                ("sanction_operation_workoffs", "batch_id", "operation_id", "BIGINT UNSIGNED NOT NULL"),
+                ("assistant_sanctions", "source_batch_id", "operation_id", "BIGINT UNSIGNED NULL"),
+                ("assistant_sanctions", "policy_month", "settings_month", "DATE NULL"),
+                ("assistant_sanctions", "cycle_no", "check_rule_hit_no", "INT UNSIGNED NULL"),
+            ]
+            for table_name, old_column, new_column, column_def in column_renames:
+                if await self._table_exists(cursor, table_name) and await self._column_exists(cursor, table_name, old_column) and not await self._column_exists(cursor, table_name, new_column):
+                    await cursor.execute(
+                        f"ALTER TABLE {table_name} CHANGE COLUMN {old_column} {new_column} {column_def}"
+                    )
+
+            if await self._table_exists(cursor, "monthly_check_rules") and await self._column_exists(cursor, "monthly_check_rules", "range_end"):
+                await cursor.execute(
+                    "ALTER TABLE monthly_check_rules MODIFY COLUMN range_end INT UNSIGNED NULL"
+                )
+                await cursor.execute(
+                    """
+                    UPDATE monthly_check_rules current_rule
+                    LEFT JOIN monthly_check_rules other_rule
+                      ON other_rule.month_start = current_rule.month_start
+                     AND other_rule.id <> current_rule.id
+                     AND (
+                         other_rule.range_start > current_rule.range_end
+                         OR other_rule.range_end IS NULL
+                     )
+                    SET current_rule.range_end = NULL
+                    WHERE current_rule.range_start = 8
+                      AND current_rule.range_end = 8
+                      AND current_rule.penalty_kind = 'strict'
+                      AND other_rule.id IS NULL
+                    """
+                )
+
+            if await self._table_exists(cursor, "sanction_operations"):
+                if not await self._column_exists(cursor, "sanction_operations", "auto_relief_date"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operations
+                        ADD COLUMN auto_relief_date DATE NULL
+                        AFTER penalty_amount
+                        """
+                    )
+                if not await self._column_exists(cursor, "sanction_operations", "processing_mode"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operations
+                        ADD COLUMN processing_mode ENUM('manual_now', 'nightly_auto') NULL
+                        AFTER status
+                        """
+                    )
+
+            if not await self._table_exists(cursor, "broker_outbox"):
+                await cursor.execute(
+                    """
+                    CREATE TABLE broker_outbox (
+                        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                        routing_key VARCHAR(255) NOT NULL,
+                        payload JSON NOT NULL,
+                        status ENUM('pending', 'processing', 'sent') NOT NULL DEFAULT 'pending',
+                        attempts INT UNSIGNED NOT NULL DEFAULT 0,
+                        available_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        processing_started_at DATETIME NULL,
+                        sent_at DATETIME NULL,
+                        last_error TEXT NULL,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_broker_outbox_delivery (status, available_at, id),
+                        INDEX idx_broker_outbox_created (created_at)
+                    )
+                    """
+                )
+
+            if await self._table_exists(cursor, "sanction_operations"):
+                if not await self._column_exists(cursor, "sanction_operations", "processed_by_id"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operations
+                        ADD COLUMN processed_by_id BIGINT UNSIGNED NULL
+                        AFTER processing_mode
+                        """
+                    )
+                if not await self._index_exists(cursor, "sanction_operations", "idx_sanction_operations_processed_by"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operations
+                        ADD INDEX idx_sanction_operations_processed_by (processed_by_id, processed_at)
+                        """
+                    )
+                if await self._column_exists(cursor, "sanction_operations", "audience_mode"):
+                    await cursor.execute(
+                        """
+                        UPDATE sanction_operations
+                        SET audience_mode = 'selected_only'
+                        WHERE audience_mode = 'all_except'
+                        """
+                    )
+                elif await self._column_exists(cursor, "sanction_operations", "recipient_mode"):
+                    try:
+                        await cursor.execute(
+                            """
+                            UPDATE sanction_operations
+                            SET recipient_mode = 'selected_only'
+                            WHERE recipient_mode = 'all_except'
+                            """
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await cursor.execute(
+                        """
+                        UPDATE sanction_operations
+                        SET status = 'queued',
+                            queued_at = COALESCE(queued_at, created_at, CURRENT_TIMESTAMP)
+                        WHERE status = 'draft'
+                        """
+                    )
+                except Exception:
+                    pass
+                try:
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operations
+                        MODIFY COLUMN status ENUM('queued', 'processing', 'completed', 'cancelled', 'failed') NOT NULL DEFAULT 'queued'
+                        """
+                    )
+                except Exception:
+                    pass
+
+            if not await self._column_exists(cursor, "assistants", "dismissed_at"):
+                await cursor.execute(
+                    "ALTER TABLE assistants ADD COLUMN dismissed_at DATETIME NULL AFTER updated_at"
+                )
+
+            if await self._table_exists(cursor, "assistant_sanctions"):
+                if not await self._column_exists(cursor, "assistant_sanctions", "auto_relief_date"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_sanctions
+                        ADD COLUMN auto_relief_date DATE NULL
+                        AFTER amount_total
+                        """
+                    )
+
+            if await self._table_exists(cursor, "assistant_sanction_reliefs"):
+                try:
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_sanction_reliefs
+                        MODIFY COLUMN relief_type ENUM(
+                            'default',
+                            'custom_workoff',
+                            'cycle_reset',
+                            'month_reset',
+                            'manual',
+                            'replacement',
+                            'auto_expire'
+                        ) NOT NULL
+                        """
+                    )
+                except Exception:
+                    pass
+
+            if await self._table_exists(cursor, "spec_sessions") and await self._column_exists(
+                cursor, "spec_sessions", "end_reason"
+            ):
+                await cursor.execute(
+                    f"""
+                    ALTER TABLE spec_sessions
+                    MODIFY COLUMN end_reason ENUM({SPEC_SESSION_END_REASON_VALUES_SQL}) NULL
+                    """
+                )
+
+            if not await self._column_exists(cursor, "admin_logs", "actor_id"):
+                await cursor.execute(
+                    "ALTER TABLE admin_logs ADD COLUMN actor_id BIGINT UNSIGNED NULL AFTER actor_role"
+                )
+            if not await self._column_exists(cursor, "admin_logs", "actor_type"):
+                await cursor.execute(
+                    "ALTER TABLE admin_logs ADD COLUMN actor_type VARCHAR(32) NULL AFTER actor_id"
+                )
+            if not await self._column_exists(cursor, "admin_logs", "trace_id"):
+                await cursor.execute(
+                    "ALTER TABLE admin_logs ADD COLUMN trace_id VARCHAR(64) NULL AFTER actor_type"
+                )
+            await self._seed_default_monthly_policies(cursor)
+            await self._backfill_legacy_balances(cursor)
+            await self._drop_legacy_assistant_balance_columns(cursor)
+            await conn.commit()
+
+    async def _seed_default_monthly_policies(self, cursor) -> None:
+        """Ensure previous/current/next month policy defaults exist."""
+        current_msk = datetime.now(timezone(timedelta(hours=3))).date()
+        month_starts = {
+            self._month_start_for(current_msk),
+            self._month_start_for((current_msk.replace(day=1) - timedelta(days=1))),
+            self._month_start_for((current_msk.replace(day=28) + timedelta(days=4)).replace(day=1)),
+        }
+        default_rules = [
+            (1, 2, "point", 1.0),
+            (3, 3, "point", 2.0),
+            (4, 5, "percent", 3.0),
+            (6, 6, "percent", 5.0),
+            (7, 7, "oral", 1.0),
+            (8, None, "strict", 1.0),
+        ]
+
+        for month_start in sorted(month_starts):
+            await cursor.execute(
+                """
+                INSERT INTO monthly_sanction_settings (
+                    month_start,
+                    check_cycle_size,
+                    check_immunity_hours_per_day,
+                    point_immunity_hours_per_day,
+                    percent_immunity_hours_per_day,
+                    check_relief_hours_per_day,
+                    point_relief_hours_per_day,
+                    percent_relief_hours_per_day,
+                    check_relief_min_streak_days,
+                    point_relief_min_streak_days,
+                    percent_relief_min_streak_days,
+                    percent_relief_step_amount,
+                    daily_norm_spec,
+                    daily_norm_complaints,
+                    daily_norm_mchat
+                )
+                VALUES (%s, 5, 4, 5, 6, 4, 5, 6, 2, 2, 2, 3, 4, 0, 0)
+                ON DUPLICATE KEY UPDATE month_start = month_start
+                """,
+                (month_start,),
+            )
+
+            await cursor.execute(
+                "SELECT COUNT(*) AS cnt FROM monthly_check_rules WHERE month_start = %s",
+                (month_start,),
+            )
+            row = await cursor.fetchone() or {}
+            if int(row.get("cnt", 0)) == 0:
+                for range_start, range_end, penalty_kind, penalty_amount in default_rules:
+                    await cursor.execute(
+                        """
+                        INSERT INTO monthly_check_rules (
+                            month_start, range_start, range_end, penalty_kind, penalty_amount
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (month_start, range_start, range_end, penalty_kind, penalty_amount),
+                    )
+
+    async def _backfill_legacy_balances(self, cursor) -> None:
+        """One-time cutover of legacy stored balances into the new ledger/day tables."""
+        if not await self._table_exists(cursor, "assistants"):
+            return
+
+        has_manual_adjustment = await self._column_exists(
+            cursor, "assistants", "manual_points_adjustment"
+        )
+        has_penalty_points = await self._column_exists(
+            cursor, "assistants", "penalty_points"
+        )
+        has_penalty_percent = await self._column_exists(
+            cursor, "assistants", "penalty_percent"
+        )
+        has_warnings_units = await self._column_exists(
+            cursor, "assistants", "warnings_units"
+        )
+
+        # Manual points -> opening day adjustments on appointed/added date.
+        if has_manual_adjustment:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_day_point_adjustments (assistant_id, work_date, delta_points)
+                SELECT
+                    a.pr_id,
+                    COALESCE(DATE(a.appointed_at), DATE(a.added_at), CURDATE()) AS work_date,
+                    ROUND(a.manual_points_adjustment, 4)
+                FROM assistants a
+                WHERE COALESCE(a.manual_points_adjustment, 0) <> 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM assistant_day_point_adjustments ad
+                      WHERE ad.assistant_id = a.pr_id
+                        AND ad.work_date = COALESCE(DATE(a.appointed_at), DATE(a.added_at), CURDATE())
+                  )
+                """
+            )
+            await cursor.execute(
+                """
+                UPDATE assistants
+                SET manual_points_adjustment = 0
+                WHERE COALESCE(manual_points_adjustment, 0) <> 0
+                """
+            )
+
+        # Stored assistant_sanctions -> opening ledger rows.
+        if has_penalty_points:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (assistant_id, kind, amount_total, issued_at, source_type, basis_date, settings_month)
+                SELECT
+                    a.pr_id,
+                    'point',
+                    ROUND(a.penalty_points, 4),
+                    CURRENT_TIMESTAMP,
+                    'legacy_migration',
+                    CURDATE(),
+                    DATE_SUB(CURDATE(), INTERVAL DAYOFMONTH(CURDATE()) - 1 DAY)
+                FROM assistants a
+                WHERE COALESCE(a.penalty_points, 0) > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM assistant_sanctions s
+                      WHERE s.assistant_id = a.pr_id
+                        AND s.kind = 'point'
+                        AND s.source_type = 'legacy_migration'
+                  )
+                """
+            )
+
+        if has_penalty_percent:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (assistant_id, kind, amount_total, issued_at, source_type, basis_date, settings_month)
+                SELECT
+                    a.pr_id,
+                    'percent',
+                    ROUND(a.penalty_percent, 4),
+                    CURRENT_TIMESTAMP,
+                    'legacy_migration',
+                    CURDATE(),
+                    DATE_SUB(CURDATE(), INTERVAL DAYOFMONTH(CURDATE()) - 1 DAY)
+                FROM assistants a
+                WHERE COALESCE(a.penalty_percent, 0) > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM assistant_sanctions s
+                      WHERE s.assistant_id = a.pr_id
+                        AND s.kind = 'percent'
+                        AND s.source_type = 'legacy_migration'
+                  )
+                """
+            )
+
+        if has_warnings_units:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (assistant_id, kind, amount_total, issued_at, source_type, basis_date, settings_month)
+                SELECT
+                    a.pr_id,
+                    'strict',
+                    FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                    CURRENT_TIMESTAMP,
+                    'legacy_migration',
+                    CURDATE(),
+                    DATE_SUB(CURDATE(), INTERVAL DAYOFMONTH(CURDATE()) - 1 DAY)
+                FROM assistants a
+                WHERE FLOOR(COALESCE(a.warnings_units, 0) / 2) > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM assistant_sanctions s
+                      WHERE s.assistant_id = a.pr_id
+                        AND s.kind = 'strict'
+                        AND s.source_type = 'legacy_migration'
+                  )
+                """
+            )
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (assistant_id, kind, amount_total, issued_at, source_type, basis_date, settings_month)
+                SELECT
+                    a.pr_id,
+                    'oral',
+                    MOD(COALESCE(a.warnings_units, 0), 2),
+                    CURRENT_TIMESTAMP,
+                    'legacy_migration',
+                    CURDATE(),
+                    DATE_SUB(CURDATE(), INTERVAL DAYOFMONTH(CURDATE()) - 1 DAY)
+                FROM assistants a
+                WHERE MOD(COALESCE(a.warnings_units, 0), 2) > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM assistant_sanctions s
+                      WHERE s.assistant_id = a.pr_id
+                        AND s.kind = 'oral'
+                        AND s.source_type = 'legacy_migration'
+                  )
+                """
+            )
+
+        if has_penalty_points or has_penalty_percent or has_warnings_units:
+            set_parts: list[str] = []
+            where_parts: list[str] = []
+            if has_penalty_points:
+                set_parts.append("penalty_points = 0")
+                where_parts.append("COALESCE(penalty_points, 0) <> 0")
+            if has_penalty_percent:
+                set_parts.append("penalty_percent = 0")
+                where_parts.append("COALESCE(penalty_percent, 0) <> 0")
+            if has_warnings_units:
+                set_parts.append("warnings_units = 0")
+                where_parts.append("COALESCE(warnings_units, 0) <> 0")
+            if set_parts and where_parts:
+                await cursor.execute(
+                    f"""
+                    UPDATE assistants
+                    SET {", ".join(set_parts)}
+                    WHERE {" OR ".join(where_parts)}
+                    """
+                )
+
+    async def _drop_legacy_assistant_balance_columns(self, cursor) -> None:
+        """Drop legacy mutable balance cache columns after cutover backfill."""
+        if not await self._table_exists(cursor, "assistants"):
+            return
+
+        legacy_columns = [
+            "total_points",
+            "auto_points_total",
+            "manual_points_adjustment",
+            "penalty_points",
+            "penalty_percent",
+            "warnings_units",
+        ]
+        for column_name in legacy_columns:
+            if not await self._column_exists(cursor, "assistants", column_name):
+                continue
+            try:
+                await cursor.execute(f"ALTER TABLE assistants DROP COLUMN {column_name}")
+                self.logger.info("Dropped legacy assistants.%s column", column_name)
+            except Exception as exc:
+                # Keep startup idempotent for mixed MariaDB/MySQL deployments.
+                self.logger.warning(
+                    "Could not drop legacy assistants.%s column: %s",
+                    column_name,
+                    exc,
+                )
 
     async def _migrate_web_auth_pk_to_discord_id(self, cursor) -> None:
         """
@@ -1462,9 +2485,12 @@ class Database:
         actor_name: str,
         action: str,
         actor_role: Optional[str] = None,
+        actor_id: Optional[int] = None,
+        actor_type: Optional[str] = None,
         target_type: Optional[str] = None,
         target_id: Optional[str] = None,
         details: Optional[dict] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         """Write compact universal admin log event."""
         event_details = details or {}
@@ -1474,18 +2500,32 @@ class Database:
         if "summary" not in event_details:
             event_details["summary"] = action
 
+        meta = event_details.get("meta") or {}
+        if actor_id is None:
+            try:
+                actor_id = int(meta.get("actor_id")) if meta.get("actor_id") is not None else None
+            except (TypeError, ValueError):
+                actor_id = None
+        if actor_type is None:
+            actor_type = str(meta.get("actor_type") or "user")
+        if trace_id is None:
+            trace_id = meta.get("trace_id")
+
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
                         INSERT INTO admin_logs
-                            (actor_name, actor_role, action, target_type, target_id, details)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                            (actor_name, actor_role, actor_id, actor_type, trace_id, action, target_type, target_id, details)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             actor_name,
                             actor_role,
+                            actor_id,
+                            actor_type,
+                            trace_id,
                             action,
                             target_type,
                             target_id,
@@ -1764,6 +2804,7 @@ class Database:
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
         profile_image_url: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """
 
@@ -1849,6 +2890,7 @@ class Database:
                             profile_image_url,
                         ),
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
             self.logger.debug(f"✓ Streamer {streamer_name} saved")
         except Exception as e:
@@ -1875,7 +2917,9 @@ class Database:
                             stream_title, stream_thumbnail_url,
                             profile_image_url,
                             stream_game_id as game_id, stream_game_name as game_name, stream_started_at as started_at,
-                            priority, pr_slots, priority_override, pr_slots_override,
+                            priority, pr_slots,
+                            priority_override AS current_stream_priority_override,
+                            pr_slots_override AS current_stream_pr_slots_override,
                             added_at, added_by_id, updated_at
                         FROM streamers
                         WHERE streamer_id = %s
@@ -1892,14 +2936,13 @@ class Database:
                     await cursor.execute(
                         """
                         SELECT 
-                            ss.pr_id, 
+                            act.pr_id,
                             a.nickname,
-                            ss.is_probation,
-                            ss.started_at as assigned_at
-                        FROM spec_sessions ss
-                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
-                        WHERE ss.target_type = 'streamer' AND ss.target_id = %s
-                            AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                            act.is_probation,
+                            act.started_at as assigned_at
+                        FROM active_assignments_v act
+                        LEFT JOIN assistants a ON a.pr_id = act.pr_id
+                        WHERE act.target_type = 'streamer' AND act.target_id = %s
                         """,
                         (streamer_id,),
                     )
@@ -1938,6 +2981,8 @@ class Database:
         stream_title: Optional[str] = None,
         stream_thumbnail_url: Optional[str] = None,
         profile_image_url: Optional[str] = None,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[dict, dict]:
         """
         Атомарное обновление статуса стримера с блокировкой строки.
@@ -2012,6 +3057,64 @@ class Database:
 
                     query = f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s"
                     await cursor.execute(query, tuple(params))
+
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        if is_online and not bool(old_state.get("is_online")):
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "stream.state.online",
+                                    "payload": {
+                                        "event": "online",
+                                        "streamer_id": streamer_id,
+                                        "streamer_name": old_state.get("streamer_name"),
+                                        "is_online": True,
+                                        "game_id": game_id,
+                                        "game_name": game_name,
+                                        "stream_title": stream_title,
+                                        "thumbnail_url": stream_thumbnail_url,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        elif not is_online and bool(old_state.get("is_online")):
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "stream.state.offline",
+                                    "payload": {
+                                        "event": "offline",
+                                        "streamer_id": streamer_id,
+                                        "streamer_name": old_state.get("streamer_name"),
+                                        "is_online": False,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        elif (
+                            is_online
+                            and bool(old_state.get("is_online"))
+                            and old_state.get("game_id") != (str(game_id) if game_id else None)
+                        ):
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "stream.state.category",
+                                    "payload": {
+                                        "event": "category_change",
+                                        "streamer_id": streamer_id,
+                                        "streamer_name": old_state.get("streamer_name"),
+                                        "old_game_id": old_state.get("game_id"),
+                                        "new_game_id": str(game_id) if game_id else None,
+                                        "new_game_name": game_name,
+                                        "stream_title": stream_title,
+                                        "thumbnail_url": stream_thumbnail_url,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
 
                     new_state = {
@@ -2123,6 +3226,7 @@ class Database:
         allow_juniors: Optional[bool] = None,
         priority_override: Optional[int] = None,
         pr_slots_override: Optional[int] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Обновление настроек стримера."""
         try:
@@ -2164,6 +3268,7 @@ class Database:
                         f"UPDATE streamers SET {', '.join(set_parts)} WHERE streamer_id = %s",
                         tuple(params),
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
                     return cursor.rowcount > 0
         except Exception as e:
@@ -2375,6 +3480,8 @@ class Database:
         priority: Optional[int] = None,
         is_pinned: Optional[bool] = None,
         points: Optional[float] = None,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Update event settings."""
         try:
@@ -2418,6 +3525,28 @@ class Database:
                         f"UPDATE events SET {', '.join(set_parts)} WHERE id = %s",
                         tuple(params),
                     )
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        await cursor.execute(
+                            "SELECT name FROM events WHERE id = %s",
+                            (event_id,),
+                        )
+                        event_row = await cursor.fetchone() or {}
+                        staged_outbox_events.append(
+                            {
+                                "routing_key": "event.updated",
+                                "payload": {
+                                    "event": "event.updated",
+                                    "event_id": event_id,
+                                    "event_name": event_row.get("name", "Unknown"),
+                                    "trace_id": outbox_trace_id,
+                                },
+                            }
+                        )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
                     return cursor.rowcount > 0
         except Exception as e:
@@ -2425,7 +3554,11 @@ class Database:
             return False
 
     @db_retry()
-    async def remove_streamer(self, streamer_id: int) -> bool:
+    async def remove_streamer(
+        self,
+        streamer_id: int,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
         """
 
         Удаление стримера из базы данных.
@@ -2441,6 +3574,7 @@ class Database:
                         "DELETE FROM streamers WHERE streamer_id = %s",
                         (streamer_id,),
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
             self.logger.debug(f"✓ Streamer {streamer_id} deleted")
         except Exception as e:
@@ -2494,7 +3628,9 @@ class Database:
                                 s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
                                 s.is_pinned, s.allow_juniors, s.profile_image_url,
                                 s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                                s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                                s.priority, s.pr_slots,
+                                s.priority_override AS current_stream_priority_override,
+                                s.pr_slots_override AS current_stream_pr_slots_override,
                                 s.added_at, s.added_by_id, s.updated_at
                             FROM streamers s
                             ORDER BY s.priority DESC, s.streamer_name ASC
@@ -2508,27 +3644,28 @@ class Database:
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
                             s.is_pinned, s.allow_juniors, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                            s.priority, s.pr_slots,
+                            s.priority_override AS current_stream_priority_override,
+                            s.pr_slots_override AS current_stream_pr_slots_override,
                             s.added_at, s.added_by_id, s.updated_at,
-                            MIN(ss.pr_id) as assigned_pr_id,
+                            MIN(act.pr_id) as assigned_pr_id,
                             COALESCE(
                                 JSON_ARRAYAGG(
                                     CASE WHEN a.pr_id IS NOT NULL THEN
                                         JSON_OBJECT(
                                             'pr_id', CAST(a.pr_id AS CHAR),
                                             'nickname', a.nickname,
-                                            'is_probation', COALESCE(ss.is_probation, FALSE),
-                                            'assigned_at', ss.started_at
+                                            'is_probation', COALESCE(act.is_probation, FALSE),
+                                            'assigned_at', act.started_at
                                         )
                                     ELSE NULL END
                                 ),
                                 JSON_ARRAY()
                             ) as assignments
                         FROM streamers s
-                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer'
-                             AND ss.target_id = s.streamer_id
-                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                        LEFT JOIN active_assignments_v act ON act.target_type = 'streamer'
+                             AND act.target_id = s.streamer_id
+                        LEFT JOIN assistants a ON a.pr_id = act.pr_id
                         GROUP BY s.streamer_id
                         ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
                         """
@@ -2562,27 +3699,28 @@ class Database:
                             s.streamer_id, s.streamer_name, s.is_online, s.stream_title, s.stream_thumbnail_url,
                             s.is_pinned, s.allow_juniors, s.profile_image_url,
                             s.stream_game_id as game_id, s.stream_game_name as game_name, s.stream_started_at as started_at,
-                            s.priority, s.pr_slots, s.priority_override, s.pr_slots_override,
+                            s.priority, s.pr_slots,
+                            s.priority_override AS current_stream_priority_override,
+                            s.pr_slots_override AS current_stream_pr_slots_override,
                             s.added_at, s.added_by_id, s.updated_at,
-                            MIN(ss.pr_id) as assigned_pr_id,
+                            MIN(act.pr_id) as assigned_pr_id,
                             COALESCE(
                                 JSON_ARRAYAGG(
                                     CASE WHEN a.pr_id IS NOT NULL THEN
                                         JSON_OBJECT(
                                             'pr_id', CAST(a.pr_id AS CHAR),
                                             'nickname', a.nickname,
-                                            'is_probation', COALESCE(ss.is_probation, FALSE),
-                                            'assigned_at', ss.started_at
+                                            'is_probation', COALESCE(act.is_probation, FALSE),
+                                            'assigned_at', act.started_at
                                         )
                                     ELSE NULL END
                                 ),
                                 JSON_ARRAY()
                             ) as assignments
                         FROM streamers s
-                        LEFT JOIN spec_sessions ss ON ss.target_type = 'streamer' 
-                             AND ss.target_id = s.streamer_id 
-                             AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        LEFT JOIN assistants a ON a.pr_id = ss.pr_id
+                        LEFT JOIN active_assignments_v act ON act.target_type = 'streamer' 
+                             AND act.target_id = s.streamer_id 
+                        LEFT JOIN assistants a ON a.pr_id = act.pr_id
                         WHERE s.is_online = TRUE
                         GROUP BY s.streamer_id
                         ORDER BY s.is_pinned DESC, s.priority DESC, s.streamer_name ASC
@@ -2614,6 +3752,7 @@ class Database:
         pr_actions_channel_id: Optional[int] = None,
         control_panel_channel_id: Optional[int] = None,
         control_panel_message_id: Optional[int] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Create or update guild settings.
 
@@ -2732,6 +3871,7 @@ class Database:
                             final_control_panel_message,
                         ),
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
                     self.logger.debug("✓ Guild settings saved successfully")
 
@@ -2829,20 +3969,59 @@ class Database:
         # If it has a timezone (e.g. UTC from Twitch), convert to MSK then strip tzinfo
         return value.astimezone(MSK).replace(tzinfo=None)
 
+    @staticmethod
+    def _current_msk_date() -> date:
+        return datetime.now(timezone(timedelta(hours=3))).date()
+
+    @classmethod
+    def _iter_interval_dates(
+        cls,
+        started_at: Optional[datetime],
+        ended_at: Optional[datetime],
+    ) -> Set[date]:
+        start = cls._normalize_msk_datetime(started_at)
+        end = cls._normalize_msk_datetime(ended_at)
+        if start is None:
+            return set()
+        effective_end = end or datetime.combine(cls._current_msk_date() + timedelta(days=1), datetime.min.time())
+        if effective_end <= start:
+            return set()
+
+        dates: Set[date] = set()
+        cursor = start
+        while cursor < effective_end:
+            dates.add(cursor.date())
+            cursor = datetime.combine(cursor.date() + timedelta(days=1), datetime.min.time())
+        return dates
+
     def _compute_session_points(self, session_row: Dict[str, Any]) -> float:
         """Compute deterministic points contribution for a single session row."""
         if not session_row:
             return 0.0
-        if session_row.get("ended_at") is None:
+        ended_at = self._normalize_db_datetime(session_row.get("ended_at"))
+        if ended_at is None:
             return 0.0
         if session_row.get("deleted_at") is not None:
             return 0.0
-            
-        # Spec requests only yield points if they are approved
-        if session_row.get("event_kind") == "spec_request" and session_row.get("approval_status") != "approved":
-            return 0.0
-            
+
         duration_seconds = float(session_row.get("duration_seconds") or 0.0)
+
+        # User-requested pending time must never count retroactively.
+        if session_row.get("event_kind") == "spec_request":
+            if session_row.get("approval_status") != "approved":
+                return 0.0
+
+            effective_start = self._approved_session_start(
+                session_row.get("started_at"),
+                session_row.get("approved_at"),
+            )
+            if effective_start is None or effective_start >= ended_at:
+                return 0.0
+            duration_seconds = max(
+                int((ended_at - effective_start).total_seconds()),
+                0,
+            )
+
         applied_rate = float(session_row.get("applied_hourly_rate") or 0.0)
         return self._round_points((duration_seconds / 3600.0) * applied_rate)
 
@@ -2858,9 +4037,9 @@ class Database:
             await cursor.execute(
                 f"""
                 SELECT ss.id, ss.pr_id, ss.ended_at, ss.deleted_at, ss.duration_seconds,
-                       ss.applied_hourly_rate, ss.credited_points,
+                       ss.started_at, ss.applied_hourly_rate, ss.credited_points,
                        ss.target_type, ss.target_id,
-                       e.event_kind, e.approval_status
+                       e.event_kind, e.approval_status, e.approved_at
                 FROM spec_sessions ss
                 LEFT JOIN events e ON ss.target_type = 'event' AND ss.target_id = e.id
                 WHERE ss.id = %s
@@ -2885,24 +4064,6 @@ class Database:
                     (new_points, session_id),
                 )
 
-            if delta != 0.0:
-                await cursor.execute(
-                    """
-                    INSERT INTO assistants (pr_id)
-                    VALUES (%s)
-                    ON DUPLICATE KEY UPDATE pr_id = pr_id
-                    """,
-                    (row["pr_id"],),
-                )
-                await cursor.execute(
-                    """
-                    UPDATE assistants
-                    SET auto_points_total = ROUND(COALESCE(auto_points_total, 0) + %s, 4)
-                    WHERE pr_id = %s
-                    """,
-                    (delta, row["pr_id"]),
-                )
-
             return delta
 
     async def _recalc_points_for_sessions(
@@ -2913,7 +4074,11 @@ class Database:
 
     @db_retry()
     async def assign_pr_to_streamer(
-        self, streamer_id: int, pr_id: int, is_probation: bool = False
+        self,
+        streamer_id: int,
+        pr_id: int,
+        is_probation: bool = False,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """
         Назначение PR-ассистента стримеру с поддержкой Probation (Slot Logic).
@@ -3056,6 +4221,7 @@ class Database:
                             )
                         raise
 
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
                     slot_name = "Probation" if is_probation else "Main"
                     self.logger.debug(
@@ -3075,6 +4241,8 @@ class Database:
         streamer_id: int,
         pr_id: Optional[int] = None,
         end_reason: str = "manual_unclaim",
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Снятие PR-ассистента(ов) со стримера.
@@ -3089,13 +4257,10 @@ class Database:
         """
         try:
             # Fail-safe: ensure end_reason is valid for ENUM
-            allowed_reasons = {
-                "manual_unclaim", "stream_end", "category_change", 
-                "admin_closed", "event_end", "event_rejected", "unknown"
-            }
+            allowed_reasons = set(SPEC_SESSION_END_REASONS)
             if end_reason not in allowed_reasons:
                 self.logger.warning(f"Invalid end_reason '{end_reason}' passed to unassign_pr_from_streamer. Fallback to 'unknown'.")
-                end_reason = "unknown"
+                end_reason = SPEC_SESSION_END_REASON_UNKNOWN
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
@@ -3176,6 +4341,27 @@ class Database:
                             session["duration_seconds"] = duration_map.get(int(sid), 0)
                             session.pop("_session_id", None)
 
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        for session in unassigned_sessions:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "spec.unclaimed",
+                                    "payload": {
+                                        "event": "spec.unclaimed",
+                                        "streamer_id": streamer_id,
+                                        "streamer_name": session.get("streamer_name", "Unknown"),
+                                        "pr_id": session.get("pr_id"),
+                                        "duration_seconds": session.get("duration_seconds", 0),
+                                        "reason": end_reason,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
 
             return unassigned_sessions
@@ -3387,14 +4573,12 @@ class Database:
                         """
                         SELECT s.streamer_id, s.streamer_name
                         FROM streamers s
-                        LEFT JOIN spec_sessions ss
-                          ON ss.target_type = 'streamer'
-                         AND ss.target_id = s.streamer_id
-                         AND ss.ended_at IS NULL
-                         AND ss.deleted_at IS NULL
+                        LEFT JOIN active_assignments_v act
+                          ON act.target_type = 'streamer'
+                         AND act.target_id = s.streamer_id
                         WHERE s.is_online = TRUE
                           AND s.stream_game_id = %s
-                          AND ss.id IS NULL
+                          AND act.session_id IS NULL
                         ORDER BY streamer_name ASC
                         """,
                         (Config.gta5_game_id,),
@@ -3427,6 +4611,8 @@ class Database:
         priority: int = 0,
         is_pinned: bool = False,
         points: Optional[float] = None,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """Создание нового события."""
         try:
@@ -3464,8 +4650,26 @@ class Database:
                             points,
                         ),
                     )
+                    event_id = int(cursor.lastrowid)
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        staged_outbox_events.append(
+                            {
+                                "routing_key": "event.added",
+                                "payload": {
+                                    "event": "event.added",
+                                    "event_id": event_id,
+                                    "event_name": name,
+                                    "trace_id": outbox_trace_id,
+                                },
+                            }
+                        )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
-                    return cursor.lastrowid
+                    return event_id
         except Exception as e:
             self.logger.error(f"Failed to create event: {e}", exc_info=True)
             return None
@@ -3489,11 +4693,10 @@ class Database:
                     for event in events:
                         await cursor.execute(
                             """
-                            SELECT ss.pr_id, a.nickname
-                            FROM spec_sessions ss
-                            LEFT JOIN assistants a ON a.pr_id = ss.pr_id
-                            WHERE ss.target_type = 'event' AND ss.target_id = %s
-                              AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                            SELECT act.pr_id, a.nickname
+                            FROM active_assignments_v act
+                            LEFT JOIN assistants a ON a.pr_id = act.pr_id
+                            WHERE act.target_type = 'event' AND act.target_id = %s
                             """,
                             (event["id"],),
                         )
@@ -3530,11 +4733,10 @@ class Database:
                         # Active participants (spec started)
                         await cursor.execute(
                             """
-                            SELECT ss.pr_id, a.nickname, 'active' as status
-                            FROM spec_sessions ss
-                            LEFT JOIN assistants a ON a.pr_id = ss.pr_id
-                            WHERE ss.target_type = 'event' AND ss.target_id = %s
-                              AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
+                            SELECT act.pr_id, a.nickname, 'active' as status
+                            FROM active_assignments_v act
+                            LEFT JOIN assistants a ON a.pr_id = act.pr_id
+                            WHERE act.target_type = 'event' AND act.target_id = %s
                             """,
                             (event["id"],),
                         )
@@ -3571,16 +4773,65 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
-                        "SELECT id, name, description, created_at, start_time, is_active, created_by, notification_sent, required_pr_count, priority, pr_slots, is_pinned, points FROM events WHERE id = %s",
+                        """
+                        SELECT
+                            id, name, description, created_at, start_time, is_active, created_by,
+                            notification_sent, required_pr_count, priority, pr_slots, is_pinned,
+                            points, event_kind, approval_status, requested_by,
+                            approved_by, approved_at, rejected_by, rejected_at
+                        FROM events
+                        WHERE id = %s
+                        """,
                         (event_id,),
                     )
-                    return await cursor.fetchone()
+                    event = await cursor.fetchone()
+                    if not event:
+                        return None
+
+                    await cursor.execute(
+                        """
+                        SELECT act.pr_id, a.nickname, 'active' AS status
+                        FROM active_assignments_v act
+                        LEFT JOIN assistants a ON a.pr_id = act.pr_id
+                        WHERE act.target_type = 'event' AND act.target_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    active_participants = await cursor.fetchall() or []
+
+                    await cursor.execute(
+                        """
+                        SELECT ep.pr_id, a.nickname, 'reserved' AS status
+                        FROM event_participants ep
+                        LEFT JOIN assistants a ON a.pr_id = ep.pr_id
+                        WHERE ep.event_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    reserved_participants = await cursor.fetchall() or []
+
+                    participants = list(active_participants) + list(reserved_participants)
+                    event["current_participants"] = len(participants)
+                    event["participants"] = [
+                        {
+                            "pr_id": str(p["pr_id"]),
+                            "nickname": p.get("nickname"),
+                            "status": p.get("status", "active"),
+                        }
+                        for p in participants
+                    ]
+                    return event
         except Exception as e:
             self.logger.error(f"Failed to get event {event_id}: {e}", exc_info=True)
             return None
 
     @db_retry()
-    async def end_event(self, event_id: int) -> list:
+    async def end_event(
+        self,
+        event_id: int,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> list:
         """Завершение события и возврат списка участников с длительностью участия."""
         try:
             now = datetime.now(timezone(timedelta(hours=3)))
@@ -3601,7 +4852,8 @@ class Database:
                     self.logger.debug(f"Found {len(participants)} active participants for event {event_id}.")
 
                     await cursor.execute(
-                        "SELECT start_time FROM events WHERE id = %s", (event_id,)
+                        "SELECT start_time, name FROM events WHERE id = %s",
+                        (event_id,),
                     )
                     event_data = await cursor.fetchone()
                     if not event_data:
@@ -3613,6 +4865,7 @@ class Database:
                         if event_data["start_time"]
                         else now
                     )
+                    event_name = event_data.get("name") or "Unknown"
 
                     await cursor.execute(
                         """
@@ -3658,8 +4911,40 @@ class Database:
                         if duration < 0:
                             duration = 0
 
-                        results.append({"user_id": user_id, "duration": duration})
+                        results.append({"pr_id": user_id, "duration": duration})
 
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        for participant in results:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.left",
+                                    "payload": {
+                                        "event": "event.left",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "pr_id": participant.get("pr_id"),
+                                        "duration_seconds": participant.get("duration", 0),
+                                        "ended_at": None,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        staged_outbox_events.append(
+                            {
+                                "routing_key": "event.ended",
+                                "payload": {
+                                    "event": "event.ended",
+                                    "event_id": event_id,
+                                    "event_name": event_name,
+                                    "trace_id": outbox_trace_id,
+                                },
+                            }
+                        )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                 await conn.commit()
                 self.logger.debug(
                     f"Event {event_id} ended. Processed {len(results)} participant sessions. "
@@ -3765,6 +5050,12 @@ class Database:
             else:
                 rate_auto = config.get(safe_priority, 0.5)
 
+            affected_dates = sorted(
+                day
+                for day in self._iter_interval_dates(start_time, end_time)
+                if day < self._current_msk_date()
+            )
+
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     # Ensure assistant exists
@@ -3778,7 +5069,7 @@ class Database:
                         INSERT INTO spec_sessions 
                         (pr_id, target_type, target_id, target_name, started_at, ended_at, end_reason, 
                          is_probation, priority_auto, rate_auto)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'manual_admin', %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             pr_id,
@@ -3787,6 +5078,7 @@ class Database:
                             target_name,
                             start_time,
                             end_time,
+                            SPEC_SESSION_END_REASON_ADMIN_CLOSED,
                             is_probation,
                             safe_priority,
                             rate_auto,
@@ -3805,6 +5097,21 @@ class Database:
                 end_time.isoformat(),
                 is_probation,
             )
+            if affected_dates:
+                try:
+                    await self.recalculate_assistant_sanction_derivations(
+                        assistant_id=pr_id,
+                        start_date=affected_dates[0],
+                        end_date=affected_dates[-1],
+                    )
+                except Exception as recalc_exc:
+                    self.logger.error(
+                        "Failed to auto-recalculate assistant_sanctions after manual spec session create: pr_id=%s, dates=%s, error=%s",
+                        pr_id,
+                        affected_dates,
+                        recalc_exc,
+                        exc_info=True,
+                    )
             return True
 
         except Exception as e:
@@ -3888,7 +5195,13 @@ class Database:
             return 1.2
 
     @db_retry()
-    async def join_event(self, event_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    async def join_event(
+        self,
+        event_id: int,
+        user_id: int,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Добавление пользователя в событие с проверкой лимита слотов."""
         try:
             async with self.pool.acquire() as conn:
@@ -3985,6 +5298,24 @@ class Database:
                                 """,
                                 (user_id, event_id, event_name, event_priority, rate_auto),
                             )
+                            staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                            if outbox_trace_id:
+                                staged_outbox_events.append(
+                                    {
+                                        "routing_key": "event.joined",
+                                        "payload": {
+                                            "event": "event.joined",
+                                            "event_id": event_id,
+                                            "event_name": event_name,
+                                            "pr_id": user_id,
+                                            "trace_id": outbox_trace_id,
+                                        },
+                                    }
+                                )
+                            await self._enqueue_outbox_messages_with_cursor(
+                                cursor,
+                                staged_outbox_events,
+                            )
                             await conn.commit()
                             self.logger.debug(
                                 f"User {user_id} joined active event {event_id} ('{event_name}'). "
@@ -4002,6 +5333,23 @@ class Database:
                             "INSERT INTO event_participants (event_id, pr_id) VALUES (%s, %s)",
                             (event_id, user_id)
                         )
+                        staged_outbox_events = list(outbox_events or [])
+                        if outbox_trace_id:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.updated",
+                                    "payload": {
+                                        "event": "event.updated",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        await self._enqueue_outbox_messages_with_cursor(
+                            cursor,
+                            staged_outbox_events,
+                        )
                         await conn.commit()
                         self.logger.debug(f"User {user_id} reserved slot for future event {event_id} ('{event_name}').")
                         return {"status": "reserved", "detail": "Reserved slot for future event"}
@@ -4011,17 +5359,21 @@ class Database:
             return {"status": "error", "detail": "Internal database error"}
 
     @db_retry()
-    async def leave_event(self, event_id: int, user_id: int, end_reason: str = "manual_unclaim") -> int:
+    async def leave_event(
+        self,
+        event_id: int,
+        user_id: int,
+        end_reason: str = "manual_unclaim",
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
         """Удаление пользователя из события и возврат длительности."""
         try:
             # Fail-safe: ensure end_reason is valid for ENUM
-            allowed_reasons = {
-                "manual_unclaim", "stream_end", "category_change", 
-                "admin_closed", "event_end", "event_rejected", "unknown"
-            }
+            allowed_reasons = set(SPEC_SESSION_END_REASONS)
             if end_reason not in allowed_reasons:
                 self.logger.warning(f"Invalid end_reason '{end_reason}' passed to leave_event. Fallback to 'unknown'.")
-                end_reason = "unknown"
+                end_reason = SPEC_SESSION_END_REASON_UNKNOWN
 
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
@@ -4029,10 +5381,34 @@ class Database:
 
                     # 0. Check if user is in reserved state
                     await cursor.execute(
+                        "SELECT name FROM events WHERE id = %s",
+                        (event_id,),
+                    )
+                    event_row = await cursor.fetchone() or {}
+                    event_name = event_row.get("name", "Unknown")
+
+                    await cursor.execute(
                         "DELETE FROM event_participants WHERE event_id = %s AND pr_id = %s",
                         (event_id, user_id)
                     )
                     if cursor.rowcount > 0:
+                        staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                        if outbox_trace_id:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.updated",
+                                    "payload": {
+                                        "event": "event.updated",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        await self._enqueue_outbox_messages_with_cursor(
+                            cursor,
+                            staged_outbox_events,
+                        )
                         await conn.commit()
                         self.logger.debug(f"User {user_id} was in reserved state for event {event_id} and removed.")
                         return 0
@@ -4108,6 +5484,39 @@ class Database:
                             )
                             self.logger.debug(f"Spec request event {event_id} auto-marked as inactive due to 0 participants.")
 
+                    staged_outbox_events = list(outbox_events or [])
+                    if outbox_trace_id:
+                        if duration_row and int(duration_row.get("duration_seconds") or 0) > 0:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.left",
+                                    "payload": {
+                                        "event": "event.left",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "pr_id": user_id,
+                                        "duration_seconds": int(duration_row.get("duration_seconds") or 0),
+                                        "ended_at": None,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        else:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.updated",
+                                    "payload": {
+                                        "event": "event.updated",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
                     duration = (
                         int(duration_row["duration_seconds"]) if duration_row else 0
@@ -4128,6 +5537,8 @@ class Database:
         description: str,
         requested_by: int,
         priority: int = 0,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[int]:
         """Create a spec_request event and auto-join the creator."""
         try:
@@ -4178,6 +5589,24 @@ class Database:
                         (requested_by, event_id, name, priority, rate_auto),
                     )
 
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        staged_outbox_events.append(
+                            {
+                                "routing_key": "event.joined",
+                                "payload": {
+                                    "event": "event.joined",
+                                    "event_id": event_id,
+                                    "event_name": name,
+                                    "pr_id": requested_by,
+                                    "trace_id": outbox_trace_id,
+                                },
+                            }
+                        )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
                     return event_id
         except ValueError:
@@ -4202,7 +5631,7 @@ class Database:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute(
                         """
-                        SELECT id, approval_status, event_kind FROM events
+                        SELECT id, name, approval_status, event_kind FROM events
                         WHERE id = %s FOR UPDATE
                         """,
                         (event_id,),
@@ -4299,6 +5728,8 @@ class Database:
         self,
         event_id: int,
         approved_by: int,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Approve a pending spec_request event."""
         try:
@@ -4308,7 +5739,7 @@ class Database:
 
                     await cursor.execute(
                         """
-                        SELECT id, approval_status, event_kind FROM events
+                        SELECT id, name, approval_status, event_kind FROM events
                         WHERE id = %s FOR UPDATE
                         """,
                         (event_id,),
@@ -4323,6 +5754,7 @@ class Database:
                     if event["approval_status"] != "pending":
                         self.logger.warning(f"Event {event_id} is not pending, current status: {event['approval_status']}.")
                         raise ValueError("Event is not pending")
+                    event_name = event.get("name", "Unknown")
 
                     # Check for sessions that were closed (ended_at is NOT NULL) but still belong to this pending event
                     await cursor.execute(
@@ -4359,6 +5791,42 @@ class Database:
                         await self._recalc_points_for_sessions(conn, session_ids, lock=False)
                         self.logger.debug(f"Recalculated points for closed sessions: {session_ids}.")
 
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id and closed_sessions:
+                        for session in closed_sessions:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.left",
+                                    "payload": {
+                                        "event": "event.left",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "pr_id": session["pr_id"],
+                                        "duration_seconds": session.get("duration_seconds", 0),
+                                        "ended_at": (
+                                            session["ended_at"].isoformat()
+                                            if session.get("ended_at")
+                                            else None
+                                        ),
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        staged_outbox_events.append(
+                            {
+                                "routing_key": "event.ended",
+                                "payload": {
+                                    "event": "event.ended",
+                                    "event_id": event_id,
+                                    "event_name": event_name,
+                                    "trace_id": outbox_trace_id,
+                                },
+                            }
+                        )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
                 self.logger.debug(
                     f"Spec Request {event_id} approved by {approved_by}. "
@@ -4522,10 +5990,9 @@ class Database:
                     # Get active
                     await cursor.execute(
                         """
-                        SELECT pr_id as user_id, started_at as joined_at, 'active' as status
-                        FROM spec_sessions
-                        WHERE target_type = 'event' AND target_id = %s 
-                          AND ended_at IS NULL AND deleted_at IS NULL
+                        SELECT pr_id, started_at as joined_at, 'active' as status
+                        FROM active_assignments_v
+                        WHERE target_type = 'event' AND target_id = %s
                         """,
                         (event_id,),
                     )
@@ -4534,7 +6001,7 @@ class Database:
                     # Get reserved
                     await cursor.execute(
                         """
-                        SELECT pr_id as user_id, joined_at, 'reserved' as status
+                        SELECT pr_id, joined_at, 'reserved' as status
                         FROM event_participants
                         WHERE event_id = %s
                         """,
@@ -4548,7 +6015,12 @@ class Database:
             return []
 
     @db_retry()
-    async def start_event_sessions(self, event_id: int) -> list:
+    async def start_event_sessions(
+        self,
+        event_id: int,
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> list:
         """
         Migrates reserved participants from `event_participants` to `spec_sessions`.
         Called when an event officially starts.
@@ -4610,6 +6082,25 @@ class Database:
                     await cursor.execute(
                         "DELETE FROM event_participants WHERE event_id = %s",
                         (event_id,)
+                    )
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if outbox_trace_id:
+                        for migrated_pr_id in migrated_pr_ids:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.joined",
+                                    "payload": {
+                                        "event": "event.joined",
+                                        "event_id": event_id,
+                                        "event_name": event_name,
+                                        "pr_id": migrated_pr_id,
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
                     )
                     await conn.commit()
             self.logger.debug(
@@ -4681,204 +6172,14 @@ class Database:
             self.logger.error(f"Failed to reset assistant stats: {e}", exc_info=True)
             return False
 
-    async def _get_assistant_points_snapshot(
-        self, cursor, pr_id: int, for_update: bool = False
-    ) -> Optional[Dict[str, Any]]:
-        lock_sql = " FOR UPDATE" if for_update else ""
-        await cursor.execute(
-            f"""
-            SELECT
-                pr_id,
-                ROUND(COALESCE(auto_points_total, 0), 4) AS auto_points_total,
-                ROUND(COALESCE(manual_points_adjustment, 0), 4) AS manual_points_adjustment,
-                ROUND(
-                    COALESCE(total_points, COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0)),
-                    4
-                ) AS total_points,
-                ROUND(COALESCE(penalty_points, 0), 4) AS penalty_points,
-                ROUND(COALESCE(penalty_percent, 0), 4) AS penalty_percent,
-                COALESCE(warnings_units, 0) AS warnings_units,
-                ROUND(
-                    COALESCE(total_points, COALESCE(auto_points_total, 0) + COALESCE(manual_points_adjustment, 0))
-                    - COALESCE(penalty_points, 0),
-                    4
-                ) AS display_points
-            FROM assistants
-            WHERE pr_id = %s{lock_sql}
-            """,
-            (pr_id,),
-        )
-        row = await cursor.fetchone()
-        if row:
-            row.update(self._warnings_breakdown(row.get("warnings_units", 0)))
-        return row
-
-    @db_retry()
-    async def adjust_assistant_points(
-        self,
-        pr_id: int,
-        delta: float,
-        source: str = "manual_adjust",
-    ) -> Optional[Dict[str, Any]]:
-        """Adjust manual assistant points component (persistent across auto recalculation)."""
-        try:
-            rounded_delta = self._round_points(delta)
-            async with self.pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id)
-                        VALUES (%s)
-                        ON DUPLICATE KEY UPDATE pr_id = pr_id
-                        """,
-                        (pr_id,),
-                    )
-                    before = await self._get_assistant_points_snapshot(
-                        cursor, pr_id, for_update=True
-                    )
-                    if not before:
-                        return None
-                    await cursor.execute(
-                        """
-                        UPDATE assistants
-                        SET manual_points_adjustment = ROUND(
-                                COALESCE(manual_points_adjustment, 0) + %s,
-                                4
-                            )
-                        WHERE pr_id = %s
-                        """,
-                        (rounded_delta, pr_id),
-                    )
-                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
-                    await conn.commit()
-                    return {
-                        "pr_id": pr_id,
-                        "delta": rounded_delta,
-                        "source": source,
-                        "before": before,
-                        "after": after,
-                    }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to adjust assistant points for {pr_id}: {e}", exc_info=True
-            )
-            return None
-
-    @db_retry()
-    async def update_assistant_sanctions(
-        self,
-        pr_id: int,
-        penalty_points: Optional[float] = None,
-        penalty_percent: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Update assistant sanctions (penalty points/percent)."""
-        if penalty_points is None and penalty_percent is None:
-            return None
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    self.logger.debug(f"Updating sanctions for pr_id={pr_id}. Penalty points: {penalty_points}, percent: {penalty_percent}.")
-
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id)
-                        VALUES (%s)
-                        ON DUPLICATE KEY UPDATE pr_id = pr_id
-                        """,
-                        (pr_id,),
-                    )
-                    before = await self._get_assistant_points_snapshot(
-                        cursor, pr_id, for_update=True
-                    )
-                    if not before:
-                        self.logger.warning(f"Assistant {pr_id} not found for sanction update.")
-                        return None
-
-                    clauses: List[str] = []
-                    params: List[Any] = []
-                    if penalty_points is not None:
-                        clauses.append("penalty_points = GREATEST(0, ROUND(COALESCE(penalty_points, 0) + %s, 4))")
-                        params.append(penalty_points)
-                    if penalty_percent is not None:
-                        clauses.append("penalty_percent = GREATEST(0, ROUND(COALESCE(penalty_percent, 0) + %s, 4))")
-                        params.append(penalty_percent)
-                    params.append(pr_id)
-                    await cursor.execute(
-                        f"UPDATE assistants SET {', '.join(clauses)} WHERE pr_id = %s",
-                        tuple(params),
-                    )
-                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
-                await conn.commit()
-                self.logger.debug(
-                    f"Assistant sanctions updated for pr_id={pr_id}.\n"
-                    f"BEFORE: {before}\nAFTER: {after}"
-                )
-                return {
-                    "pr_id": pr_id,
-                    "before": before,
-                    "after": after,
-                }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to update assistant sanctions for {pr_id}: {e}",
-                exc_info=True,
-            )
-            return None
-
-    @db_retry()
-    async def update_assistant_warnings(
-        self,
-        pr_id: int,
-        oral_delta: int = 0,
-        strict_delta: int = 0,
-    ) -> Optional[Dict[str, Any]]:
-        """Update warnings units (oral=1 unit, strict=2 units)."""
-        units_delta = int(oral_delta or 0) + int(strict_delta or 0) * 2
-        if units_delta == 0:
-            return None
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO assistants (pr_id)
-                        VALUES (%s)
-                        ON DUPLICATE KEY UPDATE pr_id = pr_id
-                        """,
-                        (pr_id,),
-                    )
-                    before = await self._get_assistant_points_snapshot(
-                        cursor, pr_id, for_update=True
-                    )
-                    if not before:
-                        return None
-                    await cursor.execute(
-                        """
-                        UPDATE assistants
-                        SET warnings_units = GREATEST(0, COALESCE(warnings_units, 0) + %s)
-                        WHERE pr_id = %s
-                        """,
-                        (units_delta, pr_id),
-                    )
-                    after = await self._get_assistant_points_snapshot(cursor, pr_id)
-                    await conn.commit()
-                    return {
-                        "pr_id": pr_id,
-                        "units_delta": units_delta,
-                        "oral_delta": int(oral_delta or 0),
-                        "strict_delta": int(strict_delta or 0),
-                        "before": before,
-                        "after": after,
-                    }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to update warnings for assistant {pr_id}: {e}", exc_info=True
-            )
-            return None
-
     @db_retry()
     async def update_assistant_session(
-        self, pr_id: int, session_id: int, patch: Dict[str, Any]
+        self,
+        pr_id: int,
+        session_id: int,
+        patch: Dict[str, Any],
+        outbox_trace_id: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Admin patch of one spec session with deterministic points delta recalculation."""
         try:
@@ -4909,6 +6210,11 @@ class Database:
                         before.get("started_at")
                     )
                     current_ended = self._normalize_msk_datetime(before.get("ended_at"))
+                    affected_dates = set(
+                        day
+                        for day in self._iter_interval_dates(current_started, current_ended)
+                        if day < self._current_msk_date()
+                    )
 
                     next_target_type = (
                         patch.get("target_type")
@@ -4947,7 +6253,7 @@ class Database:
                         # If session was open and admin is closing it, set end_reason
                         if current_ended is None:
                             updates.append("end_reason = %s")
-                            params.append("admin_closed")
+                            params.append(SPEC_SESSION_END_REASON_ADMIN_CLOSED)
 
                     if next_target_type == "manual":
                         next_target_id = None
@@ -5057,6 +6363,11 @@ class Database:
                                     self.logger.debug(f"Spec request event {next_target_id} auto-marked as inactive via admin update.")
 
                     await self._recalc_session_points_delta(conn, session_id, lock=False)
+                    affected_dates.update(
+                        day
+                        for day in self._iter_interval_dates(next_started, next_ended)
+                        if day < self._current_msk_date()
+                    )
 
                     await cursor.execute(
                         """
@@ -5079,7 +6390,73 @@ class Database:
                         (session_id,),
                     )
                     after = await cursor.fetchone()
+                    staged_outbox_events: List[Dict[str, Any]] = list(outbox_events or [])
+                    if (
+                        outbox_trace_id
+                        and before.get("ended_at") is None
+                        and after
+                        and after.get("ended_at") is not None
+                    ):
+                        target_type = after.get("target_type")
+                        target_id = after.get("target_id")
+                        target_name = after.get("target_name") or "Unknown"
+                        duration = int(after.get("duration_seconds") or 0)
+                        if target_type == "streamer" and target_id is not None:
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "spec.unclaimed",
+                                    "payload": {
+                                        "event": "spec.unclaimed",
+                                        "streamer_id": int(target_id),
+                                        "streamer_name": target_name,
+                                        "pr_id": pr_id,
+                                        "duration_seconds": duration,
+                                        "reason": "admin_closed",
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                        elif target_type == "event" and target_id is not None:
+                            ended_dt = after.get("ended_at")
+                            staged_outbox_events.append(
+                                {
+                                    "routing_key": "event.left",
+                                    "payload": {
+                                        "event": "event.left",
+                                        "event_id": int(target_id),
+                                        "event_name": target_name,
+                                        "pr_id": pr_id,
+                                        "duration_seconds": duration,
+                                        "ended_at": (
+                                            ended_dt.isoformat()
+                                            if hasattr(ended_dt, "isoformat")
+                                            else str(ended_dt)
+                                        ),
+                                        "trace_id": outbox_trace_id,
+                                    },
+                                }
+                            )
+                    await self._enqueue_outbox_messages_with_cursor(
+                        cursor,
+                        staged_outbox_events,
+                    )
                     await conn.commit()
+                    if affected_dates:
+                        try:
+                            await self.recalculate_assistant_sanction_derivations(
+                                assistant_id=pr_id,
+                                start_date=min(affected_dates),
+                                end_date=max(affected_dates),
+                            )
+                        except Exception as recalc_exc:
+                            self.logger.error(
+                                "Failed to auto-recalculate assistant_sanctions after session patch: pr_id=%s session_id=%s dates=%s error=%s",
+                                pr_id,
+                                session_id,
+                                sorted(affected_dates),
+                                recalc_exc,
+                                exc_info=True,
+                            )
                     return {"session_id": session_id, "before": before, "after": after}
         except ValueError:
             raise
@@ -5115,6 +6492,14 @@ class Database:
                     before = await cursor.fetchone()
                     if not before:
                         return None
+                    affected_dates = sorted(
+                        day
+                        for day in self._iter_interval_dates(
+                            before.get("started_at"),
+                            before.get("ended_at"),
+                        )
+                        if day < self._current_msk_date()
+                    )
 
                     await cursor.execute(
                         """
@@ -5176,6 +6561,22 @@ class Database:
                     )
                     after = await cursor.fetchone()
                     await conn.commit()
+                    if affected_dates:
+                        try:
+                            await self.recalculate_assistant_sanction_derivations(
+                                assistant_id=pr_id,
+                                start_date=affected_dates[0],
+                                end_date=affected_dates[-1],
+                            )
+                        except Exception as recalc_exc:
+                            self.logger.error(
+                                "Failed to auto-recalculate assistant_sanctions after session delete: pr_id=%s session_id=%s dates=%s error=%s",
+                                pr_id,
+                                session_id,
+                                affected_dates,
+                                recalc_exc,
+                                exc_info=True,
+                            )
                     return {"session_id": session_id, "before": before, "after": after}
         except Exception as e:
             self.logger.error(
@@ -5201,53 +6602,63 @@ class Database:
                                 DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
-                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            CASE WHEN act.session_id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
                             COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
-                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
-                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0), 4) as gross_points,
+                            ROUND(COALESCE(sb.penalty_points, 0), 4) as active_point_penalty,
+                            ROUND(COALESCE(sb.penalty_percent, 0), 4) as active_percent_penalty,
+                            COALESCE(sb.strict_warnings, 0) * 2 + COALESCE(sb.oral_warnings, 0) as active_warning_units,
                             ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ),
+                                COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0) - COALESCE(sb.penalty_points, 0),
                                 4
-                            ) as total_points,
-                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
-                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
-                            COALESCE(a.warnings_units, 0) as warnings_units,
-                            ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ) - COALESCE(a.penalty_points, 0),
-                                4
-                            ) as display_points,
-                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
-                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            ) as net_points,
+                            COALESCE(sb.strict_warnings, 0) as active_strict_warnings,
+                            COALESCE(sb.oral_warnings, 0) as active_oral_warnings,
                             CONCAT(
-                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                COALESCE(sb.strict_warnings, 0),
                                 '/2 ',
-                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                COALESCE(sb.oral_warnings, 0),
                                 '/2'
-                            ) as warnings_display,
+                            ) as active_warnings_display,
+                            ROUND(COALESCE(sb.check_marks, 0), 4) as active_checks,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
                             ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
                             ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
                             ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
-                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
-                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN active_assignments_v act ON act.pr_id = a.pr_id
                         LEFT JOIN (
                             SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
                         LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(spec_points_auto), 4) AS auto_points_total
+                            FROM assistant_day_spec_totals
+                            GROUP BY assistant_id
+                        ) points ON points.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(delta_points), 4) AS manual_points_adjustment
+                            FROM assistant_day_point_adjustments
+                            GROUP BY assistant_id
+                        ) adj ON adj.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT
+                                assistant_id,
+                                ROUND(SUM(CASE WHEN kind = 'point' THEN active_amount ELSE 0 END), 4) AS penalty_points,
+                                ROUND(SUM(CASE WHEN kind = 'percent' THEN active_amount ELSE 0 END), 4) AS penalty_percent,
+                                ROUND(SUM(CASE WHEN kind = 'check' THEN active_amount ELSE 0 END), 4) AS check_marks,
+                                ROUND(SUM(CASE WHEN kind = 'oral' THEN active_amount ELSE 0 END), 4) AS oral_warnings,
+                                ROUND(SUM(CASE WHEN kind = 'strict' THEN active_amount ELSE 0 END), 4) AS strict_warnings
+                            FROM sanction_balances
+                            GROUP BY assistant_id
+                        ) sb ON sb.assistant_id = a.pr_id
+                        LEFT JOIN (
                             SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
                             FROM spec_session_day_slices
-                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            WHERE work_date >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
                             GROUP BY pr_id
                         ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
@@ -5274,53 +6685,63 @@ class Database:
                                 DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
-                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            CASE WHEN act.session_id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
                             COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
-                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
-                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0), 4) as gross_points,
+                            ROUND(COALESCE(sb.penalty_points, 0), 4) as active_point_penalty,
+                            ROUND(COALESCE(sb.penalty_percent, 0), 4) as active_percent_penalty,
+                            COALESCE(sb.strict_warnings, 0) * 2 + COALESCE(sb.oral_warnings, 0) as active_warning_units,
                             ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ),
+                                COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0) - COALESCE(sb.penalty_points, 0),
                                 4
-                            ) as total_points,
-                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
-                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
-                            COALESCE(a.warnings_units, 0) as warnings_units,
-                            ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ) - COALESCE(a.penalty_points, 0),
-                                4
-                            ) as display_points,
-                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
-                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            ) as net_points,
+                            COALESCE(sb.strict_warnings, 0) as active_strict_warnings,
+                            COALESCE(sb.oral_warnings, 0) as active_oral_warnings,
                             CONCAT(
-                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                COALESCE(sb.strict_warnings, 0),
                                 '/2 ',
-                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                COALESCE(sb.oral_warnings, 0),
                                 '/2'
-                            ) as warnings_display,
+                            ) as active_warnings_display,
+                            ROUND(COALESCE(sb.check_marks, 0), 4) as active_checks,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
                             ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
                             ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
                             ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
-                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
-                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN active_assignments_v act ON act.pr_id = a.pr_id
                         LEFT JOIN (
                             SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
                         LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(spec_points_auto), 4) AS auto_points_total
+                            FROM assistant_day_spec_totals
+                            GROUP BY assistant_id
+                        ) points ON points.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(delta_points), 4) AS manual_points_adjustment
+                            FROM assistant_day_point_adjustments
+                            GROUP BY assistant_id
+                        ) adj ON adj.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT
+                                assistant_id,
+                                ROUND(SUM(CASE WHEN kind = 'point' THEN active_amount ELSE 0 END), 4) AS penalty_points,
+                                ROUND(SUM(CASE WHEN kind = 'percent' THEN active_amount ELSE 0 END), 4) AS penalty_percent,
+                                ROUND(SUM(CASE WHEN kind = 'check' THEN active_amount ELSE 0 END), 4) AS check_marks,
+                                ROUND(SUM(CASE WHEN kind = 'oral' THEN active_amount ELSE 0 END), 4) AS oral_warnings,
+                                ROUND(SUM(CASE WHEN kind = 'strict' THEN active_amount ELSE 0 END), 4) AS strict_warnings
+                            FROM sanction_balances
+                            GROUP BY assistant_id
+                        ) sb ON sb.assistant_id = a.pr_id
+                        LEFT JOIN (
                             SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
                             FROM spec_session_day_slices
-                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            WHERE work_date >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
                             GROUP BY pr_id
                         ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
@@ -5483,53 +6904,63 @@ class Database:
                                 DATEDIFF(CURRENT_TIMESTAMP, COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP)),
                                 0
                             ) as experience_days,
-                            CASE WHEN act.id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
+                            CASE WHEN act.session_id IS NOT NULL THEN 'assigned' ELSE 'free' END as status,
                             act.target_type as assigned_to_type, act.target_id as assigned_to_id, 
                             COALESCE(stats.total_secs, 0) as total_spec_seconds, 
                             COALESCE(stats.sess_count, 0) as session_count, a.added_at, a.appointed_at, a.updated_at,
-                            ROUND(COALESCE(a.auto_points_total, 0), 4) as auto_points_total,
-                            ROUND(COALESCE(a.manual_points_adjustment, 0), 4) as manual_points_adjustment,
+                            ROUND(COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0), 4) as gross_points,
+                            ROUND(COALESCE(sb.penalty_points, 0), 4) as active_point_penalty,
+                            ROUND(COALESCE(sb.penalty_percent, 0), 4) as active_percent_penalty,
+                            COALESCE(sb.strict_warnings, 0) * 2 + COALESCE(sb.oral_warnings, 0) as active_warning_units,
                             ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ),
+                                COALESCE(points.auto_points_total, 0) + COALESCE(adj.manual_points_adjustment, 0) - COALESCE(sb.penalty_points, 0),
                                 4
-                            ) as total_points,
-                            ROUND(COALESCE(a.penalty_points, 0), 4) as penalty_points,
-                            ROUND(COALESCE(a.penalty_percent, 0), 4) as penalty_percent,
-                            COALESCE(a.warnings_units, 0) as warnings_units,
-                            ROUND(
-                                COALESCE(
-                                    a.total_points,
-                                    COALESCE(a.auto_points_total, 0) + COALESCE(a.manual_points_adjustment, 0)
-                                ) - COALESCE(a.penalty_points, 0),
-                                4
-                            ) as display_points,
-                            FLOOR(COALESCE(a.warnings_units, 0) / 2) as strict_warnings,
-                            MOD(COALESCE(a.warnings_units, 0), 2) as oral_warnings,
+                            ) as net_points,
+                            COALESCE(sb.strict_warnings, 0) as active_strict_warnings,
+                            COALESCE(sb.oral_warnings, 0) as active_oral_warnings,
                             CONCAT(
-                                FLOOR(COALESCE(a.warnings_units, 0) / 2),
+                                COALESCE(sb.strict_warnings, 0),
                                 '/2 ',
-                                MOD(COALESCE(a.warnings_units, 0), 2),
+                                COALESCE(sb.oral_warnings, 0),
                                 '/2'
-                            ) as warnings_display,
+                            ) as active_warnings_display,
+                            ROUND(COALESCE(sb.check_marks, 0), 4) as active_checks,
                             COALESCE(s.streamer_name, e.name) as assigned_to_name,
                             ROUND(COALESCE(stats.total_secs, 0) / 3600, 1) as total_spec_hours,
                             ROUND(COALESCE(recent.total_secs_30d, 0) / 3600, 4) as total_spec_hours_30d,
                             ROUND((COALESCE(recent.total_secs_30d, 0) / 3600) / 30.0, 4) as avg_spec_hours_per_day_30d
                         FROM assistants a
-                        LEFT JOIN spec_sessions act ON act.pr_id = a.pr_id 
-                            AND act.ended_at IS NULL AND act.deleted_at IS NULL
+                        LEFT JOIN active_assignments_v act ON act.pr_id = a.pr_id
                         LEFT JOIN (
                             SELECT pr_id, SUM(duration_seconds) as total_secs, COUNT(*) as sess_count
                             FROM spec_sessions WHERE deleted_at IS NULL AND ended_at IS NOT NULL
                             GROUP BY pr_id
                         ) stats ON stats.pr_id = a.pr_id
                         LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(spec_points_auto), 4) AS auto_points_total
+                            FROM assistant_day_spec_totals
+                            GROUP BY assistant_id
+                        ) points ON points.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT assistant_id, ROUND(SUM(delta_points), 4) AS manual_points_adjustment
+                            FROM assistant_day_point_adjustments
+                            GROUP BY assistant_id
+                        ) adj ON adj.assistant_id = a.pr_id
+                        LEFT JOIN (
+                            SELECT
+                                assistant_id,
+                                ROUND(SUM(CASE WHEN kind = 'point' THEN active_amount ELSE 0 END), 4) AS penalty_points,
+                                ROUND(SUM(CASE WHEN kind = 'percent' THEN active_amount ELSE 0 END), 4) AS penalty_percent,
+                                ROUND(SUM(CASE WHEN kind = 'check' THEN active_amount ELSE 0 END), 4) AS check_marks,
+                                ROUND(SUM(CASE WHEN kind = 'oral' THEN active_amount ELSE 0 END), 4) AS oral_warnings,
+                                ROUND(SUM(CASE WHEN kind = 'strict' THEN active_amount ELSE 0 END), 4) AS strict_warnings
+                            FROM sanction_balances
+                            GROUP BY assistant_id
+                        ) sb ON sb.assistant_id = a.pr_id
+                        LEFT JOIN (
                             SELECT pr_id, SUM(seconds_in_day) as total_secs_30d
                             FROM spec_session_day_slices
-                            WHERE work_date >= DATE_SUB(UTC_DATE(), INTERVAL 29 DAY)
+                            WHERE work_date >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
                             GROUP BY pr_id
                         ) recent ON recent.pr_id = a.pr_id
                         LEFT JOIN streamers s ON act.target_type = 'streamer' AND act.target_id = s.streamer_id
@@ -5546,13 +6977,32 @@ class Database:
                     # Get daily stats from VIEW
                     await cursor.execute(
                         """
-                        SELECT date, p0_seconds, p1_seconds, p2_seconds, p3_seconds, total_points
-                        FROM daily_stats
-                        WHERE pr_id = %s
-                        ORDER BY date DESC
+                        SELECT
+                            base.work_date AS date,
+                            COALESCE(ds.p0_seconds, 0) AS p0_seconds,
+                            COALESCE(ds.p1_seconds, 0) AS p1_seconds,
+                            COALESCE(ds.p2_seconds, 0) AS p2_seconds,
+                            COALESCE(ds.p3_seconds, 0) AS p3_seconds,
+                            ROUND(COALESCE(ds.total_points, 0) + COALESCE(ad.delta_points, 0), 4) AS total_points
+                        FROM (
+                            SELECT date AS work_date
+                            FROM daily_stats
+                            WHERE pr_id = %s
+                            UNION
+                            SELECT work_date
+                            FROM assistant_day_point_adjustments
+                            WHERE assistant_id = %s
+                        ) base
+                        LEFT JOIN daily_stats ds
+                            ON ds.pr_id = %s
+                           AND ds.date = base.work_date
+                        LEFT JOIN assistant_day_point_adjustments ad
+                            ON ad.assistant_id = %s
+                           AND ad.work_date = base.work_date
+                        ORDER BY base.work_date DESC
                         LIMIT 30
                         """,
-                        (user_id,),
+                        (user_id, user_id, user_id, user_id),
                     )
                     daily_stats = await cursor.fetchall()
 
@@ -5726,6 +7176,7 @@ class Database:
         template_stream_offline: Optional[str] = None,
         template_category_to_gta: Optional[str] = None,
         template_category_from_gta: Optional[str] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Обновление шаблонов уведомлений гильдии."""
         try:
@@ -5765,6 +7216,7 @@ class Database:
                         "UPDATE settings SET notification_templates = %s",
                         (json.dumps(current_templates),),
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
                     return True
         except Exception as e:
@@ -5779,6 +7231,7 @@ class Database:
         p2_rate: Optional[float] = None,
         p3_rate: Optional[float] = None,
         probation_rate: Optional[float] = None,
+        outbox_events: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Обновление рейтов баллов гильдии."""
         try:
@@ -5810,6 +7263,7 @@ class Database:
                         f"UPDATE settings SET {', '.join(updates)}",
                         values,
                     )
+                    await self._enqueue_outbox_messages_with_cursor(cursor, outbox_events)
                     await conn.commit()
                     return True
         except Exception as e:
@@ -5851,19 +7305,16 @@ class Database:
 
     @db_retry()
     async def update_event_message_id(self, event_id: int, message_id: int) -> bool:
-        """Обновление message_id события."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        "UPDATE events SET message_id = %s WHERE id = %s",
-                        (message_id, event_id),
-                    )
-                    await conn.commit()
-                    return True
-        except Exception as e:
-            self.logger.error(f"Failed to update event message: {e}", exc_info=True)
-            return False
+        """Legacy no-op.
+
+        Discord-specific message linkage no longer belongs to core events.
+        """
+        self.logger.warning(
+            "update_event_message_id(%s, %s) called on legacy path; ignoring",
+            event_id,
+            message_id,
+        )
+        return False
 
     # =========================================================================
     # Spec Extended Operations (for routes refactoring)
@@ -5877,13 +7328,17 @@ class Database:
                 async with conn.cursor() as cursor:
                     await cursor.execute(
                         """
-                        SELECT s.streamer_id, s.streamer_name, ss.pr_id as assigned_pr_id, ss.started_at as assigned_at,
-                               TIMESTAMPDIFF(SECOND, ss.started_at, CURRENT_TIMESTAMP) as duration_seconds
-                        FROM spec_sessions ss
-                        JOIN streamers s ON s.streamer_id = ss.target_id
-                        WHERE ss.target_type = 'streamer'
-                          AND ss.ended_at IS NULL AND ss.deleted_at IS NULL
-                        ORDER BY ss.started_at DESC
+                        SELECT
+                            s.streamer_id,
+                            s.streamer_name,
+                            act.pr_id as assigned_pr_id,
+                            act.started_at as assigned_at,
+                            TIMESTAMPDIFF(SECOND, act.started_at, CURRENT_TIMESTAMP) as duration_seconds
+                        FROM active_assignments_v act
+                        JOIN streamers s
+                          ON act.target_type = 'streamer'
+                         AND s.streamer_id = act.target_id
+                        ORDER BY act.started_at DESC
                         """
                     )
                     results = await cursor.fetchall()
@@ -6493,7 +7948,7 @@ class Database:
                 async with conn.cursor() as cursor:
                     # 1. Count assigned PR assistants (active sessions)
                     await cursor.execute(
-                        "SELECT COUNT(*) as count FROM spec_sessions WHERE ended_at IS NULL AND deleted_at IS NULL"
+                        "SELECT COUNT(*) as count FROM active_assignments_v"
                     )
                     assigned_pr_count = (await cursor.fetchone())["count"]
 
@@ -6562,8 +8017,7 @@ class Database:
                         SELECT
                             COUNT(*) AS active_spec_sessions,
                             COALESCE(SUM(CASE WHEN is_probation = TRUE THEN 1 ELSE 0 END), 0) AS probation_sessions
-                        FROM spec_sessions
-                        WHERE ended_at IS NULL AND deleted_at IS NULL
+                        FROM active_assignments_v
                         """
                     )
                     spec_stats = await cursor.fetchone() or {}
@@ -7234,3 +8688,2913 @@ class Database:
                 exc_info=True,
             )
             return {"items": [], "total": 0}
+
+    # =========================================================================
+    # Cutover Day Metrics / Sanctions / Batch Queue
+    # =========================================================================
+
+    @staticmethod
+    def _default_sanction_policy_values() -> Dict[str, Any]:
+        return {
+            "check_cycle_size": 5,
+            "check_immunity_hours_per_day": 4,
+            "point_immunity_hours_per_day": 5,
+            "percent_immunity_hours_per_day": 6,
+            "check_relief_hours_per_day": 4,
+            "point_relief_hours_per_day": 5,
+            "percent_relief_hours_per_day": 6,
+            "check_relief_min_streak_days": 2,
+            "point_relief_min_streak_days": 2,
+            "percent_relief_min_streak_days": 2,
+            "percent_relief_step_amount": 3,
+            "daily_norm_spec": 4,
+            "daily_norm_complaints": 0,
+            "daily_norm_mchat": 0,
+        }
+
+    @staticmethod
+    def _default_check_cycle_rules() -> List[tuple[int, Optional[int], str, float]]:
+        return [
+            (1, 2, "point", 1.0),
+            (3, 3, "point", 2.0),
+            (4, 5, "percent", 3.0),
+            (6, 6, "percent", 5.0),
+            (7, 7, "oral", 1.0),
+            (8, None, "strict", 1.0),
+        ]
+
+    @staticmethod
+    def _normalize_runtime_sanction(
+        *,
+        kind: str,
+        amount: Optional[float],
+        auto_relief_date: Optional[date],
+    ) -> tuple[float, Optional[date]]:
+        safe_kind = str(kind)
+        if safe_kind in FIXED_SIZE_SANCTION_KINDS:
+            normalized_amount = 1.0
+        else:
+            if amount is None or float(amount) <= 0:
+                raise ValueError("Для выбранной санкции требуется положительный размер")
+            normalized_amount = round(float(amount), 4)
+
+        normalized_auto_relief_date = (
+            auto_relief_date if safe_kind in WARNING_SANCTION_KINDS else None
+        )
+        if safe_kind in WARNING_SANCTION_KINDS and normalized_auto_relief_date is None:
+            raise ValueError("Для устного и строгого требуется дата автоматического снятия")
+        return normalized_amount, normalized_auto_relief_date
+
+    async def _ensure_monthly_policy_row(
+        self, cursor, month_start: date
+    ) -> Dict[str, Any]:
+        await cursor.execute(
+            """
+            INSERT INTO monthly_sanction_settings (
+                month_start,
+                check_cycle_size,
+                check_immunity_hours_per_day,
+                point_immunity_hours_per_day,
+                percent_immunity_hours_per_day,
+                check_relief_hours_per_day,
+                point_relief_hours_per_day,
+                percent_relief_hours_per_day,
+                check_relief_min_streak_days,
+                point_relief_min_streak_days,
+                percent_relief_min_streak_days,
+                percent_relief_step_amount,
+                daily_norm_spec,
+                daily_norm_complaints,
+                daily_norm_mchat
+            )
+            VALUES (%s, 5, 4, 5, 6, 4, 5, 6, 2, 2, 2, 3, 4, 0, 0)
+            ON DUPLICATE KEY UPDATE month_start = month_start
+            """,
+            (month_start,),
+        )
+        await cursor.execute(
+            "SELECT * FROM monthly_sanction_settings WHERE month_start = %s",
+            (month_start,),
+        )
+        row = await cursor.fetchone() or {}
+        await cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM monthly_check_rules WHERE month_start = %s",
+            (month_start,),
+        )
+        count_row = await cursor.fetchone() or {}
+        if int(count_row.get("cnt", 0)) == 0:
+            for range_start, range_end, penalty_kind, penalty_amount in [
+                (1, 2, "point", 1.0),
+                (3, 3, "point", 2.0),
+                (4, 5, "percent", 3.0),
+                (6, 6, "percent", 5.0),
+                (7, 7, "oral", 1.0),
+                (8, None, "strict", 1.0),
+            ]:
+                await cursor.execute(
+                    """
+                    INSERT INTO monthly_check_rules (
+                        month_start, range_start, range_end, penalty_kind, penalty_amount
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (month_start, range_start, range_end, penalty_kind, penalty_amount),
+                )
+        return row
+
+    async def _ensure_current_policy_row(self, cursor) -> Dict[str, Any]:
+        current_month = CURRENT_SANCTION_POLICY_MONTH
+        await cursor.execute(
+            "SELECT * FROM monthly_sanction_settings WHERE month_start = %s",
+            (current_month,),
+        )
+        row = await cursor.fetchone() or {}
+
+        if not row:
+            template = self._default_sanction_policy_values()
+            await cursor.execute(
+                """
+                SELECT *
+                FROM monthly_sanction_settings
+                WHERE month_start <> %s
+                ORDER BY month_start DESC
+                LIMIT 1
+                """,
+                (current_month,),
+            )
+            existing = await cursor.fetchone() or {}
+            for key in template:
+                if existing.get(key) is not None:
+                    template[key] = existing[key]
+
+            await cursor.execute(
+                """
+                INSERT INTO monthly_sanction_settings (
+                    month_start,
+                    check_cycle_size,
+                    check_immunity_hours_per_day,
+                    point_immunity_hours_per_day,
+                    percent_immunity_hours_per_day,
+                    check_relief_hours_per_day,
+                    point_relief_hours_per_day,
+                    percent_relief_hours_per_day,
+                    check_relief_min_streak_days,
+                    point_relief_min_streak_days,
+                    percent_relief_min_streak_days,
+                    percent_relief_step_amount,
+                    daily_norm_spec,
+                    daily_norm_complaints,
+                    daily_norm_mchat
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    current_month,
+                    int(template["check_cycle_size"]),
+                    float(template["check_immunity_hours_per_day"]),
+                    float(template["point_immunity_hours_per_day"]),
+                    float(template["percent_immunity_hours_per_day"]),
+                    float(template["check_relief_hours_per_day"]),
+                    float(template["point_relief_hours_per_day"]),
+                    float(template["percent_relief_hours_per_day"]),
+                    int(template["check_relief_min_streak_days"]),
+                    int(template["point_relief_min_streak_days"]),
+                    int(template["percent_relief_min_streak_days"]),
+                    float(template["percent_relief_step_amount"]),
+                    float(template["daily_norm_spec"]),
+                    int(template["daily_norm_complaints"]),
+                    int(template["daily_norm_mchat"]),
+                ),
+            )
+            await cursor.execute(
+                "SELECT * FROM monthly_sanction_settings WHERE month_start = %s",
+                (current_month,),
+            )
+            row = await cursor.fetchone() or {}
+
+        await cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM monthly_check_rules WHERE month_start = %s",
+            (current_month,),
+        )
+        count_row = await cursor.fetchone() or {}
+        if int(count_row.get("cnt", 0)) == 0:
+            await cursor.execute(
+                """
+                SELECT month_start
+                FROM monthly_check_rules
+                WHERE month_start <> %s
+                GROUP BY month_start
+                ORDER BY month_start DESC
+                LIMIT 1
+                """,
+                (current_month,),
+            )
+            source_month_row = await cursor.fetchone() or {}
+            source_month = source_month_row.get("month_start")
+            if source_month is not None:
+                await cursor.execute(
+                    """
+                    SELECT range_start, range_end, penalty_kind, penalty_amount
+                    FROM monthly_check_rules
+                    WHERE month_start = %s
+                    ORDER BY range_start ASC, COALESCE(range_end, 4294967295) ASC, id ASC
+                    """,
+                    (source_month,),
+                )
+                source_rules = await cursor.fetchall() or []
+            else:
+                source_rules = []
+
+            rules_to_insert = source_rules or [
+                {
+                    "range_start": range_start,
+                    "range_end": range_end,
+                    "penalty_kind": penalty_kind,
+                    "penalty_amount": penalty_amount,
+                }
+                for range_start, range_end, penalty_kind, penalty_amount in self._default_check_cycle_rules()
+            ]
+            for rule in rules_to_insert:
+                await cursor.execute(
+                    """
+                    INSERT INTO monthly_check_rules (
+                        month_start, range_start, range_end, penalty_kind, penalty_amount
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        current_month,
+                        int(rule["range_start"]),
+                        int(rule["range_end"]) if rule.get("range_end") is not None else None,
+                        str(rule["penalty_kind"]),
+                        float(rule["penalty_amount"]),
+                    ),
+                )
+
+        return row
+
+    async def _compute_workoff_targets(
+        self,
+        cursor,
+        *,
+        month_start: date,
+        period_days: Optional[int],
+        multiplier: Optional[float],
+        use_spec: bool,
+        use_complaints: bool,
+        use_mchat: bool,
+        ) -> Dict[str, Any]:
+        if not period_days or not multiplier or multiplier <= 0:
+            return {
+                "workoff_period_days": None,
+                "workoff_multiplier": None,
+                "workoff_target_spec": None,
+                "workoff_target_complaints": None,
+                "workoff_target_mchat": None,
+            }
+
+        policy = await self._ensure_current_policy_row(cursor)
+        days = int(period_days)
+        factor = float(multiplier)
+
+        return {
+            "workoff_period_days": days,
+            "workoff_multiplier": factor,
+            "workoff_target_spec": round(float(policy.get("daily_norm_spec") or 0) * days * factor, 4)
+            if use_spec
+            else None,
+            "workoff_target_complaints": int(round(float(policy.get("daily_norm_complaints") or 0) * days * factor))
+            if use_complaints
+            else None,
+            "workoff_target_mchat": int(round(float(policy.get("daily_norm_mchat") or 0) * days * factor))
+            if use_mchat
+            else None,
+        }
+
+    @staticmethod
+    def _normalize_workoff_items(
+        workoff_items: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for raw_item in workoff_items or []:
+            metric = str(raw_item.get("metric") or "").strip()
+            if metric not in {"spec", "complaints", "mchat"}:
+                raise ValueError("Unsupported workoff metric")
+            multiplier = float(raw_item.get("multiplier") or 0)
+            if multiplier <= 0:
+                raise ValueError("Workoff multiplier must be greater than 0")
+            period_start = raw_item.get("period_start")
+            period_end = raw_item.get("period_end")
+            if not isinstance(period_start, date) or not isinstance(period_end, date):
+                raise ValueError("Workoff period must include valid start and end dates")
+            if period_end < period_start:
+                raise ValueError("Workoff period_end must be greater than or equal to period_start")
+            normalized.append(
+                {
+                    "metric": metric,
+                    "multiplier": multiplier,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                }
+            )
+        return normalized
+
+    async def _compute_workoff_item_target_amount_locked(
+        self,
+        cursor,
+        *,
+        metric: str,
+        multiplier: float,
+        period_start: date,
+        period_end: date,
+    ) -> float:
+        policy = await self._ensure_current_policy_row(cursor)
+        total_days = (period_end - period_start).days + 1
+        field_name = {
+            "spec": "daily_norm_spec",
+            "complaints": "daily_norm_complaints",
+            "mchat": "daily_norm_mchat",
+        }[metric]
+        base_total = float(policy.get(field_name) or 0) * total_days
+        target = base_total * float(multiplier)
+        if metric == "spec":
+            return round(target, 4)
+        return float(int(round(target)))
+
+    async def _replace_batch_workoff_items_locked(
+        self,
+        cursor,
+        *,
+        batch_id: int,
+        workoff_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized = self._normalize_workoff_items(workoff_items)
+        await cursor.execute(
+            "DELETE FROM sanction_operation_workoffs WHERE operation_id = %s",
+            (batch_id,),
+        )
+        for item in normalized:
+            await cursor.execute(
+                """
+                INSERT INTO sanction_operation_workoffs (
+                    operation_id, metric, multiplier, period_start, period_end
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    batch_id,
+                    item["metric"],
+                    item["multiplier"],
+                    item["period_start"],
+                    item["period_end"],
+                ),
+            )
+        return normalized
+
+    async def _get_batch_workoff_items_locked(
+        self,
+        cursor,
+        *,
+        batch_id: int,
+    ) -> List[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            SELECT id, operation_id AS batch_id, metric, multiplier, period_start, period_end, created_at
+            FROM sanction_operation_workoffs
+            WHERE operation_id = %s
+            ORDER BY id ASC
+            """,
+            (batch_id,),
+        )
+        return await cursor.fetchall() or []
+
+    async def _create_sanction_workoff_items_locked(
+        self,
+        cursor,
+        *,
+        sanction_id: int,
+        workoff_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized = self._normalize_workoff_items(workoff_items)
+        created: List[Dict[str, Any]] = []
+        for item in normalized:
+            target_amount = await self._compute_workoff_item_target_amount_locked(
+                cursor,
+                metric=item["metric"],
+                multiplier=float(item["multiplier"]),
+                period_start=item["period_start"],
+                period_end=item["period_end"],
+            )
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanction_workoffs (
+                    sanction_id, metric, multiplier, period_start, period_end, target_amount
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    sanction_id,
+                    item["metric"],
+                    item["multiplier"],
+                    item["period_start"],
+                    item["period_end"],
+                    target_amount,
+                ),
+            )
+            created.append(
+                {
+                    "id": int(cursor.lastrowid),
+                    "sanction_id": sanction_id,
+                    "metric": item["metric"],
+                    "multiplier": float(item["multiplier"]),
+                    "period_start": item["period_start"],
+                    "period_end": item["period_end"],
+                    "target_amount": target_amount,
+                }
+            )
+        return created
+
+    async def _sync_sanction_workoff_summary_locked(
+        self,
+        cursor,
+        *,
+        sanction_id: int,
+        workoff_items: List[Dict[str, Any]],
+    ) -> None:
+        return None
+
+    async def _get_sanction_workoff_items_locked(
+        self,
+        cursor,
+        *,
+        sanction_id: int,
+    ) -> List[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            SELECT id, sanction_id, metric, multiplier, period_start, period_end, target_amount, created_at
+            FROM assistant_sanction_workoffs
+            WHERE sanction_id = %s
+            ORDER BY id ASC
+            """,
+            (sanction_id,),
+        )
+        return await cursor.fetchall() or []
+
+    @staticmethod
+    def _build_sanction_workoff_summary(
+        workoff_items: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not workoff_items:
+            return {
+                "workoff_period_start": None,
+                "workoff_period_end": None,
+                "workoff_target_spec": None,
+                "workoff_target_complaints": None,
+                "workoff_target_mchat": None,
+            }
+        period_start = min(item["period_start"] for item in workoff_items)
+        period_end = max(item["period_end"] for item in workoff_items)
+        total_spec = sum(float(item.get("target_amount") or 0) for item in workoff_items if item.get("metric") == "spec")
+        total_complaints = sum(float(item.get("target_amount") or 0) for item in workoff_items if item.get("metric") == "complaints")
+        total_mchat = sum(float(item.get("target_amount") or 0) for item in workoff_items if item.get("metric") == "mchat")
+        return {
+            "workoff_period_start": period_start,
+            "workoff_period_end": period_end,
+            "workoff_target_spec": round(total_spec, 4) if total_spec else None,
+            "workoff_target_complaints": int(round(total_complaints)) if total_complaints else None,
+            "workoff_target_mchat": int(round(total_mchat)) if total_mchat else None,
+        }
+
+    async def _get_workoff_progress_items_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        workoff_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        progress_items: List[Dict[str, Any]] = []
+        for item in workoff_items:
+            metric = str(item["metric"])
+            period_start = item["period_start"]
+            period_end = item["period_end"]
+            if metric == "spec":
+                await cursor.execute(
+                    """
+                    SELECT ROUND(COALESCE(SUM(spec_hours_on_day), 0), 4) AS amount_done
+                    FROM assistant_day_spec_totals
+                    WHERE assistant_id = %s
+                      AND work_date BETWEEN %s AND %s
+                    """,
+                    (assistant_id, period_start, period_end),
+                )
+            elif metric == "complaints":
+                await cursor.execute(
+                    """
+                    SELECT COUNT(*) AS amount_done
+                    FROM complaints
+                    WHERE assistant_id = %s
+                      AND status = 'completed'
+                      AND DATE(completed_at) BETWEEN %s AND %s
+                    """,
+                    (assistant_id, period_start, period_end),
+                )
+            else:
+                await cursor.execute(
+                    """
+                    SELECT COALESCE(SUM(mchat_count), 0) AS amount_done
+                    FROM assistant_day_mchat
+                    WHERE assistant_id = %s
+                      AND work_date BETWEEN %s AND %s
+                    """,
+                    (assistant_id, period_start, period_end),
+                )
+            row = await cursor.fetchone() or {}
+            amount_done = float(row.get("amount_done") or 0)
+            if metric != "spec":
+                amount_done = float(int(round(amount_done)))
+            target_amount = float(item.get("target_amount") or 0)
+            progress_items.append(
+                {
+                    **item,
+                    "amount_done": round(amount_done, 4) if metric == "spec" else int(round(amount_done)),
+                    "remaining_amount": max(round(target_amount - amount_done, 4), 0),
+                    "is_completed": amount_done + 1e-9 >= target_amount,
+                }
+            )
+        return progress_items
+
+    async def _get_day_spec_metrics_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        work_date: date,
+    ) -> Dict[str, Any]:
+        day_start = datetime.combine(work_date, datetime.min.time())
+        day_end = day_start + timedelta(days=1)
+        await cursor.execute(
+            """
+            SELECT
+                COALESCE(
+                    SUM(
+                        GREATEST(
+                            0,
+                            TIMESTAMPDIFF(
+                                SECOND,
+                                GREATEST(ss.started_at, %s),
+                                LEAST(COALESCE(ss.ended_at, %s), %s)
+                            )
+                        )
+                    ),
+                    0
+                ) AS spec_seconds_on_day,
+                ROUND(
+                    COALESCE(
+                        SUM(
+                            (GREATEST(
+                                0,
+                                TIMESTAMPDIFF(
+                                    SECOND,
+                                    GREATEST(ss.started_at, %s),
+                                    LEAST(COALESCE(ss.ended_at, %s), %s)
+                                )
+                            ) / 3600.0) * ss.applied_hourly_rate
+                        ),
+                        0
+                    ),
+                    4
+                ) AS spec_points_auto
+            FROM spec_sessions ss
+            LEFT JOIN events e
+              ON ss.target_type = 'event'
+             AND e.id = ss.target_id
+            WHERE ss.pr_id = %s
+              AND ss.deleted_at IS NULL
+              AND ss.started_at < %s
+              AND COALESCE(ss.ended_at, %s) > %s
+              AND (ss.target_type <> 'event' OR e.approval_status = 'approved')
+            """,
+            (
+                day_start,
+                day_end,
+                day_end,
+                day_start,
+                day_end,
+                day_end,
+                assistant_id,
+                day_end,
+                day_end,
+                day_start,
+            ),
+        )
+        row = await cursor.fetchone() or {}
+        seconds = int(row.get("spec_seconds_on_day") or 0)
+        return {
+            "spec_seconds_on_day": seconds,
+            "spec_hours_on_day": round(seconds / 3600.0, 4),
+            "spec_points_auto": round(float(row.get("spec_points_auto") or 0), 4),
+        }
+
+    async def _get_streak_days_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        work_date: date,
+        min_hours: float,
+        limit_days: int = 60,
+    ) -> int:
+        streak = 0
+        cursor_date = work_date
+        for _ in range(limit_days):
+            metrics = await self._get_day_spec_metrics_locked(
+                cursor,
+                assistant_id=assistant_id,
+                work_date=cursor_date,
+            )
+            if float(metrics.get("spec_hours_on_day") or 0) + 1e-9 < float(min_hours):
+                break
+            streak += 1
+            cursor_date = cursor_date - timedelta(days=1)
+        return streak
+
+    async def _get_assistant_day_status_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        work_date: date,
+    ) -> Dict[str, Any]:
+        policy = await self._ensure_current_policy_row(cursor)
+        metrics = await self._get_day_spec_metrics_locked(
+            cursor,
+            assistant_id=assistant_id,
+            work_date=work_date,
+        )
+
+        await cursor.execute(
+            """
+            SELECT delta_points
+            FROM assistant_day_point_adjustments
+            WHERE assistant_id = %s AND work_date = %s
+            """,
+            (assistant_id, work_date),
+        )
+        adjustment_row = await cursor.fetchone() or {}
+
+        await cursor.execute(
+            """
+            SELECT mchat_count
+            FROM assistant_day_mchat
+            WHERE assistant_id = %s AND work_date = %s
+            """,
+            (assistant_id, work_date),
+        )
+        mchat_row = await cursor.fetchone() or {}
+
+        await cursor.execute(
+            """
+            SELECT COUNT(*) AS complaints_count
+            FROM complaints
+            WHERE assistant_id = %s
+              AND status = 'completed'
+              AND DATE(completed_at) = %s
+            """,
+            (assistant_id, work_date),
+        )
+        complaints_row = await cursor.fetchone() or {}
+
+        streak_check = await self._get_streak_days_locked(
+            cursor,
+            assistant_id=assistant_id,
+            work_date=work_date,
+            min_hours=float(policy.get("check_relief_hours_per_day") or 4),
+        )
+        streak_point = await self._get_streak_days_locked(
+            cursor,
+            assistant_id=assistant_id,
+            work_date=work_date,
+            min_hours=float(policy.get("point_relief_hours_per_day") or 5),
+        )
+        streak_percent = await self._get_streak_days_locked(
+            cursor,
+            assistant_id=assistant_id,
+            work_date=work_date,
+            min_hours=float(policy.get("percent_relief_hours_per_day") or 6),
+        )
+
+        spec_hours = float(metrics.get("spec_hours_on_day") or 0)
+        return {
+            "assistant_id": assistant_id,
+            "work_date": work_date,
+            "spec_seconds_on_day": int(metrics.get("spec_seconds_on_day") or 0),
+            "spec_hours_on_day": round(spec_hours, 4),
+            "spec_points_auto": round(float(metrics.get("spec_points_auto") or 0), 4),
+            "manual_points_delta": round(float(adjustment_row.get("delta_points") or 0), 4),
+            "mchat_count": int(mchat_row.get("mchat_count") or 0),
+            "complaints_count": int(complaints_row.get("complaints_count") or 0),
+            "check_immunity": spec_hours + 1e-9 >= float(policy.get("check_immunity_hours_per_day") or 4),
+            "point_immunity": spec_hours + 1e-9 >= float(policy.get("point_immunity_hours_per_day") or 5),
+            "percent_immunity": spec_hours + 1e-9 >= float(policy.get("percent_immunity_hours_per_day") or 6),
+            "streak_check_days": streak_check,
+            "streak_point_days": streak_point,
+            "streak_percent_days": streak_percent,
+        }
+
+    async def _insert_sanction_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        kind: str,
+        amount_total: float,
+        auto_relief_date: Optional[date] = None,
+        source_type: str,
+        issued_at: Optional[datetime] = None,
+        basis_date: Optional[date] = None,
+        source_batch_id: Optional[int] = None,
+        policy_month: Optional[date] = None,
+        cycle_no: Optional[int] = None,
+    ) -> int:
+        normalized_amount, normalized_auto_relief_date = self._normalize_runtime_sanction(
+            kind=kind,
+            amount=amount_total,
+            auto_relief_date=auto_relief_date,
+        )
+        if issued_at is None:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (
+                    assistant_id,
+                    kind,
+                    amount_total,
+                    auto_relief_date,
+                    issued_at,
+                    source_type,
+                    operation_id,
+                    basis_date,
+                    settings_month,
+                    check_rule_hit_no
+                )
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
+                """,
+                (
+                    assistant_id,
+                    kind,
+                    normalized_amount,
+                    normalized_auto_relief_date,
+                    source_type,
+                    source_batch_id,
+                    basis_date,
+                    policy_month,
+                    cycle_no,
+                ),
+            )
+        else:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanctions (
+                    assistant_id,
+                    kind,
+                    amount_total,
+                    auto_relief_date,
+                    issued_at,
+                    source_type,
+                    operation_id,
+                    basis_date,
+                    settings_month,
+                    check_rule_hit_no
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    assistant_id,
+                    kind,
+                    normalized_amount,
+                    normalized_auto_relief_date,
+                    issued_at,
+                    source_type,
+                    source_batch_id,
+                    basis_date,
+                    policy_month,
+                    cycle_no,
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    async def _apply_check_cycle_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        basis_date: date,
+        source_batch_id: Optional[int] = None,
+        run_timestamp: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        month_start = self._month_start_for(basis_date)
+        policy = await self._ensure_current_policy_row(cursor)
+        cycle_size = int(policy.get("check_cycle_size") or 5)
+
+        await cursor.execute(
+            """
+            SELECT
+                sb.sanction_id,
+                sb.active_amount
+            FROM sanction_balances sb
+            JOIN assistant_sanctions s ON s.id = sb.sanction_id
+            WHERE s.assistant_id = %s
+              AND s.kind = 'check'
+              AND sb.active_amount > 0
+              AND s.basis_date >= %s
+              AND s.basis_date < DATE_ADD(%s, INTERVAL 1 MONTH)
+            ORDER BY s.basis_date ASC, s.issued_at ASC, s.id ASC
+            """,
+            (assistant_id, month_start, month_start),
+        )
+        open_checks = await cursor.fetchall() or []
+        total_open_checks = sum(float(row.get("active_amount") or 0) for row in open_checks)
+        if total_open_checks + 1e-9 < cycle_size:
+            return None
+
+        await cursor.execute(
+            """
+            SELECT COALESCE(MAX(check_rule_hit_no), 0) AS max_cycle
+            FROM assistant_sanctions
+            WHERE assistant_id = %s
+              AND source_type = 'check_cycle'
+              AND settings_month = %s
+            """,
+            (assistant_id, month_start),
+        )
+        cycle_row = await cursor.fetchone() or {}
+        cycle_no = int(cycle_row.get("max_cycle") or 0) + 1
+
+        await cursor.execute(
+            """
+            SELECT penalty_kind AS sanction_kind, penalty_amount AS sanction_amount
+            FROM monthly_check_rules
+            WHERE month_start = %s
+              AND %s >= range_start
+              AND (range_end IS NULL OR %s <= range_end)
+            ORDER BY range_start DESC, COALESCE(range_end, 4294967295) DESC, id DESC
+            LIMIT 1
+            """,
+            (CURRENT_SANCTION_POLICY_MONTH, cycle_no, cycle_no),
+        )
+        rule = await cursor.fetchone()
+        if not rule:
+            return None
+
+        derived_sanction_id = await self._insert_sanction_locked(
+            cursor,
+            assistant_id=assistant_id,
+            kind=str(rule.get("sanction_kind")),
+            amount_total=float(rule.get("sanction_amount") or 0),
+            source_type="check_cycle",
+            issued_at=run_timestamp,
+            basis_date=basis_date,
+            source_batch_id=source_batch_id,
+            policy_month=month_start,
+            cycle_no=cycle_no,
+        )
+
+        remaining_to_consume = float(cycle_size)
+        consumed_check_ids: List[int] = []
+        for row in open_checks:
+            if remaining_to_consume <= 0:
+                break
+            available = float(row.get("active_amount") or 0)
+            if available <= 0:
+                continue
+            relief_amount = min(available, remaining_to_consume)
+            if run_timestamp is None:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_sanction_reliefs (
+                        sanction_id, amount, relieved_at, basis_date, relief_type
+                    )
+                    VALUES (%s, %s, CURRENT_TIMESTAMP, %s, 'cycle_reset')
+                    """,
+                    (row["sanction_id"], relief_amount, basis_date),
+                )
+            else:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_sanction_reliefs (
+                        sanction_id, amount, relieved_at, basis_date, relief_type
+                    )
+                    VALUES (%s, %s, %s, %s, 'cycle_reset')
+                    """,
+                    (row["sanction_id"], relief_amount, run_timestamp, basis_date),
+                )
+            remaining_to_consume -= relief_amount
+            consumed_check_ids.append(int(row["sanction_id"]))
+
+        return {
+            "derived_sanction_id": derived_sanction_id,
+            "cycle_no": cycle_no,
+            "rule": dict(rule),
+            "consumed_check_ids": consumed_check_ids,
+        }
+
+    async def _active_sanction_candidate_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        kind: str,
+        run_started_at: datetime,
+        basis_date: date,
+    ) -> Optional[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            SELECT sb.sanction_id, sb.active_amount
+            FROM sanction_balances sb
+            JOIN assistant_sanctions s ON s.id = sb.sanction_id
+            WHERE s.assistant_id = %s
+              AND s.kind = %s
+              AND s.issued_at < %s
+              AND sb.active_amount > 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM assistant_sanction_reliefs sr
+                  WHERE sr.sanction_id = s.id
+                    AND sr.relief_type = 'default'
+                    AND sr.basis_date = %s
+              )
+            ORDER BY s.issued_at ASC, s.id ASC
+            LIMIT 1
+            """,
+            (assistant_id, kind, run_started_at, basis_date),
+        )
+        return await cursor.fetchone()
+
+    async def _apply_warning_auto_expiry_locked(
+        self,
+        cursor,
+        *,
+        current_date: date,
+        run_started_at: datetime,
+        assistant_filter: Optional[Set[int]] = None,
+    ) -> Dict[str, Any]:
+        await cursor.execute(
+            """
+            SELECT
+                sb.sanction_id,
+                sb.assistant_id,
+                sb.kind,
+                sb.active_amount
+            FROM sanction_balances sb
+            JOIN assistant_sanctions s ON s.id = sb.sanction_id
+            WHERE s.kind IN ('oral', 'strict')
+              AND s.auto_relief_date IS NOT NULL
+              AND s.auto_relief_date <= %s
+              AND sb.active_amount > 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM assistant_sanction_reliefs sr
+                  WHERE sr.sanction_id = s.id
+                    AND sr.relief_type = 'auto_expire'
+              )
+            ORDER BY s.auto_relief_date ASC, s.issued_at ASC, s.id ASC
+            """,
+            (current_date,),
+        )
+        rows = await cursor.fetchall() or []
+        expired: List[Dict[str, Any]] = []
+        for row in rows:
+            assistant_id = int(row["assistant_id"])
+            if assistant_filter is not None and assistant_id not in assistant_filter:
+                continue
+            amount = round(float(row.get("active_amount") or 0), 4)
+            if amount <= 0:
+                continue
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanction_reliefs (
+                    sanction_id, amount, relieved_at, basis_date, relief_type
+                )
+                VALUES (%s, %s, %s, %s, 'auto_expire')
+                """,
+                (row["sanction_id"], amount, run_started_at, current_date),
+            )
+            expired.append(
+                {
+                    "assistant_id": assistant_id,
+                    "sanction_id": int(row["sanction_id"]),
+                    "kind": str(row["kind"]),
+                    "amount": amount,
+                }
+            )
+        return {"relieved": expired}
+
+    async def _apply_default_auto_relief_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+        run_started_at: datetime,
+        assistant_filter: Optional[Set[int]] = None,
+    ) -> Dict[str, Any]:
+        month_start = self._month_start_for(basis_date)
+        policy = await self._ensure_monthly_policy_row(cursor, month_start)
+
+        await cursor.execute(
+            """
+            SELECT DISTINCT s.assistant_id
+            FROM assistant_sanctions s
+            JOIN sanction_balances sb ON sb.sanction_id = s.id
+            WHERE s.issued_at < %s
+              AND sb.active_amount > 0
+            """,
+            (run_started_at,),
+        )
+        assistant_rows = await cursor.fetchall() or []
+
+        relieved: List[Dict[str, Any]] = []
+        for row in assistant_rows:
+            assistant_id = int(row["assistant_id"])
+            if assistant_filter is not None and assistant_id not in assistant_filter:
+                continue
+            day_status = await self._get_assistant_day_status_locked(
+                cursor,
+                assistant_id=assistant_id,
+                work_date=basis_date,
+            )
+
+            # Check-line relief: independent from financial line.
+            if int(day_status.get("streak_check_days") or 0) >= int(policy.get("check_relief_min_streak_days") or 2):
+                candidate = await self._active_sanction_candidate_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    kind="check",
+                    run_started_at=run_started_at,
+                    basis_date=basis_date,
+                )
+                if candidate and float(candidate.get("active_amount") or 0) > 0:
+                    amount = min(1.0, float(candidate.get("active_amount") or 0))
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistant_sanction_reliefs (
+                            sanction_id, amount, relieved_at, basis_date, relief_type
+                        )
+                        VALUES (%s, %s, %s, %s, 'default')
+                        """,
+                        (candidate["sanction_id"], amount, run_started_at, basis_date),
+                    )
+                    relieved.append(
+                        {
+                            "assistant_id": assistant_id,
+                            "kind": "check",
+                            "sanction_id": int(candidate["sanction_id"]),
+                            "amount": amount,
+                        }
+                    )
+
+            # Financial line: point first, percent only if point unavailable.
+            point_candidate = None
+            if int(day_status.get("streak_point_days") or 0) >= int(policy.get("point_relief_min_streak_days") or 2):
+                point_candidate = await self._active_sanction_candidate_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    kind="point",
+                    run_started_at=run_started_at,
+                    basis_date=basis_date,
+                )
+                if point_candidate and float(point_candidate.get("active_amount") or 0) > 0:
+                    amount = min(1.0, float(point_candidate.get("active_amount") or 0))
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistant_sanction_reliefs (
+                            sanction_id, amount, relieved_at, basis_date, relief_type
+                        )
+                        VALUES (%s, %s, %s, %s, 'default')
+                        """,
+                        (point_candidate["sanction_id"], amount, run_started_at, basis_date),
+                    )
+                    relieved.append(
+                        {
+                            "assistant_id": assistant_id,
+                            "kind": "point",
+                            "sanction_id": int(point_candidate["sanction_id"]),
+                            "amount": amount,
+                        }
+                    )
+                    continue
+
+            if int(day_status.get("streak_percent_days") or 0) >= int(policy.get("percent_relief_min_streak_days") or 2):
+                percent_candidate = await self._active_sanction_candidate_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    kind="percent",
+                    run_started_at=run_started_at,
+                    basis_date=basis_date,
+                )
+                if percent_candidate and float(percent_candidate.get("active_amount") or 0) > 0:
+                    amount = min(
+                        float(policy.get("percent_relief_step_amount") or 3),
+                        float(percent_candidate.get("active_amount") or 0),
+                    )
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistant_sanction_reliefs (
+                            sanction_id, amount, relieved_at, basis_date, relief_type
+                        )
+                        VALUES (%s, %s, %s, %s, 'default')
+                        """,
+                        (percent_candidate["sanction_id"], amount, run_started_at, basis_date),
+                    )
+                    relieved.append(
+                        {
+                            "assistant_id": assistant_id,
+                            "kind": "percent",
+                            "sanction_id": int(percent_candidate["sanction_id"]),
+                            "amount": amount,
+                        }
+                    )
+
+        return {"relieved": relieved}
+
+    async def _apply_month_end_check_reset_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+        run_started_at: datetime,
+        assistant_filter: Optional[Set[int]] = None,
+    ) -> Dict[str, Any]:
+        next_day = basis_date + timedelta(days=1)
+        if next_day.month == basis_date.month:
+            return {"reset_count": 0}
+
+        month_start = self._month_start_for(basis_date)
+        await cursor.execute(
+            """
+            SELECT sb.sanction_id, sb.active_amount, s.assistant_id
+            FROM sanction_balances sb
+            JOIN assistant_sanctions s ON s.id = sb.sanction_id
+            WHERE s.kind = 'check'
+              AND s.issued_at < %s
+              AND s.basis_date >= %s
+              AND s.basis_date < DATE_ADD(%s, INTERVAL 1 MONTH)
+              AND sb.active_amount > 0
+            """,
+            (run_started_at, month_start, month_start),
+        )
+        rows = await cursor.fetchall() or []
+        if assistant_filter is not None:
+            rows = [
+                row
+                for row in rows
+                if int(row.get("assistant_id") or 0) in assistant_filter
+            ]
+        for row in rows:
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanction_reliefs (
+                    sanction_id, amount, relieved_at, basis_date, relief_type
+                )
+                VALUES (%s, %s, %s, %s, 'month_reset')
+                """,
+                (row["sanction_id"], float(row["active_amount"] or 0), run_started_at, basis_date),
+            )
+        return {"reset_count": len(rows)}
+
+    @db_retry()
+    async def get_monthly_sanction_policy(self, month_start: date) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                row = await self._ensure_monthly_policy_row(cursor, month_start)
+                await conn.commit()
+                return row
+
+    @db_retry()
+    async def get_current_sanction_policy(self) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                row = dict(await self._ensure_current_policy_row(cursor))
+                await conn.commit()
+                row.pop("month_start", None)
+                return row
+
+    @db_retry()
+    async def upsert_monthly_sanction_policy(self, month_start: date, payload: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_fields = {
+            "check_cycle_size",
+            "check_immunity_hours_per_day",
+            "point_immunity_hours_per_day",
+            "percent_immunity_hours_per_day",
+            "check_relief_hours_per_day",
+            "point_relief_hours_per_day",
+            "percent_relief_hours_per_day",
+            "check_relief_min_streak_days",
+            "point_relief_min_streak_days",
+            "percent_relief_min_streak_days",
+            "percent_relief_step_amount",
+            "daily_norm_spec",
+            "daily_norm_complaints",
+            "daily_norm_mchat",
+        }
+        data = {key: value for key, value in payload.items() if key in allowed_fields}
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_monthly_policy_row(cursor, month_start)
+                if data:
+                    set_sql = ", ".join(f"{field} = %s" for field in data.keys())
+                    await cursor.execute(
+                        f"UPDATE monthly_sanction_settings SET {set_sql} WHERE month_start = %s",
+                        tuple(data.values()) + (month_start,),
+                    )
+                await conn.commit()
+                return await self.get_monthly_sanction_policy(month_start)
+
+    @db_retry()
+    async def upsert_current_sanction_policy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        allowed_fields = {
+            "check_cycle_size",
+            "check_immunity_hours_per_day",
+            "point_immunity_hours_per_day",
+            "percent_immunity_hours_per_day",
+            "check_relief_hours_per_day",
+            "point_relief_hours_per_day",
+            "percent_relief_hours_per_day",
+            "check_relief_min_streak_days",
+            "point_relief_min_streak_days",
+            "percent_relief_min_streak_days",
+            "percent_relief_step_amount",
+            "daily_norm_spec",
+            "daily_norm_complaints",
+            "daily_norm_mchat",
+        }
+        data = {key: value for key, value in payload.items() if key in allowed_fields}
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_current_policy_row(cursor)
+                if data:
+                    set_sql = ", ".join(f"{field} = %s" for field in data.keys())
+                    await cursor.execute(
+                        f"UPDATE monthly_sanction_settings SET {set_sql} WHERE month_start = %s",
+                        tuple(data.values()) + (CURRENT_SANCTION_POLICY_MONTH,),
+                    )
+                await conn.commit()
+        return await self.get_current_sanction_policy()
+
+    @db_retry()
+    async def get_monthly_check_cycle_rules(self, month_start: date) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_monthly_policy_row(cursor, month_start)
+                await cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        month_start,
+                        range_start AS cycle_from,
+                        range_end AS cycle_to,
+                        penalty_kind AS sanction_kind,
+                        penalty_amount AS sanction_amount
+                    FROM monthly_check_rules
+                    WHERE month_start = %s
+                    ORDER BY range_start ASC, COALESCE(range_end, 4294967295) ASC, id ASC
+                    """,
+                    (month_start,),
+                )
+                rows = await cursor.fetchall() or []
+                await conn.commit()
+                return rows
+
+    @db_retry()
+    async def replace_monthly_check_cycle_rules(
+        self,
+        month_start: date,
+        rules: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not rules:
+            raise ValueError("Нужно задать хотя бы одно правило галок")
+        normalized_rules: List[Dict[str, Any]] = []
+        for rule in rules:
+            cycle_from = int(rule["cycle_from"])
+            raw_cycle_to = rule.get("cycle_to")
+            cycle_to = int(raw_cycle_to) if raw_cycle_to is not None else None
+            if cycle_to is not None and cycle_to < cycle_from:
+                raise ValueError("Диапазон правила галок задан некорректно")
+            normalized_rules.append(
+                {
+                    "cycle_from": cycle_from,
+                    "cycle_to": cycle_to,
+                    "sanction_kind": str(rule["sanction_kind"]),
+                    "sanction_amount": float(rule["sanction_amount"]),
+                }
+            )
+        sorted_rules = sorted(
+            normalized_rules,
+            key=lambda item: (
+                item["cycle_from"],
+                item["cycle_to"] if item["cycle_to"] is not None else 4294967295,
+            ),
+        )
+        for index, current in enumerate(sorted_rules):
+            current_end = (
+                int(current["cycle_to"])
+                if current["cycle_to"] is not None
+                else 4294967295
+            )
+            for other in sorted_rules[index + 1:]:
+                if other["cycle_from"] <= current_end:
+                    raise ValueError("Диапазоны правил галок не должны пересекаться")
+                break
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_monthly_policy_row(cursor, month_start)
+                await cursor.execute(
+                    "DELETE FROM monthly_check_rules WHERE month_start = %s",
+                    (month_start,),
+                )
+                for rule in normalized_rules:
+                    await cursor.execute(
+                        """
+                        INSERT INTO monthly_check_rules (
+                            month_start, range_start, range_end, penalty_kind, penalty_amount
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            month_start,
+                            int(rule["cycle_from"]),
+                            int(rule["cycle_to"]) if rule["cycle_to"] is not None else None,
+                            str(rule["sanction_kind"]),
+                            float(rule["sanction_amount"]),
+                        ),
+                    )
+                await conn.commit()
+        return await self.get_monthly_check_cycle_rules(month_start)
+
+    @db_retry()
+    async def get_current_check_cycle_rules(self) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_current_policy_row(cursor)
+                await cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        range_start AS cycle_from,
+                        range_end AS cycle_to,
+                        penalty_kind AS sanction_kind,
+                        penalty_amount AS sanction_amount
+                    FROM monthly_check_rules
+                    WHERE month_start = %s
+                    ORDER BY range_start ASC, COALESCE(range_end, 4294967295) ASC, id ASC
+                    """,
+                    (CURRENT_SANCTION_POLICY_MONTH,),
+                )
+                rows = await cursor.fetchall() or []
+                await conn.commit()
+                return rows
+
+    @db_retry()
+    async def replace_current_check_cycle_rules(
+        self,
+        rules: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not rules:
+            raise ValueError("Нужно задать хотя бы одно правило галок")
+        normalized_rules: List[Dict[str, Any]] = []
+        for rule in rules:
+            cycle_from = int(rule["cycle_from"])
+            raw_cycle_to = rule.get("cycle_to")
+            cycle_to = int(raw_cycle_to) if raw_cycle_to is not None else None
+            if cycle_to is not None and cycle_to < cycle_from:
+                raise ValueError("Диапазон правила галок задан некорректно")
+            normalized_rules.append(
+                {
+                    "cycle_from": cycle_from,
+                    "cycle_to": cycle_to,
+                    "sanction_kind": str(rule["sanction_kind"]),
+                    "sanction_amount": float(rule["sanction_amount"]),
+                }
+            )
+        sorted_rules = sorted(
+            normalized_rules,
+            key=lambda item: (
+                item["cycle_from"],
+                item["cycle_to"] if item["cycle_to"] is not None else 4294967295,
+            ),
+        )
+        for index, current in enumerate(sorted_rules):
+            current_end = (
+                int(current["cycle_to"])
+                if current["cycle_to"] is not None
+                else 4294967295
+            )
+            for other in sorted_rules[index + 1:]:
+                if other["cycle_from"] <= current_end:
+                    raise ValueError("Диапазоны правил галок не должны пересекаться")
+                break
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await self._ensure_current_policy_row(cursor)
+                await cursor.execute(
+                    "DELETE FROM monthly_check_rules WHERE month_start = %s",
+                    (CURRENT_SANCTION_POLICY_MONTH,),
+                )
+                for rule in normalized_rules:
+                    await cursor.execute(
+                        """
+                        INSERT INTO monthly_check_rules (
+                            month_start, range_start, range_end, penalty_kind, penalty_amount
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            CURRENT_SANCTION_POLICY_MONTH,
+                            int(rule["cycle_from"]),
+                            int(rule["cycle_to"]) if rule["cycle_to"] is not None else None,
+                            str(rule["sanction_kind"]),
+                            float(rule["sanction_amount"]),
+                        ),
+                    )
+                await conn.commit()
+        return await self.get_current_check_cycle_rules()
+
+    @db_retry()
+    async def upsert_assistant_day_point_adjustment(
+        self,
+        *,
+        assistant_id: int,
+        work_date: date,
+        delta_points: float,
+    ) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_day_point_adjustments (assistant_id, work_date, delta_points)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        delta_points = VALUES(delta_points),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (assistant_id, work_date, round(float(delta_points), 4)),
+                )
+                await cursor.execute(
+                    """
+                    SELECT assistant_id, work_date, delta_points, updated_at
+                    FROM assistant_day_point_adjustments
+                    WHERE assistant_id = %s AND work_date = %s
+                    """,
+                    (assistant_id, work_date),
+                )
+                row = await cursor.fetchone() or {}
+                await conn.commit()
+                return row
+
+    @db_retry()
+    async def upsert_assistant_day_mchat(
+        self,
+        *,
+        assistant_id: int,
+        work_date: date,
+        mchat_count: int,
+    ) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_day_mchat (assistant_id, work_date, mchat_count)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        mchat_count = VALUES(mchat_count),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (assistant_id, work_date, max(int(mchat_count), 0)),
+                )
+                await cursor.execute(
+                    """
+                    SELECT assistant_id, work_date, mchat_count, updated_at
+                    FROM assistant_day_mchat
+                    WHERE assistant_id = %s AND work_date = %s
+                    """,
+                    (assistant_id, work_date),
+                )
+                row = await cursor.fetchone() or {}
+                await conn.commit()
+                return row
+
+    @db_retry()
+    async def get_assistant_day_status(
+        self,
+        *,
+        assistant_id: int,
+        work_date: date,
+    ) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                status = await self._get_assistant_day_status_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    work_date=work_date,
+                )
+                await conn.commit()
+                return status
+
+    @db_retry()
+    async def get_assistant_sanctions_summary(
+        self,
+        *,
+        assistant_id: int,
+        as_of_date: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        target_date = as_of_date or datetime.now(timezone(timedelta(hours=3))).date()
+        next_day = datetime.combine(target_date + timedelta(days=1), datetime.min.time())
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT
+                        kind,
+                        ROUND(SUM(active_amount), 4) AS amount
+                    FROM (
+                        SELECT
+                            s.id,
+                            s.kind,
+                            GREATEST(
+                                ROUND(
+                                    s.amount_total - COALESCE(SUM(sr.amount), 0),
+                                    4
+                                ),
+                                0
+                            ) AS active_amount
+                        FROM assistant_sanctions s
+                        LEFT JOIN assistant_sanction_reliefs sr
+                          ON sr.sanction_id = s.id
+                         AND sr.relieved_at < %s
+                        WHERE s.assistant_id = %s
+                          AND s.issued_at < %s
+                        GROUP BY s.id, s.kind, s.amount_total
+                    ) x
+                    GROUP BY kind
+                    """,
+                    (next_day, assistant_id, next_day),
+                )
+                rows = await cursor.fetchall() or []
+                summary = {
+                    "assistant_id": assistant_id,
+                    "as_of_date": target_date,
+                    "check": 0.0,
+                    "point": 0.0,
+                    "percent": 0.0,
+                    "oral": 0.0,
+                    "strict": 0.0,
+                }
+                for row in rows:
+                    kind = str(row.get("kind"))
+                    summary[kind] = round(float(row.get("amount") or 0), 4)
+                summary["warnings_units"] = int(summary["strict"] * 2 + summary["oral"])
+                summary.update(self._warnings_breakdown(summary["warnings_units"]))
+                return summary
+
+    @db_retry()
+    async def get_assistant_active_sanctions(
+        self,
+        assistant_id: int,
+    ) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT
+                        sb.sanction_id,
+                        sb.assistant_id,
+                        sb.kind,
+                        sb.amount_total,
+                        sb.relieved_amount,
+                        sb.active_amount,
+                        sb.auto_relief_date,
+                        sb.issued_at,
+                        CASE
+                            WHEN sb.source_type = 'queued_batch' AND op.queued_at IS NOT NULL
+                                THEN op.queued_at
+                            ELSE sb.issued_at
+                        END AS display_issued_at,
+                        sb.source_type,
+                        sb.source_batch_id,
+                        sb.basis_date,
+                        sb.policy_month,
+                        sb.cycle_no
+                    FROM sanction_balances sb
+                    LEFT JOIN sanction_operations op
+                      ON op.id = sb.source_batch_id
+                    WHERE sb.assistant_id = %s
+                      AND sb.active_amount > 0
+                    ORDER BY sb.issued_at DESC, sb.sanction_id DESC
+                    """,
+                    (assistant_id,),
+                )
+                assistant_sanctions = await cursor.fetchall() or []
+                result: List[Dict[str, Any]] = []
+                for sanction in assistant_sanctions:
+                    sanction_id = int(sanction["sanction_id"])
+                    workoff_items = await self._get_sanction_workoff_items_locked(
+                        cursor,
+                        sanction_id=sanction_id,
+                    )
+                    progress_items = await self._get_workoff_progress_items_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        workoff_items=workoff_items,
+                    ) if workoff_items else []
+                    result.append(
+                        {
+                            **{
+                                **dict(sanction),
+                                "operation_id": sanction.get("source_batch_id"),
+                                "settings_month": sanction.get("policy_month"),
+                                "check_rule_hit_no": sanction.get("cycle_no"),
+                            },
+                            "workoff_items": workoff_items,
+                            "workoff_progress_summary": {
+                                "has_workoff": bool(workoff_items),
+                                "total_items": len(progress_items),
+                                "completed_items": sum(1 for item in progress_items if bool(item.get("is_completed"))),
+                                "items": progress_items,
+                            },
+                        }
+                    )
+                return result
+
+    @db_retry()
+    async def get_sanction_workoff_progress(self, sanction_id: int) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT *
+                    FROM assistant_sanctions
+                    WHERE id = %s
+                    """,
+                    (int(sanction_id),),
+                )
+                sanction = await cursor.fetchone()
+                if not sanction:
+                    return None
+
+                workoff_items = await self._get_sanction_workoff_items_locked(
+                    cursor,
+                    sanction_id=int(sanction_id),
+                )
+                if not workoff_items:
+                    return {
+                        "sanction_id": sanction_id,
+                        "has_workoff": False,
+                    }
+
+                assistant_id = int(sanction["assistant_id"])
+                progress_items = await self._get_workoff_progress_items_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    workoff_items=workoff_items,
+                )
+
+                return {
+                    "sanction_id": sanction_id,
+                    "has_workoff": True,
+                    "items": progress_items,
+                    "completed_items": sum(1 for item in progress_items if bool(item.get("is_completed"))),
+                    "total_items": len(progress_items),
+                }
+
+    @db_retry()
+    async def create_manual_sanction(
+        self,
+        *,
+        assistant_id: int,
+        kind: str,
+        amount: float,
+        auto_relief_date: Optional[date],
+        basis_date: Optional[date],
+        workoff_items: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        basis = basis_date or datetime.now(timezone(timedelta(hours=3))).date()
+        month_start = self._month_start_for(basis)
+        normalized_amount, normalized_auto_relief_date = self._normalize_runtime_sanction(
+            kind=kind,
+            amount=amount,
+            auto_relief_date=auto_relief_date,
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                sanction_id = await self._insert_sanction_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    kind=kind,
+                    amount_total=normalized_amount,
+                    auto_relief_date=normalized_auto_relief_date,
+                    source_type="manual",
+                    basis_date=basis,
+                    policy_month=month_start,
+                )
+                created_workoff_items = await self._create_sanction_workoff_items_locked(
+                    cursor,
+                    sanction_id=sanction_id,
+                    workoff_items=workoff_items or [],
+                )
+                if created_workoff_items:
+                    await self._sync_sanction_workoff_summary_locked(
+                        cursor,
+                        sanction_id=sanction_id,
+                        workoff_items=created_workoff_items,
+                    )
+                cycle_result = None
+                if kind == "check":
+                    cycle_result = await self._apply_check_cycle_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        basis_date=basis,
+                    )
+                await conn.commit()
+                return {
+                    "sanction_id": sanction_id,
+                    "cycle_result": cycle_result,
+                }
+
+    @db_retry()
+    async def add_sanction_relief(
+        self,
+        *,
+        sanction_id: int,
+        amount: float,
+        relief_type: str,
+        basis_date: Optional[date],
+    ) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT sb.active_amount, s.kind
+                    FROM sanction_balances sb
+                    JOIN assistant_sanctions s ON s.id = sb.sanction_id
+                    WHERE sb.sanction_id = %s
+                    """,
+                    (int(sanction_id),),
+                )
+                balance = await cursor.fetchone()
+                if not balance:
+                    return None
+                active_amount = float(balance.get("active_amount") or 0)
+                if active_amount <= 0:
+                    return None
+                kind = str(balance.get("kind") or "")
+                relief_amount = round(float(amount), 4)
+                if kind in {"oral", "strict"} and abs(relief_amount - 1.0) > 1e-9:
+                    raise ValueError("Для устного и строгого допускается только полное снятие на 1")
+                if relief_amount <= 0 or relief_amount - active_amount > 1e-9:
+                    raise ValueError("Нельзя снять больше активного остатка санкции")
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_sanction_reliefs (
+                        sanction_id, amount, relieved_at, basis_date, relief_type
+                    )
+                    VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s)
+                    """,
+                    (int(sanction_id), relief_amount, basis_date, relief_type),
+                )
+                relief_id = int(cursor.lastrowid)
+                await conn.commit()
+                return {
+                    "relief_id": relief_id,
+                    "sanction_id": sanction_id,
+                    "amount": relief_amount,
+                    "relief_type": relief_type,
+                    "basis_date": basis_date,
+                }
+
+    @db_retry()
+    async def replace_sanction(
+        self,
+        *,
+        sanction_id: int,
+        new_kind: str,
+        new_amount: float,
+        new_auto_relief_date: Optional[date],
+        basis_date: Optional[date],
+        workoff_items: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT * FROM assistant_sanctions WHERE id = %s",
+                    (int(sanction_id),),
+                )
+                existing = await cursor.fetchone()
+                if not existing:
+                    return None
+                await self.add_sanction_relief(
+                    sanction_id=sanction_id,
+                    amount=float(existing.get("amount_total") or 0),
+                    relief_type="replacement",
+                    basis_date=basis_date,
+                )
+                created = await self.create_manual_sanction(
+                    assistant_id=int(existing["assistant_id"]),
+                    kind=new_kind,
+                    amount=new_amount,
+                    auto_relief_date=new_auto_relief_date,
+                    basis_date=basis_date or existing.get("basis_date"),
+                    workoff_items=workoff_items or [],
+                )
+                await cursor.execute(
+                    "UPDATE assistant_sanctions SET replaced_by_sanction_id = %s WHERE id = %s",
+                    (created["sanction_id"], int(sanction_id)),
+                )
+                await conn.commit()
+                return {
+                    "replaced_sanction_id": sanction_id,
+                    "new_sanction_id": created["sanction_id"],
+                    "cycle_result": created.get("cycle_result"),
+                }
+
+    async def _list_active_assistants_with_live_status_locked(self, cursor) -> List[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            SELECT
+                a.pr_id AS assistant_id,
+                CASE WHEN ss.id IS NULL THEN FALSE ELSE TRUE END AS live_in_spec
+            FROM assistants a
+            LEFT JOIN spec_sessions ss
+              ON ss.pr_id = a.pr_id
+             AND ss.ended_at IS NULL
+             AND ss.deleted_at IS NULL
+            WHERE a.dismissed_at IS NULL
+            ORDER BY a.pr_id ASC
+            """
+        )
+        return await cursor.fetchall() or []
+
+    async def _rebuild_batch_snapshot_locked(
+        self,
+        cursor,
+        *,
+        batch_id: int,
+        explicit_assistant_ids: Optional[List[int]] = None,
+    ) -> None:
+        await cursor.execute(
+            """
+            SELECT
+                id,
+                operation_date AS basis_date,
+                penalty_kind AS sanction_kind,
+                penalty_amount AS sanction_amount,
+                recipient_mode AS audience_mode,
+                status
+            FROM sanction_operations
+            WHERE id = %s
+            """,
+            (batch_id,),
+        )
+        batch = await cursor.fetchone()
+        if not batch:
+            raise ValueError("Operation not found")
+
+        audience_mode = str(batch.get("audience_mode"))
+        assistants = await self._list_active_assistants_with_live_status_locked(cursor)
+        assistant_status_map = {
+            int(row["assistant_id"]): bool(row.get("live_in_spec"))
+            for row in assistants
+        }
+
+        if explicit_assistant_ids is not None:
+            selected_ids = list(dict.fromkeys(int(value) for value in explicit_assistant_ids))
+        else:
+            selected_ids: List[int] = []
+            for assistant_id, live_in_spec in assistant_status_map.items():
+                if audience_mode == "all_active":
+                    selected_ids.append(assistant_id)
+                elif audience_mode == "live_without_active_session" and not live_in_spec:
+                    selected_ids.append(assistant_id)
+
+        await cursor.execute(
+            "DELETE FROM sanction_operation_members WHERE operation_id = %s",
+            (batch_id,),
+        )
+
+        for assistant_id in selected_ids:
+            await cursor.execute(
+                """
+                INSERT INTO sanction_operation_members (
+                    operation_id,
+                    assistant_id,
+                    issue_status,
+                    issue_reason,
+                    issued_sanction_id
+                )
+                VALUES (%s, %s, 'pending', NULL, NULL)
+                """,
+                (batch_id, assistant_id),
+            )
+
+    @db_retry()
+    async def create_queued_sanction_batch(
+        self,
+        *,
+        basis_date: date,
+        created_by_id: Optional[int],
+        sanction_kind: str,
+        sanction_amount: float,
+        auto_relief_date: Optional[date],
+        audience_mode: str,
+        assistant_ids: Optional[List[int]],
+        workoff_items: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        assistant_ids = [int(v) for v in (assistant_ids or [])]
+        normalized_amount, normalized_auto_relief_date = self._normalize_runtime_sanction(
+            kind=sanction_kind,
+            amount=sanction_amount,
+            auto_relief_date=auto_relief_date,
+        )
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    INSERT INTO sanction_operations (
+                        operation_date,
+                        created_at,
+                        created_by_id,
+                        penalty_kind,
+                        penalty_amount,
+                        auto_relief_date,
+                        recipient_mode,
+                        status,
+                        queued_at
+                    )
+                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, 'queued', CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        basis_date,
+                        created_by_id,
+                        sanction_kind,
+                        normalized_amount,
+                        normalized_auto_relief_date,
+                        audience_mode,
+                    ),
+                )
+                batch_id = int(cursor.lastrowid)
+                await self._rebuild_batch_snapshot_locked(
+                    cursor,
+                    batch_id=batch_id,
+                    explicit_assistant_ids=assistant_ids if assistant_ids else None,
+                )
+                await self._replace_batch_workoff_items_locked(
+                    cursor,
+                    batch_id=batch_id,
+                    workoff_items=workoff_items or [],
+                )
+
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def update_queued_sanction_batch(
+        self,
+        *,
+        batch_id: int,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        allowed_fields = {
+            "sanction_kind",
+            "sanction_amount",
+            "auto_relief_date",
+            "audience_mode",
+        }
+        data = {key: value for key, value in payload.items() if key in allowed_fields}
+        workoff_items = payload.get("workoff_items")
+        assistant_ids = payload.get("assistant_ids")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT status, penalty_kind, penalty_amount, auto_relief_date
+                    FROM sanction_operations
+                    WHERE id = %s
+                    """,
+                    (batch_id,),
+                )
+                existing = await cursor.fetchone()
+                if not existing:
+                    return None
+                if existing.get("status") != "queued":
+                    raise ValueError("Operation cannot be edited in current status")
+                if any(
+                    field in data
+                    for field in ("sanction_kind", "sanction_amount", "auto_relief_date")
+                ):
+                    effective_kind = str(
+                        data.get("sanction_kind") or existing.get("penalty_kind")
+                    )
+                    normalized_amount, normalized_auto_relief_date = self._normalize_runtime_sanction(
+                        kind=effective_kind,
+                        amount=float(
+                            data.get("sanction_amount")
+                            if data.get("sanction_amount") is not None
+                            else existing.get("penalty_amount") or 0
+                        ),
+                        auto_relief_date=data.get(
+                            "auto_relief_date",
+                            existing.get("auto_relief_date"),
+                        ),
+                    )
+                    data["sanction_kind"] = effective_kind
+                    data["sanction_amount"] = normalized_amount
+                    data["auto_relief_date"] = normalized_auto_relief_date
+                column_map = {
+                    "sanction_kind": "penalty_kind",
+                    "sanction_amount": "penalty_amount",
+                    "auto_relief_date": "auto_relief_date",
+                    "audience_mode": "recipient_mode",
+                }
+                if data:
+                    set_sql = ", ".join(f"{column_map[field]} = %s" for field in data.keys())
+                    await cursor.execute(
+                        f"UPDATE sanction_operations SET {set_sql} WHERE id = %s",
+                        tuple(data.values()) + (batch_id,),
+                    )
+                if workoff_items is not None:
+                    await self._replace_batch_workoff_items_locked(
+                        cursor,
+                        batch_id=batch_id,
+                        workoff_items=workoff_items,
+                    )
+                if assistant_ids is not None:
+                    await self._rebuild_batch_snapshot_locked(
+                        cursor,
+                        batch_id=batch_id,
+                        explicit_assistant_ids=[int(v) for v in assistant_ids],
+                    )
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def add_queued_batch_member(
+        self,
+        *,
+        batch_id: int,
+        assistant_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT status FROM sanction_operations WHERE id = %s",
+                    (batch_id,),
+                )
+                batch = await cursor.fetchone()
+                if not batch:
+                    return None
+                if batch.get("status") != "queued":
+                    raise ValueError("Operation cannot be edited in current status")
+                await cursor.execute(
+                    """
+                    SELECT 1
+                    FROM sanction_operation_members
+                    WHERE operation_id = %s AND assistant_id = %s
+                    """,
+                    (batch_id, assistant_id),
+                )
+                if await cursor.fetchone():
+                    raise ValueError("Ассистент уже добавлен в эту выдачу")
+                await cursor.execute(
+                    """
+                    INSERT INTO sanction_operation_members (
+                        operation_id,
+                        assistant_id,
+                        issue_status,
+                        issue_reason,
+                        issued_sanction_id
+                    )
+                    VALUES (%s, %s, 'pending', NULL, NULL)
+                    """,
+                    (batch_id, assistant_id),
+                )
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def remove_queued_batch_member(
+        self,
+        *,
+        batch_id: int,
+        assistant_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT status FROM sanction_operations WHERE id = %s",
+                    (batch_id,),
+                )
+                batch = await cursor.fetchone()
+                if not batch:
+                    return None
+                if batch.get("status") != "queued":
+                    raise ValueError("Operation cannot be edited in current status")
+                await cursor.execute(
+                    """
+                    DELETE FROM sanction_operation_members
+                    WHERE operation_id = %s AND assistant_id = %s
+                    """,
+                    (batch_id, assistant_id),
+                )
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def queue_queued_sanction_batch(self, batch_id: int) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE sanction_operations
+                    SET status = 'queued', queued_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND status = 'queued'
+                    """,
+                    (batch_id,),
+                )
+                if cursor.rowcount <= 0:
+                    await cursor.execute(
+                        "SELECT id FROM sanction_operations WHERE id = %s",
+                        (batch_id,),
+                    )
+                    if not await cursor.fetchone():
+                        return None
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def cancel_queued_sanction_batch(self, batch_id: int) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT status FROM sanction_operations WHERE id = %s",
+                    (batch_id,),
+                )
+                batch = await cursor.fetchone()
+                if not batch:
+                    return None
+                if batch.get("status") != "queued":
+                    raise ValueError("Operation cannot be cancelled in current status")
+                await cursor.execute(
+                    """
+                    UPDATE sanction_operations
+                    SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND status = 'queued'
+                    """,
+                    (batch_id,),
+                )
+                await conn.commit()
+        return await self.get_queued_sanction_batch(batch_id)
+
+    @db_retry()
+    async def list_queued_sanction_batches(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                where_sql = ""
+                params: List[Any] = []
+                if status:
+                    where_sql = "WHERE b.status = %s"
+                    params.append(status)
+                else:
+                    where_sql = "WHERE b.status <> 'cancelled'"
+                await cursor.execute(
+                    f"""
+                    SELECT
+                        b.id,
+                        b.operation_date AS basis_date,
+                        b.created_at,
+                        b.created_by_id,
+                        COALESCE(created_assistant.nickname, created_user.username) AS created_by_name,
+                        b.penalty_kind AS sanction_kind,
+                        b.penalty_amount AS sanction_amount,
+                        b.auto_relief_date,
+                        b.recipient_mode AS audience_mode,
+                        b.status,
+                        b.processing_mode,
+                        b.processed_by_id,
+                        COALESCE(processed_assistant.nickname, processed_user.username) AS processed_by_name,
+                        b.queued_at,
+                        b.processed_at,
+                        b.cancelled_at,
+                        b.failure_reason,
+                        COUNT(m.assistant_id) AS members_total,
+                        COUNT(m.assistant_id) AS effective_members,
+                        SUM(CASE WHEN m.issue_status = 'issued' THEN 1 ELSE 0 END) AS issued_members,
+                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members
+                    FROM sanction_operations b
+                    LEFT JOIN sanction_operation_members m ON m.operation_id = b.id
+                    LEFT JOIN web_auth created_user ON created_user.discord_id = b.created_by_id
+                    LEFT JOIN assistants created_assistant ON created_assistant.pr_id = b.created_by_id
+                    LEFT JOIN web_auth processed_user ON processed_user.discord_id = b.processed_by_id
+                    LEFT JOIN assistants processed_assistant ON processed_assistant.pr_id = b.processed_by_id
+                    {where_sql}
+                    GROUP BY b.id
+                    ORDER BY b.created_at DESC, b.id DESC
+                    """,
+                    tuple(params),
+                )
+                return await cursor.fetchall() or []
+
+    @db_retry()
+    async def get_queued_sanction_batch(self, batch_id: int) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT
+                        b.id,
+                        b.operation_date AS basis_date,
+                        b.created_at,
+                        b.created_by_id,
+                        COALESCE(created_assistant.nickname, created_user.username) AS created_by_name,
+                        b.penalty_kind AS sanction_kind,
+                        b.penalty_amount AS sanction_amount,
+                        b.auto_relief_date,
+                        b.recipient_mode AS audience_mode,
+                        b.status,
+                        b.processing_mode,
+                        b.processed_by_id,
+                        COALESCE(processed_assistant.nickname, processed_user.username) AS processed_by_name,
+                        b.queued_at,
+                        b.processed_at,
+                        b.cancelled_at,
+                        b.failure_reason,
+                        COUNT(m.assistant_id) AS members_total,
+                        COUNT(m.assistant_id) AS effective_members,
+                        SUM(CASE WHEN m.issue_status = 'issued' THEN 1 ELSE 0 END) AS issued_members,
+                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members
+                    FROM sanction_operations b
+                    LEFT JOIN sanction_operation_members m ON m.operation_id = b.id
+                    LEFT JOIN web_auth created_user ON created_user.discord_id = b.created_by_id
+                    LEFT JOIN assistants created_assistant ON created_assistant.pr_id = b.created_by_id
+                    LEFT JOIN web_auth processed_user ON processed_user.discord_id = b.processed_by_id
+                    LEFT JOIN assistants processed_assistant ON processed_assistant.pr_id = b.processed_by_id
+                    WHERE b.id = %s
+                    GROUP BY b.id
+                    """,
+                    (batch_id,),
+                )
+                batch = await cursor.fetchone()
+                if not batch:
+                    return None
+                await cursor.execute(
+                    """
+                    SELECT
+                        m.operation_id AS batch_id,
+                        m.assistant_id,
+                        m.issue_status AS execution_status,
+                        m.issue_reason AS execution_reason,
+                        m.issued_sanction_id,
+                        a.nickname
+                    FROM sanction_operation_members m
+                    LEFT JOIN assistants a ON a.pr_id = m.assistant_id
+                    WHERE m.operation_id = %s
+                    ORDER BY a.nickname ASC, m.assistant_id ASC
+                    """,
+                    (batch_id,),
+                )
+                batch["members"] = await cursor.fetchall() or []
+                batch["workoff_items"] = await self._get_batch_workoff_items_locked(
+                    cursor,
+                    batch_id=batch_id,
+                )
+                return batch
+
+    async def _get_effective_batch_members_locked(
+        self,
+        cursor,
+        *,
+        batch_id: int,
+        assistant_filter: Optional[Set[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT *
+            FROM sanction_operation_members
+            WHERE operation_id = %s
+        """
+        params: List[Any] = [batch_id]
+        if assistant_filter:
+            placeholders = ", ".join(["%s"] * len(assistant_filter))
+            query += f" AND assistant_id IN ({placeholders})"
+            params.extend(sorted(assistant_filter))
+        query += " ORDER BY assistant_id ASC"
+        await cursor.execute(query, tuple(params))
+        return await cursor.fetchall() or []
+
+    async def _refresh_queued_batch_status_locked(self, cursor, *, batch_id: int) -> Optional[str]:
+        await cursor.execute(
+            "SELECT status FROM sanction_operations WHERE id = %s",
+            (batch_id,),
+        )
+        batch = await cursor.fetchone()
+        if not batch:
+            return None
+        current_status = str(batch.get("status") or "")
+        if current_status == "cancelled":
+            return current_status
+
+        await cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS effective_members,
+                SUM(CASE WHEN issue_status = 'pending' THEN 1 ELSE 0 END) AS pending_members,
+                SUM(CASE WHEN issue_status = 'failed' THEN 1 ELSE 0 END) AS failed_members
+            FROM sanction_operation_members
+            WHERE operation_id = %s
+            """,
+            (batch_id,),
+        )
+        counts = await cursor.fetchone() or {}
+        pending_members = int(counts.get("pending_members") or 0)
+        failed_members = int(counts.get("failed_members") or 0)
+
+        if failed_members > 0:
+            next_status = "failed"
+        elif pending_members > 0:
+            next_status = current_status if current_status in {"queued", "processing"} else "processing"
+        else:
+            next_status = "completed"
+
+        await cursor.execute(
+            """
+            UPDATE sanction_operations
+            SET status = %s,
+                processed_at = CASE
+                    WHEN %s IN ('completed', 'failed') THEN CURRENT_TIMESTAMP
+                    ELSE processed_at
+                END
+            WHERE id = %s
+            """,
+            (next_status, next_status, batch_id),
+        )
+        return next_status
+
+    async def _execute_queued_batch_locked(
+        self,
+        cursor,
+        *,
+        batch: Dict[str, Any],
+        run_started_at: datetime,
+        ignore_immunity: bool = False,
+        assistant_filter: Optional[Set[int]] = None,
+        apply_check_cycle: bool = True,
+    ) -> Dict[str, Any]:
+        batch_id = int(batch["id"])
+        members = await self._get_effective_batch_members_locked(
+            cursor,
+            batch_id=batch_id,
+            assistant_filter=assistant_filter,
+        )
+        batch_workoff_items = await self._get_batch_workoff_items_locked(
+            cursor,
+            batch_id=batch_id,
+        )
+
+        batch_result = {
+            "batch_id": batch_id,
+            "issued": [],
+            "skipped_immunity": [],
+            "failed": [],
+            "derived": [],
+        }
+
+        for member in members:
+            assistant_id = int(member["assistant_id"])
+            try:
+                day_status = await self._get_assistant_day_status_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    work_date=batch["basis_date"],
+                )
+                kind = str(batch["sanction_kind"])
+                immunity = False
+                if not ignore_immunity:
+                    immunity = (
+                        (kind == "check" and day_status["check_immunity"])
+                        or (kind == "point" and day_status["point_immunity"])
+                        or (kind == "percent" and day_status["percent_immunity"])
+                    )
+                if immunity:
+                    await cursor.execute(
+                        """
+                        UPDATE sanction_operation_members
+                        SET issue_status = 'skipped_immunity',
+                            issue_reason = %s,
+                            issued_sanction_id = NULL
+                        WHERE operation_id = %s AND assistant_id = %s
+                        """,
+                        ("Skipped by day immunity", batch_id, assistant_id),
+                    )
+                    batch_result["skipped_immunity"].append(assistant_id)
+                    continue
+
+                sanction_id = await self._insert_sanction_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    kind=kind,
+                    amount_total=float(batch["sanction_amount"] or 0),
+                    auto_relief_date=batch.get("auto_relief_date"),
+                    issued_at=run_started_at,
+                    source_type="queued_batch",
+                    source_batch_id=batch_id,
+                    basis_date=batch["basis_date"],
+                    policy_month=self._month_start_for(batch["basis_date"]),
+                )
+                assistant_sanction_workoffs = await self._create_sanction_workoff_items_locked(
+                    cursor,
+                    sanction_id=sanction_id,
+                    workoff_items=batch_workoff_items,
+                )
+                if assistant_sanction_workoffs:
+                    await self._sync_sanction_workoff_summary_locked(
+                        cursor,
+                        sanction_id=sanction_id,
+                        workoff_items=assistant_sanction_workoffs,
+                    )
+                await cursor.execute(
+                    """
+                    UPDATE sanction_operation_members
+                    SET issue_status = 'issued',
+                        issue_reason = NULL,
+                        issued_sanction_id = %s
+                    WHERE operation_id = %s AND assistant_id = %s
+                    """,
+                    (sanction_id, batch_id, assistant_id),
+                )
+                batch_result["issued"].append(
+                    {"assistant_id": assistant_id, "sanction_id": sanction_id}
+                )
+                if kind == "check" and apply_check_cycle:
+                    cycle_result = await self._apply_check_cycle_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        basis_date=batch["basis_date"],
+                        source_batch_id=batch_id,
+                        run_timestamp=run_started_at,
+                    )
+                    if cycle_result:
+                        batch_result["derived"].append(cycle_result)
+            except Exception as exc:
+                await cursor.execute(
+                    """
+                    UPDATE sanction_operation_members
+                    SET issue_status = 'failed',
+                        issue_reason = %s,
+                        issued_sanction_id = NULL
+                    WHERE operation_id = %s AND assistant_id = %s
+                    """,
+                    (str(exc)[:255], batch_id, assistant_id),
+                )
+                batch_result["failed"].append(
+                    {"assistant_id": assistant_id, "error": str(exc)}
+                )
+
+        return batch_result
+
+    async def _claim_operation_for_processing_locked(
+        self,
+        cursor,
+        *,
+        operation_id: int,
+        processing_mode: str,
+        processed_by_id: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            UPDATE sanction_operations
+            SET status = 'processing',
+                processing_mode = %s,
+                processed_by_id = %s
+            WHERE id = %s
+              AND status = 'queued'
+            """,
+            (processing_mode, processed_by_id, operation_id),
+        )
+        if cursor.rowcount <= 0:
+            return None
+        await cursor.execute(
+            """
+            SELECT
+                id,
+                operation_date AS basis_date,
+                penalty_kind AS sanction_kind,
+                penalty_amount AS sanction_amount,
+                auto_relief_date,
+                recipient_mode AS audience_mode,
+                status,
+                processing_mode,
+                processed_by_id,
+                queued_at,
+                processed_at,
+                failure_reason
+            FROM sanction_operations
+            WHERE id = %s
+            """,
+            (operation_id,),
+        )
+        return await cursor.fetchone()
+
+    async def _process_single_sanction_operation_locked(
+        self,
+        cursor,
+        *,
+        operation_id: int,
+        run_started_at: datetime,
+        ignore_immunity: bool,
+        processing_mode: str,
+        processed_by_id: Optional[int] = None,
+        assistant_filter: Optional[Set[int]] = None,
+        apply_check_cycle: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        batch = await self._claim_operation_for_processing_locked(
+            cursor,
+            operation_id=operation_id,
+            processing_mode=processing_mode,
+            processed_by_id=processed_by_id,
+        )
+        if not batch:
+            return None
+        batch_result = await self._execute_queued_batch_locked(
+            cursor,
+            batch=batch,
+            run_started_at=run_started_at,
+            ignore_immunity=ignore_immunity,
+            assistant_filter=assistant_filter,
+            apply_check_cycle=apply_check_cycle,
+        )
+        new_status = await self._refresh_queued_batch_status_locked(
+            cursor,
+            batch_id=operation_id,
+        )
+        await cursor.execute(
+            """
+            UPDATE sanction_operations
+            SET failure_reason = %s
+            WHERE id = %s
+            """,
+            (
+                json.dumps(batch_result["failed"], default=str)
+                if batch_result["failed"]
+                else None,
+                operation_id,
+            ),
+        )
+        batch_result["status"] = new_status
+        return batch_result
+
+    async def _replay_check_cycles_for_day_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        basis_date: date,
+        run_started_at: datetime,
+    ) -> List[Dict[str, Any]]:
+        await cursor.execute(
+            """
+            SELECT id, operation_id AS source_batch_id
+            FROM assistant_sanctions
+            WHERE assistant_id = %s
+              AND kind = 'check'
+              AND basis_date = %s
+            ORDER BY issued_at ASC, id ASC
+            """,
+            (assistant_id, basis_date),
+        )
+        check_rows = await cursor.fetchall() or []
+        derived: List[Dict[str, Any]] = []
+        for row in check_rows:
+            cycle_result = await self._apply_check_cycle_locked(
+                cursor,
+                assistant_id=assistant_id,
+                basis_date=basis_date,
+                source_batch_id=row.get("source_batch_id"),
+                run_timestamp=run_started_at,
+            )
+            if cycle_result:
+                derived.append(cycle_result)
+        return derived
+
+    async def _purge_assistant_derived_outputs_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        start_date: date,
+        end_date: date,
+    ) -> None:
+        await cursor.execute(
+            """
+            UPDATE sanction_operation_members m
+            JOIN sanction_operations b ON b.id = m.operation_id
+            SET m.issue_status = 'pending',
+                m.issue_reason = NULL,
+                m.issued_sanction_id = NULL
+            WHERE m.assistant_id = %s
+              AND b.operation_date BETWEEN %s AND %s
+              AND b.status <> 'cancelled'
+            """,
+            (assistant_id, start_date, end_date),
+        )
+
+        await cursor.execute(
+            """
+            DELETE sr
+            FROM assistant_sanction_reliefs sr
+            JOIN assistant_sanctions s ON s.id = sr.sanction_id
+            WHERE s.assistant_id = %s
+              AND sr.basis_date BETWEEN %s AND %s
+              AND sr.relief_type IN ('default', 'cycle_reset', 'month_reset', 'auto_expire')
+            """,
+            (assistant_id, start_date, end_date),
+        )
+
+        await cursor.execute(
+            """
+            SELECT id
+            FROM assistant_sanctions
+            WHERE assistant_id = %s
+              AND basis_date BETWEEN %s AND %s
+              AND source_type IN ('queued_batch', 'check_cycle')
+            """,
+            (assistant_id, start_date, end_date),
+        )
+        sanction_rows = await cursor.fetchall() or []
+        sanction_ids = [int(row["id"]) for row in sanction_rows]
+        if sanction_ids:
+            placeholders = ", ".join(["%s"] * len(sanction_ids))
+            await cursor.execute(
+                f"DELETE FROM assistant_sanction_reliefs WHERE sanction_id IN ({placeholders})",
+                tuple(sanction_ids),
+            )
+            await cursor.execute(
+                f"DELETE FROM assistant_sanctions WHERE id IN ({placeholders})",
+                tuple(sanction_ids),
+            )
+
+    @db_retry()
+    async def process_queued_sanction_batches_for_date(self, basis_date: date) -> Dict[str, Any]:
+        run_started_at = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
+        processed_batches: List[Dict[str, Any]] = []
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                acquired = await self._acquire_named_lock(
+                    cursor,
+                    lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                )
+                if not acquired:
+                    raise RuntimeError("Timed out acquiring sanctions processing lock")
+                try:
+                    await cursor.execute(
+                        """
+                        SELECT
+                            id
+                        FROM sanction_operations
+                        WHERE operation_date = %s
+                          AND status = 'queued'
+                        ORDER BY id ASC
+                        """,
+                        (basis_date,),
+                    )
+                    batches = await cursor.fetchall() or []
+
+                    for batch in batches:
+                        batch_result = await self._process_single_sanction_operation_locked(
+                            cursor,
+                            operation_id=int(batch["id"]),
+                            run_started_at=run_started_at,
+                            ignore_immunity=False,
+                            processing_mode="nightly_auto",
+                            processed_by_id=None,
+                        )
+                        if batch_result:
+                            processed_batches.append(batch_result)
+
+                    warning_auto_expiry_result = await self._apply_warning_auto_expiry_locked(
+                        cursor,
+                        current_date=run_started_at.date(),
+                        run_started_at=run_started_at,
+                    )
+                    relief_result = await self._apply_default_auto_relief_locked(
+                        cursor,
+                        basis_date=basis_date,
+                        run_started_at=run_started_at,
+                    )
+                    month_reset_result = await self._apply_month_end_check_reset_locked(
+                        cursor,
+                        basis_date=basis_date,
+                        run_started_at=run_started_at,
+                    )
+                    await conn.commit()
+                finally:
+                    await self._release_named_lock(
+                        cursor,
+                        lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                    )
+        return {
+            "basis_date": basis_date,
+            "processed_batches": processed_batches,
+            "warning_auto_expiry": warning_auto_expiry_result,
+            "default_relief": relief_result,
+            "month_reset": month_reset_result,
+        }
+
+    @db_retry()
+    async def process_sanction_operation_now(
+        self,
+        operation_id: int,
+        *,
+        requested_by_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        run_started_at = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                acquired = await self._acquire_named_lock(
+                    cursor,
+                    lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                )
+                if not acquired:
+                    raise RuntimeError("Timed out acquiring sanctions processing lock")
+                try:
+                    result = await self._process_single_sanction_operation_locked(
+                        cursor,
+                        operation_id=int(operation_id),
+                        run_started_at=run_started_at,
+                        ignore_immunity=True,
+                        processing_mode="manual_now",
+                        processed_by_id=requested_by_id,
+                    )
+                    if result is None:
+                        await cursor.execute(
+                            "SELECT status FROM sanction_operations WHERE id = %s",
+                            (int(operation_id),),
+                        )
+                        operation = await cursor.fetchone()
+                        await conn.commit()
+                        return {
+                            "operation_id": int(operation_id),
+                            "processed": False,
+                            "status": operation.get("status") if operation else None,
+                            "missing": operation is None,
+                        }
+                    await conn.commit()
+                    return {
+                        "operation_id": int(operation_id),
+                        "processed": True,
+                        **result,
+                    }
+                finally:
+                    await self._release_named_lock(
+                        cursor,
+                        lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                    )
+
+    @db_retry()
+    async def recalculate_assistant_sanction_derivations(
+        self,
+        *,
+        assistant_id: int,
+        start_date: date,
+        end_date: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        today_msk = self._current_msk_date()
+        last_closed_day = today_msk - timedelta(days=1)
+        replay_end = min(end_date or last_closed_day, last_closed_day)
+        if start_date > replay_end:
+            return {
+                "assistant_id": assistant_id,
+                "start_date": start_date,
+                "end_date": replay_end,
+                "replayed_days": [],
+                "skipped": True,
+            }
+
+        replayed_days: List[Dict[str, Any]] = []
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                acquired = await self._acquire_named_lock(
+                    cursor,
+                    lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                )
+                if not acquired:
+                    raise RuntimeError("Timed out acquiring sanctions replay lock")
+                try:
+                    await self._purge_assistant_derived_outputs_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        start_date=start_date,
+                        end_date=replay_end,
+                    )
+
+                    cursor_day = start_date
+                    while cursor_day <= replay_end:
+                        run_started_at = datetime.combine(
+                            cursor_day + timedelta(days=1),
+                            datetime.min.time(),
+                        )
+                        await cursor.execute(
+                            """
+                            SELECT
+                                id,
+                                operation_date AS basis_date,
+                                penalty_kind AS sanction_kind,
+                                penalty_amount AS sanction_amount,
+                                recipient_mode AS audience_mode,
+                                status,
+                                queued_at,
+                                processed_at,
+                                failure_reason
+                            FROM sanction_operations
+                            WHERE operation_date = %s
+                              AND status IN ('processing', 'completed', 'failed')
+                            ORDER BY id ASC
+                            """,
+                            (cursor_day,),
+                        )
+                        batches = await cursor.fetchall() or []
+                        day_result = {
+                            "basis_date": cursor_day,
+                            "batches": [],
+                            "derived": [],
+                            "warning_auto_expiry": None,
+                            "default_relief": None,
+                            "month_reset": None,
+                        }
+
+                        for batch in batches:
+                            batch_result = await self._execute_queued_batch_locked(
+                                cursor,
+                                batch=batch,
+                                run_started_at=run_started_at,
+                                assistant_filter={assistant_id},
+                                apply_check_cycle=False,
+                            )
+                            await self._refresh_queued_batch_status_locked(
+                                cursor,
+                                batch_id=int(batch["id"]),
+                            )
+                            await cursor.execute(
+                                """
+                                UPDATE sanction_operations
+                                SET failure_reason = %s
+                                WHERE id = %s
+                                """,
+                                (
+                                    json.dumps(batch_result["failed"], default=str)
+                                    if batch_result["failed"]
+                                    else None,
+                                    int(batch["id"]),
+                                ),
+                            )
+                            day_result["batches"].append(batch_result)
+
+                        day_result["derived"] = await self._replay_check_cycles_for_day_locked(
+                            cursor,
+                            assistant_id=assistant_id,
+                            basis_date=cursor_day,
+                            run_started_at=run_started_at,
+                        )
+                        day_result["warning_auto_expiry"] = await self._apply_warning_auto_expiry_locked(
+                            cursor,
+                            current_date=run_started_at.date(),
+                            run_started_at=run_started_at,
+                            assistant_filter={assistant_id},
+                        )
+                        day_result["default_relief"] = await self._apply_default_auto_relief_locked(
+                            cursor,
+                            basis_date=cursor_day,
+                            run_started_at=run_started_at,
+                            assistant_filter={assistant_id},
+                        )
+                        day_result["month_reset"] = await self._apply_month_end_check_reset_locked(
+                            cursor,
+                            basis_date=cursor_day,
+                            run_started_at=run_started_at,
+                            assistant_filter={assistant_id},
+                        )
+                        replayed_days.append(day_result)
+                        cursor_day += timedelta(days=1)
+
+                    await conn.commit()
+                finally:
+                    await self._release_named_lock(
+                        cursor,
+                        lock_name=SANCTIONS_GLOBAL_LOCK_NAME,
+                    )
+
+        return {
+            "assistant_id": assistant_id,
+            "start_date": start_date,
+            "end_date": replay_end,
+            "replayed_days": replayed_days,
+            "skipped": False,
+        }

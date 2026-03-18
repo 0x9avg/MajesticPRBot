@@ -1,13 +1,13 @@
 import React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Shield, Timer, Trash2, Wrench } from 'lucide-react';
+import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Timer, Trash2, Wrench } from 'lucide-react';
 import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
 import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
 import NotificationToast from '../../../components/feedback/NotificationToast';
 import { useConfirmDialog, usePopupToast } from '../../../components/feedback/hooks';
-import type { Assistant, Event, Streamer } from '../../../types/domain';
+import type { ActiveSanction, Assistant, Event, SanctionDayStatus, Streamer } from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
-import { parseMskDate, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
+import { parseMskDate, getMskDateOffsetStr, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
 
 void React;
@@ -38,8 +38,29 @@ interface SelectOption {
     label: string;
 }
 
+type SanctionKind = 'check' | 'point' | 'percent' | 'oral' | 'strict';
+type WorkoffMetric = 'spec' | 'complaints' | 'mchat';
+
+interface WorkoffDraftItem {
+    local_id: string;
+    metric: WorkoffMetric;
+    multiplier: string;
+    period_start: string;
+    period_end: string;
+}
+
 const formatDateTime = (value?: string | null) => {
     return formatMskToLocal(value);
+};
+
+const formatMetricValue = (value?: number | null, fractionDigits = 2) => {
+    const numeric = Number(value ?? 0);
+    if (!Number.isFinite(numeric)) return '0';
+    return numeric
+        .toFixed(fractionDigits)
+        .replace(/(\.\d*?[1-9])0+$/, '$1')
+        .replace(/\.0+$/, '')
+        .replace(/\.00$/, '');
 };
 
 const toNumberOrUndefined = (value: string) => {
@@ -99,6 +120,34 @@ const makeEventOption = (event: Event): SelectOption => {
     };
 };
 
+const createEmptyWorkoffDraft = (): WorkoffDraftItem => ({
+    local_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    metric: 'spec',
+    multiplier: '1',
+    period_start: getMskDateOffsetStr(1),
+    period_end: getMskDateOffsetStr(8),
+});
+
+const getAvailableWorkoffMetrics = (items: WorkoffDraftItem[], currentId?: string): WorkoffMetric[] => {
+    const used = new Set(items.filter((item) => item.local_id !== currentId).map((item) => item.metric));
+    return (['spec', 'complaints', 'mchat'] as WorkoffMetric[]).filter((metric) => !used.has(metric));
+};
+
+const getSourceTypeLabel = (value?: string | null) => {
+    switch (value) {
+        case 'manual':
+            return 'Ручная';
+        case 'queued_batch':
+            return 'Общая санкция';
+        case 'check_cycle':
+            return 'Правило галок';
+        case 'legacy_migration':
+            return 'Миграция';
+        default:
+            return value || 'Неизвестно';
+    }
+};
+
 const ensureOptionExists = (
     options: SelectOption[],
     value?: string,
@@ -130,6 +179,8 @@ const AssistantsManagement = () => {
     };
     const [selectedAssistant, setSelectedAssistant] = useState<Assistant | null>(null);
     const [sessions, setSessions] = useState<AssistantSessionRecord[]>([]);
+    const [activeSanctions, setActiveSanctions] = useState<ActiveSanction[]>([]);
+    const [selectedDayStatus, setSelectedDayStatus] = useState<SanctionDayStatus | null>(null);
     const [streamerOptions, setStreamerOptions] = useState<SelectOption[]>([]);
     const [eventOptions, setEventOptions] = useState<SelectOption[]>([]);
     const [streamerNameById, setStreamerNameById] = useState<Record<string, string>>({});
@@ -153,9 +204,16 @@ const AssistantsManagement = () => {
         is_probation: false,
     });
 
-    const [pointsForm, setPointsForm] = useState({ delta: '' });
-    const [sanctionsForm, setSanctionsForm] = useState({ penalty_points: '', penalty_percent: '' });
-    const [warningsForm, setWarningsForm] = useState({ target_state: '' });
+    const [dayStatusDate, setDayStatusDate] = useState(getMskDateOffsetStr(0));
+    const [pointsForm, setPointsForm] = useState({ adjustmentChange: '' });
+    const [mchatForm, setMchatForm] = useState({ count: '' });
+    const [manualSanctionForm, setManualSanctionForm] = useState({
+        kind: 'point' as SanctionKind,
+        amount: '1',
+        auto_relief_date: '',
+        workoffItems: [] as WorkoffDraftItem[],
+    });
+    const [manualReliefAmountBySanctionId, setManualReliefAmountBySanctionId] = useState<Record<string, string>>({});
     const manualWindow = getDefaultManualWindow();
     const [manualSessionForm, setManualSessionForm] = useState({
         target_type: 'streamer',
@@ -175,6 +233,19 @@ const AssistantsManagement = () => {
             || String(assistant.pr_id).includes(query)
         );
     }, [assistants, search]);
+
+    const sanctionTotals = useMemo(() => (
+        activeSanctions.reduce(
+            (acc, sanction) => {
+                const amount = Number(sanction.active_amount ?? 0);
+                if (sanction.kind in acc) {
+                    acc[sanction.kind as keyof typeof acc] += amount;
+                }
+                return acc;
+            },
+            { check: 0, point: 0, percent: 0, oral: 0, strict: 0 },
+        )
+    ), [activeSanctions]);
 
     const canUseStreamerOrEventSelectors = !optionsLoading && !optionsError;
 
@@ -323,11 +394,32 @@ const AssistantsManagement = () => {
         throw new Error('Не удалось загрузить сессии ассистента');
     }, []);
 
+    const fetchAssistantActiveSanctions = useCallback(async (prId: string) => {
+        const response = await apiFetch(`/api/assistants/${prId}/sanctions/active`);
+        if (!response.ok) {
+            throw new Error('Не удалось загрузить активные санкции ассистента');
+        }
+        const json = await response.json() as unknown;
+        const data = unwrapApiData<ActiveSanction[]>(json);
+        setActiveSanctions(Array.isArray(data) ? data : []);
+    }, []);
+
+    const fetchAssistantDayStatus = useCallback(async (prId: string, workDate: string) => {
+        const response = await apiFetch(`/api/assistants/${prId}/day-status?date=${workDate}`);
+        if (!response.ok) {
+            throw new Error('Не удалось загрузить дневной статус ассистента');
+        }
+        const json = await response.json() as unknown;
+        const data = unwrapApiData<SanctionDayStatus>(json);
+        setSelectedDayStatus(data);
+    }, []);
+
     const refreshSelectedAssistant = useCallback(async (prId: string) => {
-        const [detailResult, sessionsResult, assistantsResult] = await Promise.allSettled([
+        const [detailResult, sessionsResult, assistantsResult, sanctionsResult] = await Promise.allSettled([
             fetchAssistantDetail(prId),
             fetchAssistantSessions(prId),
             fetchAssistants(),
+            fetchAssistantActiveSanctions(prId),
         ]);
 
         if (detailResult.status === 'rejected') {
@@ -346,7 +438,16 @@ const AssistantsManagement = () => {
                 'error',
             );
         }
-    }, [fetchAssistantDetail, fetchAssistantSessions, fetchAssistants, showToast]);
+        if (sanctionsResult.status === 'rejected') {
+            setActiveSanctions([]);
+            showToast(
+                sanctionsResult.reason instanceof Error
+                    ? sanctionsResult.reason.message
+                    : 'Не удалось загрузить активные санкции ассистента',
+                'error',
+            );
+        }
+    }, [fetchAssistantActiveSanctions, fetchAssistantDetail, fetchAssistantSessions, fetchAssistants, showToast]);
 
     useEffect(() => {
         const load = async () => {
@@ -377,9 +478,25 @@ const AssistantsManagement = () => {
         void loadSelected();
     }, [refreshSelectedAssistant, selectedPrId, showToast]);
 
+    useEffect(() => {
+        if (!selectedPrId) {
+            setSelectedDayStatus(null);
+            return;
+        }
+        const loadDayStatus = async () => {
+            try {
+                await fetchAssistantDayStatus(selectedPrId, dayStatusDate);
+            } catch (error: unknown) {
+                setSelectedDayStatus(null);
+                showToast(error instanceof Error ? error.message : 'Не удалось загрузить дневной статус ассистента', 'error');
+            }
+        };
+        void loadDayStatus();
+    }, [dayStatusDate, fetchAssistantDayStatus, selectedPrId, showToast]);
+
     const runMutation = async (
         endpoint: string,
-        method: 'POST' | 'PATCH' | 'DELETE',
+        method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
         payload?: Record<string, unknown>,
     ) => {
         if (!selectedPrId) return;
@@ -397,6 +514,7 @@ const AssistantsManagement = () => {
                 throw new Error((json as { detail?: string }).detail || 'Операция не выполнена');
             }
             await refreshSelectedAssistant(selectedPrId);
+            await fetchAssistantDayStatus(selectedPrId, dayStatusDate);
             showToast('Изменения сохранены');
         } catch (error: unknown) {
             showToast(error instanceof Error ? error.message : 'Операция не выполнена', 'error');
@@ -405,61 +523,99 @@ const AssistantsManagement = () => {
         }
     };
 
+    const buildWorkoffItemsPayload = (items: WorkoffDraftItem[]) => {
+        const seen = new Set<WorkoffMetric>();
+        return items
+            .map((item) => ({
+                metric: item.metric,
+                multiplier: Number(item.multiplier),
+                period_start: item.period_start,
+                period_end: item.period_end,
+            }))
+            .filter(
+                (item) => item.period_start
+                    && item.period_end
+                    && Number.isFinite(item.multiplier)
+                    && item.multiplier > 0
+                    && (seen.has(item.metric) ? false : (seen.add(item.metric), true)),
+            );
+    };
+
+    const handleManualSanctionCreate = async () => {
+        if (!selectedPrId) return;
+        const fixedAmountKind = ['check', 'oral', 'strict'].includes(manualSanctionForm.kind);
+        const needsWarningDate = ['oral', 'strict'].includes(manualSanctionForm.kind);
+        if (needsWarningDate && !manualSanctionForm.auto_relief_date) {
+            showToast('Укажите дату автоснятия для устного или строгого наказания', 'error');
+            return;
+        }
+        const needsAmount = !fixedAmountKind;
+        const amount = needsAmount ? toNumberOrUndefined(manualSanctionForm.amount) : undefined;
+        if (needsAmount && (!amount || amount <= 0)) {
+            showToast('Укажите корректный размер санкции', 'error');
+            return;
+        }
+        const payload = {
+            assistant_id: selectedPrId,
+            kind: manualSanctionForm.kind,
+            ...(needsAmount ? { amount } : {}),
+            ...(needsWarningDate ? { auto_relief_date: manualSanctionForm.auto_relief_date } : {}),
+            workoff_items: buildWorkoffItemsPayload(manualSanctionForm.workoffItems),
+        };
+        await runMutation('/api/assistant-sanctions', 'POST', payload);
+    };
+
+    const handleManualRelief = async (sanction: ActiveSanction) => {
+        const rawAmount = manualReliefAmountBySanctionId[sanction.sanction_id] ?? '';
+        const amount = ['check', 'oral', 'strict'].includes(sanction.kind) ? 1 : toNumberOrUndefined(rawAmount);
+        if (!amount || amount <= 0) {
+            showToast('Укажите корректный размер снятия', 'error');
+            return;
+        }
+        await runMutation(`/api/assistant-sanctions/${sanction.sanction_id}/reliefs`, 'POST', {
+            amount,
+            relief_type: 'manual',
+        });
+        setManualReliefAmountBySanctionId((prev) => {
+            const next = { ...prev };
+            delete next[sanction.sanction_id];
+            return next;
+        });
+    };
+
     const handlePointsAdjust = async () => {
         if (!selectedPrId) return;
-        const delta = toNumberOrUndefined(pointsForm.delta);
-        if (delta === undefined || delta === 0) {
-            showToast('Укажите изменение баллов (не 0)', 'error');
+        const adjustmentChange = toNumberOrUndefined(pointsForm.adjustmentChange);
+        if (adjustmentChange === undefined || adjustmentChange === 0) {
+            showToast('Укажите, на сколько изменить корректировку баллов', 'error');
             return;
         }
-        await runMutation(`/api/assistants/${selectedPrId}/points/adjust`, 'POST', {
-            delta,
-            source: 'manual_adjust',
+        await runMutation('/api/assistant-day-points', 'POST', {
+            assistant_id: selectedPrId,
+            work_date: dayStatusDate,
+            delta_points: Number((Number(selectedDayStatus?.manual_points_delta ?? 0) + adjustmentChange).toFixed(4)),
         });
-        setPointsForm({ delta: '' });
+        setPointsForm({ adjustmentChange: '' });
     };
 
-    const handleSanctionsUpdate = async () => {
+    const handleMchatSave = async () => {
         if (!selectedPrId) return;
-        const penaltyPoints = toNumberOrUndefined(sanctionsForm.penalty_points);
-        const penaltyPercent = toNumberOrUndefined(sanctionsForm.penalty_percent);
-        if (penaltyPoints === undefined && penaltyPercent === undefined) {
-            showToast('Укажите хотя бы одно поле санкций', 'error');
+        const trimmed = mchatForm.count.trim();
+        if (!trimmed) {
+            showToast('Укажите количество MChat за день', 'error');
             return;
         }
-        await runMutation(`/api/assistants/${selectedPrId}/sanctions`, 'PATCH', {
-            penalty_points: penaltyPoints,
-            penalty_percent: penaltyPercent,
+        const parsed = Number(trimmed);
+        if (!Number.isInteger(parsed) || parsed < 0) {
+            showToast('Количество MChat должно быть целым числом от 0', 'error');
+            return;
+        }
+        await runMutation('/api/assistant-day-mchat', 'PUT', {
+            assistant_id: selectedPrId,
+            work_date: dayStatusDate,
+            mchat_count: parsed,
         });
-    };
-
-    const handleWarningsUpdate = async () => {
-        if (!selectedPrId || !selectedAssistant) return;
-        if (!warningsForm.target_state) {
-            showToast('Выберите итоговое состояние выговоров', 'error');
-            return;
-        }
-
-        const currentStrict = selectedAssistant.strict_warnings ?? 0;
-        const currentOral = selectedAssistant.oral_warnings ?? 0;
-
-        const [strictStr, oralStr] = warningsForm.target_state.split('-');
-        const targetStrict = parseInt(strictStr, 10);
-        const targetOral = parseInt(oralStr, 10);
-
-        const strictDelta = targetStrict - currentStrict;
-        const oralDelta = targetOral - currentOral;
-
-        if (strictDelta === 0 && oralDelta === 0) {
-            showToast('Состояние не изменилось (дельта 0)', 'error');
-            return;
-        }
-
-        await runMutation(`/api/assistants/${selectedPrId}/warnings`, 'POST', {
-            oral_delta: oralDelta,
-            strict_delta: strictDelta,
-        });
-        setWarningsForm({ target_state: '' });
+        setMchatForm({ count: '' });
     };
 
     const handleManualSessionCreate = async () => {
@@ -656,7 +812,7 @@ const AssistantsManagement = () => {
                 </div>
                 <div>
                     <h2 className="text-2xl font-bold text-white">Ассистенты</h2>
-                    <p className="text-white/60">Управление баллами, санкциями, выговорами и сессиями</p>
+                    <p className="text-white/60">Управление баллами, санкциями, ролями и сессиями</p>
                 </div>
             </div>
 
@@ -713,7 +869,7 @@ const AssistantsManagement = () => {
                         </div>
                     ) : (
                         <>
-                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
                                 <div className="bg-white/5 rounded-xl p-3">
                                     <div className="text-xs text-white/50">Ник</div>
                                     <div className="flex items-center gap-2">
@@ -730,20 +886,30 @@ const AssistantsManagement = () => {
                                     </div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Баллы</div>
-                                    <div className="text-green-300 font-semibold">{selectedAssistant.total_points ?? 0}</div>
+                                    <div className="text-xs text-white/50">Баллы до санкций</div>
+                                    <div className="text-green-300 font-semibold">{formatMetricValue(selectedAssistant.gross_points ?? 0)}</div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Штрафные баллы</div>
-                                    <div className="text-amber-300 font-semibold">{selectedAssistant.penalty_points ?? 0}</div>
+                                    <div className="text-xs text-white/50">Баллы после санкций</div>
+                                    <div className="text-emerald-200 font-semibold">
+                                        {formatMetricValue(selectedAssistant.net_points ?? selectedAssistant.gross_points ?? 0)}
+                                    </div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Штраф, %</div>
-                                    <div className="text-amber-300 font-semibold">{selectedAssistant.penalty_percent ?? 0}%</div>
+                                    <div className="text-xs text-white/50">Активные штрафные баллы</div>
+                                    <div className="text-amber-300 font-semibold">{formatMetricValue(sanctionTotals.point)}</div>
                                 </div>
                                 <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Выговоры</div>
-                                    <div className="text-white font-semibold">{selectedAssistant.warnings_display ?? '0/2 0/2'}</div>
+                                    <div className="text-xs text-white/50">Активный штраф, %</div>
+                                    <div className="text-amber-300 font-semibold">{formatMetricValue(sanctionTotals.percent)}%</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Галки</div>
+                                    <div className="text-white font-semibold">{formatMetricValue(sanctionTotals.check)}</div>
+                                </div>
+                                <div className="bg-white/5 rounded-xl p-3">
+                                    <div className="text-xs text-white/50">Устный / строгий</div>
+                                    <div className="text-white font-semibold">{formatMetricValue(sanctionTotals.oral)} / {formatMetricValue(sanctionTotals.strict)}</div>
                                 </div>
                             </div>
 
@@ -752,97 +918,327 @@ const AssistantsManagement = () => {
                                     <div className="text-white font-semibold flex items-center gap-2">
                                         <Coins className="w-4 h-4 text-green-400" />Баллы
                                     </div>
-                                    <div className="relative">
-                                        <input
-                                            type="number"
-                                            step="0.0001"
-                                            value={pointsForm.delta}
-                                            onChange={(e) => setPointsForm((prev) => ({ ...prev, delta: e.target.value }))}
-                                            className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                            placeholder="Изменение баллов (дельта)"
-                                        />
-                                        {pointsForm.delta && !isNaN(Number(pointsForm.delta)) && (
-                                            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold px-2 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                Итог: {(Number(selectedAssistant.total_points ?? 0) + Number(pointsForm.delta)).toFixed(2).replace(/\.00$/, '')}
+                                    <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-3">
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Дата (MSK)</label>
+                                            <CustomDatePicker
+                                                value={dayStatusDate}
+                                                onChange={setDayStatusDate}
+                                                placeholder="Дата"
+                                            />
+                                        </div>
+                                        <div className="relative">
+                                            <label className="text-xs text-white/40 mb-1 block">Изменение корректировки баллов</label>
+                                            <input
+                                                type="number"
+                                                step="0.0001"
+                                                value={pointsForm.adjustmentChange}
+                                                onChange={(e) => setPointsForm({ adjustmentChange: e.target.value })}
+                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                                placeholder="На сколько изменить корректировку"
+                                            />
+                                            {pointsForm.adjustmentChange && !isNaN(Number(pointsForm.adjustmentChange)) && (
+                                                <div className="absolute right-3 bottom-2 text-xs font-semibold px-2 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
+                                                    Новая корректировка: {formatMetricValue(
+                                                        Number(selectedDayStatus?.manual_points_delta ?? 0) + Number(pointsForm.adjustmentChange),
+                                                        4,
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                        <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
+                                            <div className="text-xs text-white/40">Авто за день</div>
+                                            <div className="font-semibold text-white">{formatMetricValue(selectedDayStatus?.spec_points_auto ?? 0, 4)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
+                                            <div className="text-xs text-white/40">Текущая корректировка</div>
+                                            <div className="font-semibold text-white">{formatMetricValue(selectedDayStatus?.manual_points_delta ?? 0, 4)}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
+                                            <div className="text-xs text-white/40">Итог после санкций</div>
+                                            <div className="font-semibold text-white">
+                                                {formatMetricValue(selectedAssistant.net_points ?? selectedAssistant.gross_points ?? 0)}
                                             </div>
-                                        )}
+                                        </div>
                                     </div>
                                     <button
                                         onClick={() => void handlePointsAdjust()}
                                         disabled={busy}
                                         className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-50"
                                     >
-                                        Применить изменение
+                                        Сохранить корректировку баллов
                                     </button>
                                 </div>
 
                                 <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                                    <div className="text-white font-semibold flex items-center gap-2"><Shield className="w-4 h-4 text-amber-400" />Санкции и выговоры</div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <div className="relative">
-                                            <input
-                                                type="number"
-                                                step="0.0001"
-                                                min="0"
-                                                value={sanctionsForm.penalty_points}
-                                                onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_points: e.target.value }))}
-                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
-                                                placeholder="± Баллы"
+                                    <div className="text-white font-semibold flex items-center gap-2">
+                                        <Timer className="w-4 h-4 text-cyan-300" />MChat
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-3">
+                                        <div>
+                                            <label className="text-xs text-white/40 mb-1 block">Дата (MSK)</label>
+                                            <CustomDatePicker
+                                                value={dayStatusDate}
+                                                onChange={setDayStatusDate}
+                                                placeholder="Дата"
                                             />
-                                            {sanctionsForm.penalty_points && !isNaN(Number(sanctionsForm.penalty_points)) && (
-                                                <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                    Итог: {Math.max(0, Number(selectedAssistant.penalty_points ?? 0) + Number(sanctionsForm.penalty_points)).toFixed(2).replace(/\.00$/, '')}
-                                                </div>
-                                            )}
                                         </div>
                                         <div className="relative">
+                                            <label className="text-xs text-white/40 mb-1 block">Количество MChat за день</label>
                                             <input
                                                 type="number"
-                                                step="0.01"
                                                 min="0"
-                                                value={sanctionsForm.penalty_percent}
-                                                onChange={(e) => setSanctionsForm((prev) => ({ ...prev, penalty_percent: e.target.value }))}
-                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-20 py-2 text-sm text-white"
-                                                placeholder="± Проценты"
+                                                step="1"
+                                                value={mchatForm.count}
+                                                onChange={(e) => setMchatForm({ count: e.target.value })}
+                                                className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                                placeholder="Введите итоговое количество MChat"
                                             />
-                                            {sanctionsForm.penalty_percent && !isNaN(Number(sanctionsForm.penalty_percent)) && (
-                                                <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                    Итог: {Math.max(0, Number(selectedAssistant.penalty_percent ?? 0) + Number(sanctionsForm.penalty_percent)).toFixed(2).replace(/\.00$/, '')}%
-                                                </div>
-                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                                        <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
+                                            <div className="text-xs text-white/40">Текущее значение</div>
+                                            <div className="font-semibold text-white">{selectedDayStatus?.mchat_count ?? 0}</div>
+                                        </div>
+                                        <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
+                                            <div className="text-xs text-white/40">Жалоб за день</div>
+                                            <div className="font-semibold text-white">{selectedDayStatus?.complaints_count ?? 0}</div>
                                         </div>
                                     </div>
                                     <button
-                                        onClick={() => void handleSanctionsUpdate()}
+                                        onClick={() => void handleMchatSave()}
                                         disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 mb-2"
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50"
                                     >
-                                        Обновить штрафы
+                                        Сохранить MChat за день
                                     </button>
+                                </div>
+                            </div>
 
-                                    <div className="pt-2 border-t border-white/10">
-                                        <div className="mb-2">
+                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div className="text-white font-semibold">Ручная санкция</div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setManualSanctionForm((prev) => {
+                                                const nextMetric = getAvailableWorkoffMetrics(prev.workoffItems)[0];
+                                                if (!nextMetric) return prev;
+                                                return {
+                                                    ...prev,
+                                                    workoffItems: [
+                                                        ...prev.workoffItems,
+                                                        { ...createEmptyWorkoffDraft(), metric: nextMetric },
+                                                    ],
+                                                };
+                                            })}
+                                            disabled={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems).length === 0}
+                                            className="rounded-lg px-3 py-1.5 text-sm border border-emerald-400/20 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20"
+                                        >
+                                            + Добавить отработку
+                                        </button>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-xs text-white/50 mb-1 block">Тип санкции</label>
                                             <CustomDropdown
-                                                value={warningsForm.target_state}
-                                                onChange={(v) => setWarningsForm((prev) => ({ ...prev, target_state: v }))}
-                                                placeholder="Выберите состояние выговоров"
+                                                value={manualSanctionForm.kind}
+                                                onChange={(value) => setManualSanctionForm((prev) => ({
+                                                    ...prev,
+                                                    kind: value as SanctionKind,
+                                                    amount: ['check', 'oral', 'strict'].includes(value as SanctionKind) ? '1' : prev.amount,
+                                                }))}
                                                 options={[
-                                                    { value: '0-0', label: '🟢 [0/2][0/2] — Нет выговоров', colorClass: 'text-green-400' },
-                                                    { value: '0-1', label: '🟡 [0/2][1/2] — 1 Устный', colorClass: 'text-yellow-400' },
-                                                    { value: '1-0', label: '🟠 [1/2][0/2] — 1 Строгий', colorClass: 'text-orange-400' },
-                                                    { value: '1-1', label: '🔴 [1/2][1/2] — 1 Строгий, 1 Устный', colorClass: 'text-red-400' },
+                                                    { value: 'check', label: 'Галка' },
+                                                    { value: 'point', label: 'Штрафной балл' },
+                                                    { value: 'percent', label: 'Штрафной %' },
+                                                    { value: 'oral', label: 'Устный' },
+                                                    { value: 'strict', label: 'Строгий' },
                                                 ]}
                                             />
                                         </div>
-
-                                        <button
-                                            onClick={() => void handleWarningsUpdate()}
-                                            disabled={busy || !warningsForm.target_state}
-                                            className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/30 disabled:opacity-50"
-                                        >
-                                            Обновить выговоры
-                                        </button>
+                                        {!['check', 'oral', 'strict'].includes(manualSanctionForm.kind) && (
+                                            <div>
+                                                <label className="text-xs text-white/50 mb-1 block">Размер</label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="0.0001"
+                                                    value={manualSanctionForm.amount}
+                                                    onChange={(e) => setManualSanctionForm((prev) => ({ ...prev, amount: e.target.value }))}
+                                                    className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                                    placeholder="1"
+                                                />
+                                            </div>
+                                        )}
+                                        {['oral', 'strict'].includes(manualSanctionForm.kind) && (
+                                            <div>
+                                                <label className="text-xs text-white/50 mb-1 block">Дата автоснятия</label>
+                                                <CustomDatePicker
+                                                    value={manualSanctionForm.auto_relief_date}
+                                                    onChange={(value) => setManualSanctionForm((prev) => ({ ...prev, auto_relief_date: value }))}
+                                                />
+                                            </div>
+                                        )}
                                     </div>
+
+                                    {manualSanctionForm.workoffItems.length > 0 && (
+                                        <div className="space-y-3">
+                                            {manualSanctionForm.workoffItems.map((item) => (
+                                                <div key={item.local_id} className="rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="text-sm text-white/75">Отработка</div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setManualSanctionForm((prev) => ({
+                                                                ...prev,
+                                                                workoffItems: prev.workoffItems.filter((entry) => entry.local_id !== item.local_id),
+                                                            }))}
+                                                            className="rounded-lg p-2 text-rose-200 hover:bg-rose-500/10"
+                                                        >
+                                                            <Trash2 className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                        <div>
+                                                            <label className="text-xs text-white/50 mb-1 block">Тип</label>
+                                                            <CustomDropdown
+                                                                value={item.metric}
+                                                                onChange={(value) => setManualSanctionForm((prev) => ({
+                                                                    ...prev,
+                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, metric: value as WorkoffMetric } : entry),
+                                                                }))}
+                                                                options={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems, item.local_id)
+                                                                    .concat(item.metric)
+                                                                    .filter((metric, index, array) => array.indexOf(metric) === index)
+                                                                    .map((metric) => ({
+                                                                        value: metric,
+                                                                        label: metric === 'spec'
+                                                                            ? 'Спек'
+                                                                            : metric === 'complaints'
+                                                                                ? 'Жалобы'
+                                                                                : 'MChat',
+                                                                    }))}
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/50 mb-1 block">X от нормы</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                step="0.1"
+                                                                value={item.multiplier}
+                                                                onChange={(e) => setManualSanctionForm((prev) => ({
+                                                                    ...prev,
+                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, multiplier: e.target.value } : entry),
+                                                                }))}
+                                                                className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/50 mb-1 block">Период с</label>
+                                                            <CustomDatePicker
+                                                                value={item.period_start}
+                                                                onChange={(value) => setManualSanctionForm((prev) => ({
+                                                                    ...prev,
+                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, period_start: value } : entry),
+                                                                }))}
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-white/50 mb-1 block">Период по</label>
+                                                            <CustomDatePicker
+                                                                value={item.period_end}
+                                                                onChange={(value) => setManualSanctionForm((prev) => ({
+                                                                    ...prev,
+                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, period_end: value } : entry),
+                                                                }))}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    <button
+                                        onClick={() => void handleManualSanctionCreate()}
+                                        disabled={busy}
+                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 disabled:opacity-50"
+                                    >
+                                        Выдать санкцию
+                                    </button>
+                                </div>
+
+                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
+                                    <div className="text-white font-semibold">Активные санкции</div>
+                                    {activeSanctions.length === 0 ? (
+                                        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-white/45">
+                                            У ассистента нет активных санкций
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {activeSanctions.map((sanction) => {
+                                                const needsAmount = !['check', 'oral', 'strict'].includes(sanction.kind);
+                                                return (
+                                                    <div key={sanction.sanction_id} className="rounded-xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
+                                                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                                                            <div>
+                                                                <div className="text-white font-medium">{sanction.kind} · остаток {sanction.active_amount}</div>
+                                                                <div className="text-xs text-white/45">Источник: {getSourceTypeLabel(sanction.source_type)} · Выдано: {formatDateTime(sanction.display_issued_at ?? sanction.issued_at)}</div>
+                                                                {sanction.auto_relief_date && (
+                                                                    <div className="text-xs text-white/45">Автоснятие: {sanction.auto_relief_date}</div>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-xs text-white/50">
+                                                                {sanction.workoff_progress_summary.has_workoff
+                                                                    ? `Отработка ${sanction.workoff_progress_summary.completed_items}/${sanction.workoff_progress_summary.total_items}`
+                                                                    : 'Без отработки'}
+                                                            </div>
+                                                        </div>
+                                                        {sanction.workoff_progress_summary.items.length > 0 && (
+                                                            <div className="space-y-2">
+                                                                {sanction.workoff_progress_summary.items.map((item, index) => (
+                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}`} className="rounded-lg bg-black/30 px-3 py-2 text-sm text-white/70">
+                                                                        {item.metric} · x{item.multiplier} · {item.period_start} - {item.period_end} · {item.amount_done ?? 0}/{item.target_amount ?? 0}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                        <div className="flex flex-col md:flex-row md:items-end gap-3">
+                                                            {needsAmount && (
+                                                                <div className="w-full md:w-48">
+                                                                    <label className="text-xs text-white/50 mb-1 block">Сколько снять</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        step="0.0001"
+                                                                        value={manualReliefAmountBySanctionId[sanction.sanction_id] ?? ''}
+                                                                        onChange={(e) => setManualReliefAmountBySanctionId((prev) => ({
+                                                                            ...prev,
+                                                                            [sanction.sanction_id]: e.target.value,
+                                                                        }))}
+                                                                        className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
+                                                                        placeholder={String(sanction.active_amount)}
+                                                                    />
+                                                                </div>
+                                                            )}
+                                                            <button
+                                                                onClick={() => void handleManualRelief(sanction)}
+                                                                disabled={busy}
+                                                                className="rounded-lg px-4 py-2 text-sm font-medium bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
+                                                            >
+                                                                {needsAmount ? 'Снять вручную' : 'Снять полностью'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 

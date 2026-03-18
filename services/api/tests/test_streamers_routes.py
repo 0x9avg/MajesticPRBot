@@ -49,6 +49,8 @@ def _seed_streamer(
         "stream_title": "Live",
         "stream_thumbnail_url": "https://img.test/thumb.jpg",
         "profile_image_url": "https://img.test/profile.jpg",
+        "current_stream_priority_override": None,
+        "current_stream_pr_slots_override": None,
         "added_at": datetime.now(MSK),
         "added_by_id": 10,
         "assignments": [],
@@ -79,6 +81,11 @@ async def test_list_streamers_with_online_filter(build_api_app, fake_db) -> None
 
     assert all_response.status_code == 200
     assert all_response.json()["data"]["total"] == 2
+    first_streamer = all_response.json()["data"]["streamers"][0]
+    assert "current_stream_priority_override" in first_streamer
+    assert "current_stream_pr_slots_override" in first_streamer
+    assert "priority_override" not in first_streamer
+    assert "pr_slots_override" not in first_streamer
     assert online_response.status_code == 200
     assert online_response.json()["data"]["total"] == 1
 
@@ -92,6 +99,8 @@ async def test_get_streamer_found_and_not_found(build_api_app, fake_db) -> None:
 
     assert found.status_code == 200
     assert found.json()["data"]["streamer_name"] == "target_streamer"
+    assert "priority_override" not in found.json()["data"]
+    assert "pr_slots_override" not in found.json()["data"]
     assert missing.status_code == 404
 
 
@@ -205,6 +214,8 @@ async def test_update_streamer_success_logs_admin_action(
                 "priority": 3,
                 "pr_slots": 3,
                 "is_pinned": True,
+                "current_stream_priority_override": 2,
+                "current_stream_pr_slots_override": 4,
             },
         )
 
@@ -212,6 +223,8 @@ async def test_update_streamer_success_logs_admin_action(
     assert fake_db.streamers_by_id[2200]["priority"] == 3
     assert fake_db.streamers_by_id[2200]["pr_slots"] == 3
     assert fake_db.streamers_by_id[2200]["is_pinned"] is True
+    assert fake_db.streamers_by_id[2200]["current_stream_priority_override"] == 2
+    assert fake_db.streamers_by_id[2200]["current_stream_pr_slots_override"] == 4
     assert len(fake_db.logged_actions) >= 1
 
 
@@ -268,7 +281,7 @@ async def test_update_streamer_status_offline_triggers_auto_unassign(
     assert response.status_code == 200
     assert fake_db.streamers_by_id[2400]["is_online"] is False
     assert any(call[0] == "spec.unclaimed" for call in fake_broker.calls)
-    assert any(call[0] == "stream.offline" for call in fake_broker.calls)
+    assert any(call[0] == "stream.state.offline" for call in fake_broker.calls)
 
 
 async def test_update_streamer_status_category_change_event(
@@ -287,7 +300,7 @@ async def test_update_streamer_status_category_change_event(
         )
 
     assert response.status_code == 200
-    assert any(call[0] == "stream.category_change" for call in fake_broker.calls)
+    assert any(call[0] == "stream.state.category" for call in fake_broker.calls)
 
 
 async def test_sync_status_bulk(build_api_app, fake_db) -> None:

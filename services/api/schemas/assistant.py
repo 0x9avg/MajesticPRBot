@@ -79,7 +79,6 @@ class AssistantFull(BaseModel):
     assigned_to_type: Optional[str] = None
     assigned_to_id: Optional[Snowflake] = None
     total_spec_seconds: int = 0
-    session_count: int = 0
     added_at: Optional[datetime] = None
     appointed_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -87,16 +86,15 @@ class AssistantFull(BaseModel):
     total_spec_hours: float = 0.0
     total_spec_hours_30d: float = 0.0
     avg_spec_hours_per_day_30d: float = 0.0
-    auto_points_total: float = 0.0
-    manual_points_adjustment: float = 0.0
-    total_points: float = 0.0
-    penalty_points: float = 0.0
-    penalty_percent: float = 0.0
-    display_points: float = 0.0
-    warnings_units: int = 0
-    strict_warnings: int = 0
-    oral_warnings: int = 0
-    warnings_display: str = "0/2 0/2"
+    gross_points: float = 0.0
+    net_points: float = 0.0
+    active_point_penalty: float = 0.0
+    active_percent_penalty: float = 0.0
+    active_checks: float = 0.0
+    active_warning_units: int = 0
+    active_strict_warnings: int = 0
+    active_oral_warnings: int = 0
+    active_warnings_display: str = "0/2 0/2"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -108,7 +106,6 @@ class AssistantFull(BaseModel):
                 if field in data and data[field]:
                     data[field] = make_aware(data[field])
         return data
-
 
 class DailyStatsUpdate(BaseModel):
     """Schema for manual daily stats update by admin."""
@@ -211,21 +208,6 @@ class AssistantSessionRecord(BaseModel):
                 if field in data and data[field]:
                     data[field] = make_aware(data[field])
         return data
-
-
-class AssistantPointsAdjustRequest(BaseModel):
-    delta: float
-    source: Optional[str] = "manual_adjust"
-
-
-class AssistantSanctionsUpdateRequest(BaseModel):
-    penalty_points: Optional[float] = None
-    penalty_percent: Optional[float] = None
-
-
-class AssistantWarningsUpdateRequest(BaseModel):
-    oral_delta: int = 0
-    strict_delta: int = 0
 
 
 class AssistantSessionPatchRequest(BaseModel):

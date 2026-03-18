@@ -12,11 +12,11 @@ type SortKey =
     | 'status'
     | 'total_spec_hours'
     | 'avg_spec_hours_per_day_30d'
-    | 'total_points'
-    | 'display_points'
+    | 'gross_points'
+    | 'net_points'
     | 'warnings'
-    | 'penalty_points'
-    | 'penalty_percent';
+    | 'active_point_penalty'
+    | 'active_percent_penalty';
 
 export function PRStats() {
     const navigate = useNavigate();
@@ -69,16 +69,16 @@ export function PRStats() {
                 return assistant.total_spec_hours || 0;
             case 'avg_spec_hours_per_day_30d':
                 return assistant.avg_spec_hours_per_day_30d || 0;
-            case 'total_points':
-                return assistant.total_points ?? 0;
-            case 'display_points':
-                return assistant.display_points ?? assistant.total_points ?? 0;
-            case 'penalty_points':
-                return assistant.penalty_points || 0;
-            case 'penalty_percent':
-                return assistant.penalty_percent || 0;
+            case 'gross_points':
+                return assistant.gross_points ?? 0;
+            case 'net_points':
+                return assistant.net_points ?? assistant.gross_points ?? 0;
+            case 'active_point_penalty':
+                return assistant.active_point_penalty || 0;
+            case 'active_percent_penalty':
+                return assistant.active_percent_penalty || 0;
             case 'warnings':
-                return (assistant.strict_warnings || 0) * 10 + (assistant.oral_warnings || 0);
+                return (assistant.active_strict_warnings || 0) * 10 + (assistant.active_oral_warnings || 0);
             default:
                 return 0;
         }
@@ -129,7 +129,7 @@ export function PRStats() {
     const penaltyPointsSortedPositive = React.useMemo(
         () =>
             assistants
-                .map((assistant) => Number(assistant.penalty_points || 0))
+                .map((assistant) => Number(assistant.active_point_penalty || 0))
                 .filter((value) => value > 0)
                 .sort((a, b) => a - b),
         [assistants]
@@ -138,7 +138,7 @@ export function PRStats() {
     const penaltyPercentSortedPositive = React.useMemo(
         () =>
             assistants
-                .map((assistant) => Number(assistant.penalty_percent || 0))
+                .map((assistant) => Number(assistant.active_percent_penalty || 0))
                 .filter((value) => value > 0)
                 .sort((a, b) => a - b),
         [assistants]
@@ -182,8 +182,8 @@ export function PRStats() {
     };
 
     const getWarningsBadgeClass = (assistant: Assistant): string => {
-        const strict = assistant.strict_warnings || 0;
-        const oral = assistant.oral_warnings || 0;
+        const strict = assistant.active_strict_warnings || 0;
+        const oral = assistant.active_oral_warnings || 0;
 
         if (strict >= 1 && oral >= 1) return 'bg-red-500/15 text-red-300 border-red-500/30';
         if (strict >= 1) return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
@@ -310,10 +310,10 @@ export function PRStats() {
                                 {renderHeader('Статус', 'status')}
                                 {renderHeader('Общее время', 'total_spec_hours')}
                                 {renderHeader('Ср. ч/день', 'avg_spec_hours_per_day_30d')}
-                                {renderHeader('Общие баллы', 'total_points')}
-                                {renderHeader('После санк.', 'display_points')}
-                                {renderHeader('Штраф. баллы', 'penalty_points')}
-                                {renderHeader('Штраф, %', 'penalty_percent')}
+                                {renderHeader('Общие баллы', 'gross_points')}
+                                {renderHeader('После санк.', 'net_points')}
+                                {renderHeader('Штраф. баллы', 'active_point_penalty')}
+                                {renderHeader('Штраф, %', 'active_percent_penalty')}
                                 {renderHeader('Выговоры', 'warnings')}
                             </tr>
                         </thead>
@@ -360,37 +360,37 @@ export function PRStats() {
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
                                             <span className="inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap bg-blue-500/15 text-blue-300 border-blue-500/30">
-                                                {(assistant.total_points ?? 0).toFixed(2)}
+                                                {(assistant.gross_points ?? 0).toFixed(2)}
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
                                             <span className="inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap bg-green-500/15 text-green-300 border-green-500/30">
-                                                {(assistant.display_points ?? assistant.total_points ?? 0).toFixed(2)}
+                                                {(assistant.net_points ?? assistant.gross_points ?? 0).toFixed(2)}
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
                                             <span
                                                 className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getRelativePenaltyClass(
-                                                    Number(assistant.penalty_points || 0),
+                                                    Number(assistant.active_point_penalty || 0),
                                                     penaltyPointsSortedPositive
                                                 )}`}
                                             >
-                                                {Number(assistant.penalty_points || 0)}
+                                                {Number(assistant.active_point_penalty || 0)}
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
                                             <span
                                                 className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getRelativePenaltyClass(
-                                                    Number(assistant.penalty_percent || 0),
+                                                    Number(assistant.active_percent_penalty || 0),
                                                     penaltyPercentSortedPositive
                                                 )}`}
                                             >
-                                                {Number(assistant.penalty_percent || 0)}%
+                                                {Number(assistant.active_percent_penalty || 0)}%
                                             </span>
                                         </td>
                                         <td className="p-3 whitespace-nowrap">
                                             <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getWarningsBadgeClass(assistant)}`}>
-                                                {assistant.warnings_display || '0/2 0/2'}
+                                                {assistant.active_warnings_display || '0/2 0/2'}
                                             </span>
                                         </td>
                                     </tr>

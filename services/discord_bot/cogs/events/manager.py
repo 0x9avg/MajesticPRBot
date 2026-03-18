@@ -301,21 +301,7 @@ class EventEndSelect(disnake.ui.StringSelect):
 
         try:
             # End event via API
-            result = await interaction.bot.api_client.end_event(event_id)
-
-            # Try to update the event message
-            if result and result.get("channel_id") and result.get("message_id"):
-                channel = interaction.bot.get_channel(int(result["channel_id"]))
-                if channel:
-                    try:
-                        msg = await channel.fetch_message(int(result["message_id"]))
-                        embed = msg.embeds[0] if msg.embeds else None
-                        if embed:
-                            embed.title = f"🏁 [ЗАВЕРШЕНО] {embed.title.replace('🎉 Событие: ', '')}"
-                            embed.color = disnake.Color.dark_grey()
-                            await msg.edit(embed=embed, components=[])
-                    except Exception:
-                        pass
+            await interaction.bot.api_client.end_event(event_id)
 
             await interaction.edit_original_response(content="✅ Событие завершено!")
 

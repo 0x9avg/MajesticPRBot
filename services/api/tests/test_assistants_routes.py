@@ -28,14 +28,15 @@ def _seed_assistant(
         "appointed_at": datetime.now(MSK),
         "auto_points_total": 10.0,
         "manual_points_adjustment": 0.0,
-        "total_points": 10.0,
-        "penalty_points": 0.0,
-        "penalty_percent": 0.0,
-        "display_points": 10.0,
-        "warnings_units": 0,
-        "strict_warnings": 0,
-        "oral_warnings": 0,
-        "warnings_display": "0/2 0/2",
+        "gross_points": 10.0,
+        "net_points": 10.0,
+        "active_point_penalty": 0.0,
+        "active_percent_penalty": 0.0,
+        "active_checks": 0.0,
+        "active_warning_units": 0,
+        "active_strict_warnings": 0,
+        "active_oral_warnings": 0,
+        "active_warnings_display": "0/2 0/2",
     }
 
 
@@ -70,6 +71,13 @@ async def test_get_all_assistants_returns_list(build_api_app, fake_db) -> None:
     payload = response.json()
     assert payload["data"][0]["nickname"] == "Alice"
     assert payload["data"][0]["total_spec_hours"] == 2.0
+    assert payload["data"][0]["gross_points"] == 10.0
+    assert payload["data"][0]["net_points"] == 10.0
+    assert payload["data"][0]["active_checks"] == 0.0
+    assert "session_count" not in payload["data"][0]
+    assert "total_points" not in payload["data"][0]
+    assert "display_points" not in payload["data"][0]
+    assert "check_marks" not in payload["data"][0]
 
 
 async def test_get_assistant_not_found(build_api_app) -> None:
@@ -309,34 +317,6 @@ async def test_manual_session_not_found_returns_404(build_api_app) -> None:
     assert response.status_code == 404
 
 
-async def test_adjust_points_sanctions_and_warnings_endpoints(
-    build_api_app, fake_db
-) -> None:
-    _seed_assistant(fake_db, 1700, "PenaltyUser")
-
-    async with await _client(build_api_app) as assistants_client:
-        adjust = await assistants_client.post(
-            "/api/assistants/1700/points/adjust",
-            json={"delta": 3.25},
-        )
-        sanctions = await assistants_client.patch(
-            "/api/assistants/1700/sanctions",
-            json={"penalty_points": 1.5, "penalty_percent": 10},
-        )
-        warnings = await assistants_client.post(
-            "/api/assistants/1700/warnings",
-            json={"oral_delta": 2, "strict_delta": 0},
-        )
-
-    assert adjust.status_code == 200
-    assert sanctions.status_code == 200
-    assert warnings.status_code == 200
-    assert fake_db.assistants_by_id[1700]["manual_points_adjustment"] == 3.25
-    assert fake_db.assistants_by_id[1700]["penalty_points"] == 1.5
-    assert fake_db.assistants_by_id[1700]["warnings_units"] == 2
-    assert len(fake_db.logged_actions) >= 3
-
-
 async def test_admin_session_patch_and_delete_routes(build_api_app, fake_db) -> None:
     _seed_assistant(fake_db, 1800, "SessionUser")
 
@@ -376,10 +356,6 @@ async def test_non_admin_cannot_use_sensitive_assistant_endpoints(
         },
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as assistants_client:
-        adjust = await assistants_client.post(
-            "/api/assistants/1900/points/adjust",
-            json={"delta": 1.0},
-        )
         sessions = await assistants_client.get("/api/assistants/1900/sessions")
         manual_session = await assistants_client.post(
             "/api/assistants/1900/session",
@@ -394,7 +370,6 @@ async def test_non_admin_cannot_use_sensitive_assistant_endpoints(
             },
         )
 
-    assert adjust.status_code == 403
     assert sessions.status_code == 403
     assert manual_session.status_code == 403
 

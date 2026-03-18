@@ -58,6 +58,13 @@ def _resolve_actor_id(principal: dict) -> int:
     return _resolve_user_pr_id(principal)
 
 
+def _serialize_event_participant(participant: dict) -> dict:
+    result = dict(participant)
+    if result.get("pr_id") is not None:
+        result["pr_id"] = str(result["pr_id"])
+    return result
+
+
 @router.post("")
 async def create_event(
     request: Request,
@@ -95,6 +102,7 @@ async def create_event(
             pr_slots=data.pr_slots,
             priority=data.priority,
             is_pinned=data.is_pinned,
+            outbox_trace_id=trace_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -159,17 +167,6 @@ async def create_event(
         },
     )
 
-    if broker:
-        await broker.publish(
-            "event.added",
-            {
-                "event": "event.added",
-                "event_id": event_id,
-                "event_name": data.name,
-                "trace_id": trace_id,
-            },
-        )
-
     return JSONResponse(
         status_code=201,
         content=success_envelope(
@@ -228,11 +225,19 @@ async def get_events_to_start(
     """Get events that need start notification."""
     trace_id = get_trace_id(request)
     events = await db.get_scheduled_events()
+    normalized_events = []
+    for event in events:
+        item = dict(event)
+        item["participants"] = [
+            _serialize_event_participant(participant)
+            for participant in item.get("participants", [])
+        ]
+        normalized_events.append(item)
 
     return JSONResponse(
         content=success_envelope(
-            data=events,
-            message=f"Found {len(events)} scheduled events",
+            data=normalized_events,
+            message=f"Found {len(normalized_events)} scheduled events",
             trace_id=trace_id,
         )
     )
@@ -258,21 +263,13 @@ async def create_spec_request(
             description=data.description,
             requested_by=pr_id,
             priority=data.priority,
+            outbox_trace_id=trace_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not event_id:
         raise HTTPException(status_code=500, detail="Failed to create spec request")
-
-    # Publish broker event for PR actions + monitoring refresh
-    if broker:
-        await broker.emit_event_joined(
-            event_id=event_id,
-            event_name=data.name,
-            pr_id=pr_id,
-            trace_id=trace_id,
-        )
 
     return JSONResponse(
         status_code=201,
@@ -348,10 +345,6 @@ async def update_pending_spec_request(
             status_code=500, detail="Failed to update pending spec request"
         )
 
-    # Refresh monitoring to reflect updated state if applicable
-    if broker:
-        await broker.emit_monitoring_refresh(trace_id=trace_id)
-
     return JSONResponse(
         content=success_envelope(
             data={"event_id": event_id, "status": "updated"},
@@ -380,42 +373,13 @@ async def approve_spec_request(
         result = await db.approve_spec_request(
             event_id=event_id,
             approved_by=approved_by,
+            outbox_trace_id=trace_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not result or not result.get("success"):
         raise HTTPException(status_code=500, detail="Failed to approve spec request")
-
-    # Refresh monitoring to reflect approved state
-    if broker:
-        await broker.emit_monitoring_refresh(trace_id=trace_id)
-
-        # If there were closed sessions, notify PR Actions
-        event = await db.get_event(event_id)
-        event_name = event.get("name", "Unknown") if event else "Unknown"
-
-        for session in result.get("closed_sessions", []):
-            await broker.emit_event_left(
-                event_id=event_id,
-                event_name=event_name,
-                pr_id=session["pr_id"],
-                duration_seconds=session["duration"],
-                ended_at=session["ended_at"],
-                trace_id=trace_id,
-            )
-
-        # If there were closed sessions, the event is now inactive (closed)
-        if result.get("closed_sessions"):
-            await broker.publish(
-                "event.ended",
-                {
-                    "event": "event.ended",
-                    "event_id": event_id,
-                    "event_name": event_name,
-                    "trace_id": trace_id,
-                },
-            )
 
     return JSONResponse(
         content=success_envelope(
@@ -451,10 +415,6 @@ async def reject_spec_request(
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to reject spec request")
-
-    # Refresh monitoring to remove rejected event
-    if broker:
-        await broker.emit_monitoring_refresh(trace_id=trace_id)
 
     return JSONResponse(
         content=success_envelope(
@@ -502,7 +462,7 @@ async def get_event_participants(
 
     return JSONResponse(
         content=success_envelope(
-            data=participants,
+            data=[_serialize_event_participant(participant) for participant in participants],
             message=f"Found {len(participants)} participants",
             trace_id=trace_id,
         )
@@ -517,7 +477,11 @@ async def _join_event_for_pr(
     broker: "BrokerService",
 ) -> JSONResponse:
     trace_id = get_trace_id(request)
-    result = await db.join_event(event_id, pr_id)
+    result = await db.join_event(
+        event_id,
+        pr_id,
+        outbox_trace_id=trace_id,
+    )
     if not result or result.get("status") == "error":
         detail = (
             result.get("detail", "Could not join event")
@@ -527,25 +491,9 @@ async def _join_event_for_pr(
         raise HTTPException(status_code=400, detail=detail)
 
     join_status = result.get("status")
-    if broker:
-        event = await db.get_event(event_id)
-        event_name = event.get("name", "Unknown") if event else "Unknown"
-        if join_status == "joined":
-            await broker.emit_event_joined(
-                event_id=event_id,
-                event_name=event_name,
-                pr_id=pr_id,
-                trace_id=trace_id,
-            )
-        else:
-            await broker.publish(
-                "event.updated",
-                {"event_id": event_id, "event_name": event_name},
-            )
-
     return JSONResponse(
         content=success_envelope(
-            data={"event_id": event_id, "user_id": pr_id, "join_status": join_status},
+            data={"event_id": str(event_id), "pr_id": str(pr_id), "join_status": join_status},
             message="Joined event" if join_status == "joined" else "Reserved slot",
             code="EVENT_JOINED" if join_status == "joined" else "EVENT_RESERVED",
             trace_id=trace_id,
@@ -561,27 +509,16 @@ async def _leave_event_for_pr(
     broker: "BrokerService",
 ) -> JSONResponse:
     trace_id = get_trace_id(request)
-    duration = await db.leave_event(event_id, pr_id, end_reason="manual_unclaim")
-    if broker:
-        event = await db.get_event(event_id)
-        event_name = event.get("name", "Unknown") if event else "Unknown"
-        if duration > 0:
-            await broker.emit_event_left(
-                event_id=event_id,
-                event_name=event_name,
-                pr_id=pr_id,
-                duration_seconds=duration,
-                trace_id=trace_id,
-            )
-        else:
-            await broker.publish(
-                "event.updated",
-                {"event_id": event_id, "event_name": event_name},
-            )
+    duration = await db.leave_event(
+        event_id,
+        pr_id,
+        end_reason="manual_unclaim",
+        outbox_trace_id=trace_id,
+    )
 
     return JSONResponse(
         content=success_envelope(
-            data={"event_id": event_id, "user_id": pr_id, "duration": duration},
+            data={"event_id": str(event_id), "pr_id": str(pr_id), "duration": duration},
             message="Left event",
             code="EVENT_LEFT",
             trace_id=trace_id,
@@ -662,23 +599,12 @@ async def start_event(
     """Start an event and migrate its reserved participants to active sessions."""
     trace_id = get_trace_id(request)
 
-    event = await db.get_event(event_id)
-    if not event:
+    if not await db.get_event(event_id):
         raise HTTPException(status_code=404, detail="Event not found")
-
-    event_name = event.get("name", "Unknown")
-
-    migrated_pr_ids = await db.start_event_sessions(event_id)
-
-    if broker:
-        for pr_id in migrated_pr_ids:
-            # Emit standard join for logging in Discord
-            await broker.emit_event_joined(
-                event_id=event_id,
-                event_name=event_name,
-                pr_id=pr_id,
-                trace_id=trace_id,
-            )
+    migrated_pr_ids = await db.start_event_sessions(
+        event_id,
+        outbox_trace_id=trace_id,
+    )
 
     return JSONResponse(
         content=success_envelope(
@@ -705,34 +631,20 @@ async def end_event(
     """End an event."""
     trace_id = get_trace_id(request)
 
-    event = await db.get_event(event_id)
-    event_name = event.get("name", "Unknown") if event else "Unknown"
-
-    results = await db.end_event(event_id)
-
-    if broker:
-        for p in results:
-            await broker.emit_event_left(
-                event_id=event_id,
-                event_name=event_name,
-                pr_id=p["user_id"],
-                duration_seconds=p.get("duration", 0),
-                trace_id=trace_id,
-            )
-        # Always emit an event ended message to trigger refresh
-        await broker.publish(
-            "event.ended",
-            {
-                "event": "event.ended",
-                "event_id": event_id,
-                "event_name": event_name,
-                "trace_id": trace_id,
-            },
-        )
+    results = await db.end_event(
+        event_id,
+        outbox_trace_id=trace_id,
+    )
 
     return JSONResponse(
         content=success_envelope(
-            data={"event_id": event_id, "participants": results},
+            data={
+                "event_id": str(event_id),
+                "participants": [
+                    {"pr_id": str(item["pr_id"]), "duration": item.get("duration", 0)}
+                    for item in results
+                ],
+            },
             message="Event ended",
             code="EVENT_ENDED",
             trace_id=trace_id,
@@ -774,6 +686,7 @@ async def update_event(
         priority=data.priority,
         is_pinned=data.is_pinned,
         points=data.points,
+        outbox_trace_id=trace_id,
     )
 
     # Retroactive update: propagate priority changes to active sessions on this event
@@ -789,17 +702,6 @@ async def update_event(
             raise HTTPException(status_code=404, detail="Event not found")
 
     event = await db.get_event(event_id)
-
-    if broker:
-        await broker.publish(
-            "event.updated",
-            {
-                "event": "event.updated",
-                "event_id": event_id,
-                "event_name": event.get("name") if event else "Unknown",
-                "trace_id": trace_id,
-            },
-        )
 
     return JSONResponse(
         content=success_envelope(

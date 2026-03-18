@@ -58,7 +58,7 @@ class Notifications(commands.Cog):
                 if channel:
                     participants = event.get("participants", [])
                     if participants:
-                        mentions = [f"<@{p['user_id']}>" for p in participants]
+                        mentions = [f"<@{p['pr_id']}>" for p in participants]
                         mention_str = ", ".join(mentions)
                         try:
                             await channel.send(

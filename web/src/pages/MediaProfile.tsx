@@ -69,6 +69,9 @@ export default function MediaProfile() {
         );
     }
 
+    const assignments = streamer.assignments || [];
+    const effectivePriority = streamer.current_stream_priority_override ?? streamer.priority;
+
     return (
         <div className="max-w-4xl mx-auto space-y-8 animate-[fadeIn_0.5s_ease-in-out]">
             {/* Header / Banner area */}
@@ -102,7 +105,7 @@ export default function MediaProfile() {
                         <div className="flex flex-wrap justify-center md:justify-start gap-4">
                             <div className="px-4 py-2 rounded-xl bg-white/5 border border-white/5 flex items-center gap-2">
                                 <Shield className="w-4 h-4 text-[#9146ff]" />
-                                <span className="text-white/80">Приоритет: {streamer.priority}</span>
+                                <span className="text-white/80">Приоритет: {effectivePriority}</span>
                             </div>
                             {streamer.game_name && (
                                 <div className="px-4 py-2 rounded-xl bg-white/5 border border-white/5 flex items-center gap-2">
@@ -139,17 +142,28 @@ export default function MediaProfile() {
                 <div className="p-6 rounded-2xl bg-[#242424]/50 border border-white/5 space-y-4">
                     <h3 className="text-xl font-bold flex items-center gap-2">
                         <User className="w-5 h-5 text-blue-400" />
-                        Закрепленный PR
+                        Закрепленные ассистенты
                     </h3>
                     <div className="p-4 rounded-xl bg-black/20 border border-white/5">
-                        {streamer.assigned_pr_id ? (
-                            <div className="flex items-center justify-between">
-                                <span className="text-white">ID сотрудника: {streamer.assigned_pr_id}</span>
-                                <span className="text-sm text-green-400">Активен</span>
+                        {assignments.length > 0 ? (
+                            <div className="space-y-3">
+                                {assignments.map((assignment) => (
+                                    <div key={`${assignment.pr_id}-${assignment.is_probation ? 'probation' : 'main'}`} className="flex items-center justify-between gap-3">
+                                        <div className="flex flex-col">
+                                            <span className="text-white">
+                                                {assignment.nickname ? `@${assignment.nickname}` : `ID сотрудника: ${assignment.pr_id}`}
+                                            </span>
+                                            <span className="text-xs text-white/40">PR ID: {assignment.pr_id}</span>
+                                        </div>
+                                        <span className={`text-sm ${assignment.is_probation ? 'text-emerald-400' : 'text-green-400'}`}>
+                                            {assignment.is_probation ? 'Стажировка' : 'Основной'}
+                                        </span>
+                                    </div>
+                                ))}
                             </div>
                         ) : (
                             <div className="text-white/40 flex flex-col items-center py-4 gap-2">
-                                <span>Нет закрепленного сотрудника</span>
+                                <span>Нет закрепленных ассистентов</span>
                                 <button className="px-4 py-1.5 rounded-lg bg-blue-500/20 text-blue-400 text-sm hover:bg-blue-500/30 transition-colors">
                                     Взять в работу
                                 </button>

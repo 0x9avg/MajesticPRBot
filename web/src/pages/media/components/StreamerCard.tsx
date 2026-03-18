@@ -19,18 +19,19 @@ const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps
     const navigate = useNavigate();
     const { user } = useOutletContext<OutletUserContext>();
     const canManageStreamer = hasAny(user, ['streamers.update', 'streamers.delete']);
+    const effectivePriority = streamer.current_stream_priority_override ?? streamer.priority;
 
     return (
         <>
             <div className="p-3 rounded-xl flex items-center group hover:bg-white/5 transition-all">
                 <div className="flex items-center gap-4 flex-1 min-w-0 mr-2">
                     {/* Priority Box */}
-                    <div className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center font-bold select-none shrink-0 relative ${streamer.priority === 1 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
-                        streamer.priority === 2 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
-                            streamer.priority === 3 ? 'bg-red-500/20 text-red-400 border-red-500/30' :
+                    <div className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center font-bold select-none shrink-0 relative ${effectivePriority === 1 ? 'bg-green-500/20 text-green-400 border-green-500/30' :
+                        effectivePriority === 2 ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
+                            effectivePriority === 3 ? 'bg-red-500/20 text-red-400 border-red-500/30' :
                                 'bg-white/5 text-white/50 border-white/20'
                         }`}>
-                        {streamer.priority}
+                        {effectivePriority}
                     </div>
 
                     {/* Profile Button -> Media Profile */}

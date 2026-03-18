@@ -38,57 +38,8 @@ class EventsHandlers(commands.Cog):
         return None
 
     async def _update_event_message(self, event_id: int):
-        """Update event message embed with current participant count."""
-        try:
-            event = await self.api.get_event(event_id)
-            if not event:
-                return
-
-            channel_id = event.get("channel_id")
-            message_id = event.get("message_id")
-
-            if not channel_id or not message_id:
-                return
-
-            channel = self.bot.get_channel(int(channel_id))
-            if not channel:
-                return
-
-            try:
-                msg = await channel.fetch_message(int(message_id))
-            except disnake.NotFound:
-                return
-
-            if not msg.embeds:
-                return
-
-            embed = msg.embeds[0]
-            current_count = event.get("current_participants", 0)
-            required = event.get("required_pr_count", "?")
-
-            # Update description with new count
-            desc_lines = embed.description.split("\n") if embed.description else []
-            new_lines = []
-            for line in desc_lines:
-                if line.startswith("**Участников:**"):
-                    line = f"**Участников:** {current_count}"
-                new_lines.append(line)
-
-            # If no participants line found, add it
-            if not any(_.startswith("**Участников:**") for _ in new_lines):
-                new_lines.append(f"**Участников:** {current_count}")
-
-            embed.description = "\n".join(new_lines)
-
-            # Update button style based on capacity
-            if current_count >= int(required) if str(required).isdigit() else False:
-                # Event is full - update color
-                embed.color = disnake.Color.green()
-
-            await msg.edit(embed=embed)
-
-        except Exception as e:
-            self.bot.logger.error(f"Update event message error: {e}")
+        """Legacy no-op: event message linkage is no longer part of event payload."""
+        return None
 
     async def _send_pr_action(self, message: str):
         """Send message to PR actions log channel."""
@@ -170,7 +121,7 @@ class EventsHandlers(commands.Cog):
                 return
 
             if str(result.get("event_id")) != str(event_id) or str(
-                result.get("user_id")
+                result.get("pr_id")
             ) != str(user_id):
                 await interaction.followup.send(
                     "❌ API вернул неполный ответ при входе в событие",
@@ -223,7 +174,7 @@ class EventsHandlers(commands.Cog):
                 return
 
             if str(result.get("event_id")) != str(event_id) or str(
-                result.get("user_id")
+                result.get("pr_id")
             ) != str(user_id):
                 await interaction.followup.send(
                     "❌ API вернул неполный ответ при выходе из события",

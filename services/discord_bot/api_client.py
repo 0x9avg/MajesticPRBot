@@ -300,20 +300,6 @@ class APIClient:
         """Get assistant stats (uses assistant details endpoint)."""
         return await self._request("GET", f"/assistants/{user_id}")
 
-    async def add_assistant_time(self, user_id: int, seconds: int) -> Optional[Dict]:
-        """Add time to assistant's total."""
-        return await self._request(
-            "POST", f"/assistants/{user_id}/add-time", params={"seconds": seconds}
-        )
-
-    async def subtract_assistant_time(
-        self, user_id: int, seconds: int
-    ) -> Optional[Dict]:
-        """Subtract time from assistant's total."""
-        return await self._request(
-            "POST", f"/assistants/{user_id}/subtract-time", params={"seconds": seconds}
-        )
-
     async def get_dashboard_stats(self) -> Optional[Dict]:
         """Get dashboard stats."""
         result = await self._request("GET", "/stats/dashboard")
@@ -435,55 +421,6 @@ class APIClient:
         if result and "total_spec_seconds" in result:
             return result["total_spec_seconds"]
         return 0
-
-    async def get_top_assistants(self, limit: int = 10) -> List[Dict]:
-        """Get top assistants by spec time."""
-        result = await self._request("GET", "/assistants/top", params={"limit": limit})
-        return result if isinstance(result, list) else []
-
-    async def reset_assistant_stats(self, user_id: int) -> bool:
-        """Reset assistant statistics."""
-        result = await self._request("POST", f"/assistants/{user_id}/reset")
-        return result is not None and "detail" not in result
-
-    async def get_daily_stats(
-        self, pr_id: Optional[int] = None, date_str: Optional[str] = None
-    ) -> List[Dict]:
-        """Get daily statistics with optional filters."""
-        params = {}
-        if pr_id:
-            params["pr_id"] = pr_id
-        if date_str:
-            params["date"] = date_str
-        result = await self._request(
-            "GET", "/stats/daily", params=params if params else None
-        )
-        return result if isinstance(result, list) else []
-
-    async def update_daily_stats_manual(
-        self,
-        pr_id: int,
-        date: str,
-        p0: int,
-        p1: int,
-        p2: int,
-        p3: int,
-        total_points: float,
-    ) -> bool:
-        """Manually update daily stats for a PR."""
-        result = await self._request(
-            "PUT",
-            f"/assistants/{pr_id}/daily-stats",
-            data={
-                "date": date,
-                "p0_seconds": p0,
-                "p1_seconds": p1,
-                "p2_seconds": p2,
-                "p3_seconds": p3,
-                "total_points": total_points,
-            },
-        )
-        return result is not None and "detail" not in result
 
     async def create_manual_session(
         self,

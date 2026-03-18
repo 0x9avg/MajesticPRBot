@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -53,6 +54,15 @@ def test_plan_service_principal_token_hash_dedup_falls_back_to_lexicographic_kee
 
 
 class _DummyLogger:
+    def debug(self, *_args, **_kwargs) -> None:
+        pass
+
+    def info(self, *_args, **_kwargs) -> None:
+        pass
+
+    def warning(self, *_args, **_kwargs) -> None:
+        pass
+
     def error(self, *_args, **_kwargs) -> None:
         pass
 
@@ -171,3 +181,90 @@ async def test_get_service_principal_by_token_uses_hash_only_lookup() -> None:
     assert cursor.executed
     _, params = cursor.executed[0]
     assert params == (expected_hash,)
+
+
+@pytest.mark.anyio
+async def test_create_manual_spec_session_uses_admin_closed_end_reason() -> None:
+    cursor = _DummyCursor()
+    cursor.lastrowid = 77
+    conn = _DummyConn(cursor)
+    db = Database(
+        db_host="localhost",
+        db_port=3306,
+        db_user="root",
+        db_password="root",
+        db_name="test",
+        logger=_DummyLogger(),
+    )
+    db.pool = _DummyPool(conn)
+
+    async def _get_points_config():
+        return {0: 0.5, 1: 1.0, 2: 1.5, 3: 2.0}
+
+    async def _get_probation_rate():
+        return 0.25
+
+    async def _recalc_session_points_delta(_conn, _session_id: int, lock: bool = True):
+        return None
+
+    async def _recalculate_assistant_sanction_derivations(**_kwargs):
+        return None
+
+    db.get_points_config = _get_points_config
+    db._get_probation_rate = _get_probation_rate
+    db._recalc_session_points_delta = _recalc_session_points_delta
+    db.recalculate_assistant_sanction_derivations = (
+        _recalculate_assistant_sanction_derivations
+    )
+
+    started_at = datetime.now(timezone.utc) + timedelta(days=1)
+    ended_at = started_at + timedelta(hours=1)
+
+    created = await db.create_manual_spec_session(
+        pr_id=566652404838170625,
+        target_type="streamer",
+        target_id=5001,
+        started_at=started_at,
+        ended_at=ended_at,
+        is_probation=False,
+        priority=2,
+        target_name="StreamerY",
+    )
+
+    assert created is True
+    assert conn.committed is True
+    assert len(cursor.executed) >= 2
+    insert_sql, insert_params = cursor.executed[1]
+    assert "INSERT INTO spec_sessions" in insert_sql
+    assert insert_params is not None
+    assert insert_params[6] == "admin_closed"
+
+
+@pytest.mark.anyio
+async def test_create_event_stages_outbox_message_before_commit() -> None:
+    cursor = _DummyCursor()
+    cursor.lastrowid = 501
+    conn = _DummyConn(cursor)
+    db = Database(
+        db_host="localhost",
+        db_port=3306,
+        db_user="root",
+        db_password="root",
+        db_name="test",
+        logger=_DummyLogger(),
+    )
+    db.pool = _DummyPool(conn)
+
+    event_id = await db.create_event(
+        name="Outbox Event",
+        description="event with outbox",
+        created_by=42,
+        outbox_trace_id="trace-123",
+    )
+
+    assert event_id == 501
+    assert conn.committed is True
+    assert len(cursor.executed) >= 2
+    insert_sqls = [sql for sql, _params in cursor.executed]
+    assert any("INSERT INTO events" in sql for sql in insert_sqls)
+    assert any("INSERT INTO broker_outbox" in sql for sql in insert_sqls)

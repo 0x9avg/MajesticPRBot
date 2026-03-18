@@ -12,8 +12,8 @@ interface StreamerSettingsModalProps {
         pr_slots?: number;
         is_pinned?: boolean;
         allow_juniors?: boolean;
-        priority_override?: number;
-        pr_slots_override?: number;
+        current_stream_priority_override?: number;
+        current_stream_pr_slots_override?: number;
     }) => Promise<void>;
 }
 
@@ -24,8 +24,8 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave, mode = 'glob
     const [prSlots, setPrSlots] = React.useState(streamer?.pr_slots || 1);
     const [isPinned, setIsPinned] = React.useState(streamer?.is_pinned || false);
     const [allowJuniors, setAllowJuniors] = React.useState(streamer?.allow_juniors ?? true);
-    const [priorityOverride, setPriorityOverride] = React.useState(streamer?.priority_override ?? streamer?.priority ?? 0);
-    const [prSlotsOverride, setPrSlotsOverride] = React.useState(streamer?.pr_slots_override ?? streamer?.pr_slots ?? 1);
+    const [priorityOverride, setPriorityOverride] = React.useState(streamer?.current_stream_priority_override ?? streamer?.priority ?? 0);
+    const [prSlotsOverride, setPrSlotsOverride] = React.useState(streamer?.current_stream_pr_slots_override ?? streamer?.pr_slots ?? 1);
     const [saving, setSaving] = React.useState(false);
 
     React.useEffect(() => {
@@ -34,8 +34,8 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave, mode = 'glob
             setPrSlots(streamer.pr_slots || 1);
             setIsPinned(streamer.is_pinned || false);
             setAllowJuniors(streamer.allow_juniors ?? true);
-            setPriorityOverride(streamer.priority_override ?? streamer.priority ?? 0);
-            setPrSlotsOverride(streamer.pr_slots_override ?? streamer.pr_slots ?? 1);
+            setPriorityOverride(streamer.current_stream_priority_override ?? streamer.priority ?? 0);
+            setPrSlotsOverride(streamer.current_stream_pr_slots_override ?? streamer.pr_slots ?? 1);
         }
     }, [streamer]);
 
@@ -46,8 +46,8 @@ const StreamerSettingsModal = ({ streamer, isOpen, onClose, onSave, mode = 'glob
         try {
             if (isOverride) {
                 await onSave({
-                    priority_override: priorityOverride,
-                    pr_slots_override: prSlotsOverride,
+                    current_stream_priority_override: priorityOverride,
+                    current_stream_pr_slots_override: prSlotsOverride,
                     is_pinned: isPinned,
                 });
             } else {

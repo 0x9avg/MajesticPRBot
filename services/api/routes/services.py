@@ -17,6 +17,7 @@ from runtime_status import (
     record_service_heartbeat,
 )
 from schemas.envelope import accepted_envelope, error_envelope, success_envelope
+from services.outbox import publish_integration_event
 
 router = APIRouter(prefix="/services", tags=["Services"])
 
@@ -99,19 +100,10 @@ async def trigger_twitch_sync(
 ):
     trace_id = get_trace_id(request)
 
-    if not broker:
-        return JSONResponse(
-            status_code=503,
-            content=error_envelope(
-                message="Broker unavailable",
-                code="BROKER_UNAVAILABLE",
-                trace_id=trace_id,
-            ),
-        )
-
-    await broker.publish(
-        "service.twitch.sync",
-        {
+    publish_ok = await publish_integration_event(
+        request.app,
+        routing_key="service.twitch.sync",
+        payload={
             "event": "service.twitch.sync",
             "trace_id": trace_id,
             "requested_by": {
@@ -122,6 +114,16 @@ async def trigger_twitch_sync(
             },
         },
     )
+
+    if not publish_ok:
+        return JSONResponse(
+            status_code=503,
+            content=error_envelope(
+                message="Broker unavailable",
+                code="BROKER_UNAVAILABLE",
+                trace_id=trace_id,
+            ),
+        )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,

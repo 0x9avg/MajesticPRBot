@@ -39,8 +39,8 @@ export function MediaDashboard() {
         pr_slots?: number;
         is_pinned?: boolean;
         allow_juniors?: boolean;
-        priority_override?: number;
-        pr_slots_override?: number;
+        current_stream_priority_override?: number;
+        current_stream_pr_slots_override?: number;
     }) => {
         if (!selectedStreamer) return;
         try {

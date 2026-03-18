@@ -140,12 +140,10 @@ async def test_get_active_and_scheduled_events(build_api_app, fake_db) -> None:
         "priority": 0,
         "is_pinned": False,
         "start_time": datetime.now(MSK) + timedelta(hours=1),
-        "channel_id": 100,
         "created_by": 1,
         "is_active": True,
         "created_at": datetime.now(MSK),
         "notification_sent": False,
-        "message_id": 0,
     }
     fake_db.event_participants[event_id] = {}
 
@@ -174,12 +172,10 @@ async def test_get_all_events_returns_sorted_with_participants(
             "priority": 0,
             "is_pinned": False,
             "start_time": None,
-            "channel_id": 100,
             "created_by": 1,
             "is_active": False,
             "created_at": now - timedelta(days=2),
             "notification_sent": True,
-            "message_id": 0,
         },
         2: {
             "id": 2,
@@ -190,12 +186,10 @@ async def test_get_all_events_returns_sorted_with_participants(
             "priority": 0,
             "is_pinned": True,
             "start_time": None,
-            "channel_id": 100,
             "created_by": 1,
             "is_active": True,
             "created_at": now - timedelta(days=1),
             "notification_sent": True,
-            "message_id": 0,
         },
         3: {
             "id": 3,
@@ -206,12 +200,10 @@ async def test_get_all_events_returns_sorted_with_participants(
             "priority": 0,
             "is_pinned": False,
             "start_time": None,
-            "channel_id": 100,
             "created_by": 1,
             "is_active": True,
             "created_at": now,
             "notification_sent": True,
-            "message_id": 0,
         },
     }
     fake_db.event_participants = {1: {}, 2: {9001: now}, 3: {}}
@@ -256,11 +248,17 @@ async def test_join_leave_and_end_event(build_api_app, fake_db) -> None:
         ended = await client.post("/api/events/1/end")
 
     assert join_ok.status_code == 200
+    assert join_ok.json()["data"]["pr_id"] == "1001"
+    assert "user_id" not in join_ok.json()["data"]
     assert join_dupe.status_code == 400
     assert leave.status_code == 200
+    assert leave.json()["data"]["pr_id"] == "1001"
+    assert "user_id" not in leave.json()["data"]
     assert ended.status_code == 200
     assert fake_db.events_by_id[1]["is_active"] is False
     assert len(ended.json()["data"]["participants"]) == 2
+    assert all("pr_id" in item for item in ended.json()["data"]["participants"])
+    assert all("user_id" not in item for item in ended.json()["data"]["participants"])
 
 
 async def test_update_event_success_and_not_found(build_api_app) -> None:

@@ -214,8 +214,8 @@ export function MainHub() {
         pr_slots?: number;
         is_pinned?: boolean;
         allow_juniors?: boolean;
-        priority_override?: number;
-        pr_slots_override?: number;
+        current_stream_priority_override?: number;
+        current_stream_pr_slots_override?: number;
     }) => {
         if (!selectedStreamer) return;
         try {
@@ -321,7 +321,7 @@ export function MainHub() {
 
     const availableStreamerSlots = onlineStreamers.reduce((total, streamer) => {
         const assignments = streamer.assignments || [];
-        const effectiveSlots = streamer.pr_slots_override ?? streamer.pr_slots;
+        const effectiveSlots = streamer.current_stream_pr_slots_override ?? streamer.pr_slots;
         return total + Math.max(effectiveSlots - assignments.length, 0);
     }, 0);
 
@@ -588,7 +588,7 @@ export function MainHub() {
                                         const assignments = streamer.assignments || [];
                                         const isUserClaimed = assignments.some((a: StreamerAssignment) => String(a.pr_id) === String(user?.discord_id));
 
-                                        const effectiveSlots = streamer.pr_slots_override ?? streamer.pr_slots;
+                                        const effectiveSlots = streamer.current_stream_pr_slots_override ?? streamer.pr_slots;
                                         // A user can claim if there are slots AND they aren't already claimed to someone else
                                         const hasSlots = assignments.length < effectiveSlots;
 
@@ -606,7 +606,7 @@ export function MainHub() {
                                                             streamer.priority === 3 ? 'bg-red-500/20 text-red-400 border-red-500/30' :
                                                                 'bg-white/5 text-white/50 border-white/20'
                                                         }`}>
-                                                        {streamer.priority_override ?? streamer.priority}
+                                                        {streamer.current_stream_priority_override ?? streamer.priority}
                                                         {streamer.is_pinned && (
                                                             <div className="absolute -top-2 -right-2 bg-blue-500 text-white p-0.5 rounded-full shadow-lg border border-[#1e1e1e]">
                                                                 <MapPin className="w-3 h-3" />

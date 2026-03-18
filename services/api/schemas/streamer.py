@@ -108,8 +108,8 @@ class StreamerUpdate(BaseModel):
     pr_slots: Optional[int] = Field(None, ge=1)
     is_pinned: Optional[bool] = None
     allow_juniors: Optional[bool] = None
-    priority_override: Optional[int] = Field(None, ge=0, le=3)
-    pr_slots_override: Optional[int] = Field(None, ge=1)
+    current_stream_priority_override: Optional[int] = Field(None, ge=0, le=3)
+    current_stream_pr_slots_override: Optional[int] = Field(None, ge=1)
 
 
 class StreamerResponse(BaseModel):
@@ -121,18 +121,16 @@ class StreamerResponse(BaseModel):
     started_at: Optional[datetime] = None
     priority: int
     pr_slots: int = 1
-    priority_override: Optional[int] = None
-    pr_slots_override: Optional[int] = None
+    current_stream_priority_override: Optional[int] = None
+    current_stream_pr_slots_override: Optional[int] = None
     game_id: Optional[Snowflake] = None
     game_name: Optional[str] = None
     stream_title: Optional[str] = None
     stream_thumbnail_url: Optional[str] = None
     profile_image_url: Optional[str] = None
-    added_at: datetime
-    added_by_id: Optional[Snowflake] = None
     assignments: List[dict] = Field(default_factory=list)
 
-    @field_validator("started_at", "added_at", mode="before")
+    @field_validator("started_at", mode="before")
     @classmethod
     def make_aware(cls, v):
         if isinstance(v, datetime) and v.tzinfo is None:

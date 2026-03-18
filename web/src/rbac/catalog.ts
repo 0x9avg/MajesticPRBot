@@ -1,7 +1,7 @@
 import type { PermissionKey } from './guards';
 
 export interface AdminTabDefinition {
-    id: 'events' | 'users' | 'media' | 'requests' | 'assistants' | 'guild' | 'system';
+    id: 'events' | 'users' | 'media' | 'requests' | 'assistants' | 'sanctions' | 'guild' | 'system';
     label: string;
     requireAny: PermissionKey[];
 }
@@ -20,6 +20,11 @@ export const ADMIN_TABS: AdminTabDefinition[] = [
             'assistants.sanctions.manage',
             'assistants.warnings.manage',
         ],
+    },
+    {
+        id: 'sanctions',
+        label: 'Санкции',
+        requireAny: ['assistants.sanctions.manage'],
     },
     { id: 'guild', label: 'Сервер', requireAny: ['guild.settings.update', 'guild.templates.update', 'guild.rates.update'] },
     { id: 'system', label: 'Система', requireAny: ['monitoring.view'] },

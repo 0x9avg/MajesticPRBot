@@ -75,6 +75,15 @@ export const getMskTodayStr = (): string => {
 };
 
 /**
+ * Returns a Moscow date shifted by N days from today in YYYY-MM-DD format.
+ */
+export const getMskDateOffsetStr = (days: number): string => {
+    const base = parseMskDate(getMskTodayStr()) ?? new Date();
+    base.setUTCDate(base.getUTCDate() + days);
+    return formatToMskIso(base).slice(0, 10);
+};
+
+/**
  * Formats a Date object specifically to 'YYYY-MM-DDTHH:mm:ss' in MSK.
  */
 export const formatToMskIso = (date: Date): string => {

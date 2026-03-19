@@ -47,9 +47,55 @@ const ok = (payload: unknown) =>
     });
 
 const createFetchMock = () =>
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
 
+        if (url.endsWith('/api/sanctions/workoff-preview')) {
+            const body = JSON.parse(String(init?.body || '{}')) as { assistant_ids?: Array<string | number> };
+            expect(body.assistant_ids).toEqual(['101']);
+            return ok({
+                status: 'success',
+                data: {
+                    assistants: [
+                        {
+                            assistant_id: '101',
+                            nickname: 'Tester',
+                            items: [
+                                {
+                                    metric: 'spec',
+                                    multiplier: 1,
+                                    period_start: '2026-03-20',
+                                    period_end: '2026-03-22',
+                                    required_work_days: 3,
+                                    counted_work_days: 2,
+                                    effective_period_end: '2026-03-24',
+                                    uo_days_count: 1,
+                                    status: 'pending',
+                                    days: [
+                                        {
+                                            date: '2026-03-20',
+                                            manual_status: 'P',
+                                            counts_for_workoff: true,
+                                            required_amount: 4,
+                                            actual_amount: 4,
+                                            day_status: 'completed',
+                                        },
+                                        {
+                                            date: '2026-03-21',
+                                            manual_status: 'U',
+                                            counts_for_workoff: false,
+                                            required_amount: 4,
+                                            actual_amount: 0,
+                                            day_status: 'leave_skipped',
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            });
+        }
         if (url.includes('/api/assistants/101/sessions')) {
             return ok({ status: 'success', data: [] });
         }
@@ -89,12 +135,72 @@ const createFetchMock = () =>
                         display_issued_at: '2026-03-12T11:15:00',
                         source_type: 'manual',
                         auto_relief_date: '2026-03-20',
-                        workoff_items: [],
+                        workoff_items: [
+                            {
+                                metric: 'spec',
+                                multiplier: 1,
+                                period_start: '2026-03-20',
+                                period_end: '2026-03-22',
+                                required_work_days: 3,
+                                counted_work_days: 2,
+                                effective_period_end: '2026-03-24',
+                                uo_days_count: 1,
+                                status: 'pending',
+                                days: [
+                                    {
+                                        date: '2026-03-20',
+                                        manual_status: 'P',
+                                        counts_for_workoff: true,
+                                        required_amount: 4,
+                                        actual_amount: 4,
+                                        day_status: 'completed',
+                                    },
+                                    {
+                                        date: '2026-03-21',
+                                        manual_status: 'U',
+                                        counts_for_workoff: false,
+                                        required_amount: 4,
+                                        actual_amount: 0,
+                                        day_status: 'leave_skipped',
+                                    },
+                                ],
+                            },
+                        ],
                         workoff_progress_summary: {
-                            has_workoff: false,
-                            total_items: 0,
+                            has_workoff: true,
+                            total_items: 1,
                             completed_items: 0,
-                            items: [],
+                            items: [
+                                {
+                                    metric: 'spec',
+                                    multiplier: 1,
+                                    period_start: '2026-03-20',
+                                    period_end: '2026-03-22',
+                                    required_work_days: 3,
+                                    counted_work_days: 2,
+                                    effective_period_end: '2026-03-24',
+                                    uo_days_count: 1,
+                                    status: 'pending',
+                                    days: [
+                                        {
+                                            date: '2026-03-20',
+                                            manual_status: 'P',
+                                            counts_for_workoff: true,
+                                            required_amount: 4,
+                                            actual_amount: 4,
+                                            day_status: 'completed',
+                                        },
+                                        {
+                                            date: '2026-03-21',
+                                            manual_status: 'U',
+                                            counts_for_workoff: false,
+                                            required_amount: 4,
+                                            actual_amount: 0,
+                                            day_status: 'leave_skipped',
+                                        },
+                                    ],
+                                },
+                            ],
                         },
                     },
                 ],
@@ -303,5 +409,56 @@ describe('AssistantsManagement', () => {
             assistant_id: '101',
             mchat_count: 7,
         });
+    });
+
+    it('fetches and renders manual workoff preview with daily leave-aware breakdown', async () => {
+        const fetchMock = createFetchMock();
+        vi.stubGlobal('fetch', fetchMock);
+
+        const user = userEvent.setup();
+        render(<AssistantsManagement />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Ручная санкция')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: '+ Добавить отработку' }));
+
+        await waitFor(() => {
+            expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sanctions/workoff-preview')).toBe(true);
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Предпросмотр отработки')).toBeInTheDocument();
+        });
+
+        expect(screen.getByText('U/O не засчитываются и продлевают отработку.')).toBeInTheDocument();
+        expect(screen.getAllByText('Дней по плану: 3').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('Эффективная дата окончания: 2026-03-24').length).toBeGreaterThan(0);
+        const manualLabelsBeforeExpand = screen.queryAllByText('вручную: У').length;
+        await user.click(screen.getByRole('button', { name: /Показать дни/i }));
+        await waitFor(() => {
+            expect(screen.getByRole('button', { name: 'Скрыть дни' })).toBeInTheDocument();
+        });
+        expect(screen.queryAllByText('вручную: У').length).toBeGreaterThan(manualLabelsBeforeExpand);
+    });
+
+    it('renders daily workoff progress in active sanctions', async () => {
+        const fetchMock = createFetchMock();
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<AssistantsManagement />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Активные санкции')).toBeInTheDocument();
+        });
+
+        await waitFor(() => {
+            expect(screen.getAllByText('План: 3').length).toBeGreaterThan(0);
+        });
+
+        expect(screen.getAllByText('Учтено: 2').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('Эффективная дата конца: 2026-03-24').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('вручную: У').length).toBeGreaterThan(0);
     });
 });

@@ -16,12 +16,6 @@ import { APP_VERSION } from '../../config/app';
 
 export function AdminPanel() {
     const { user } = useOutletContext<OutletUserContext>();
-
-    React.useEffect(() => {
-        const prev = document.body.style.overflow;
-        document.body.style.overflow = 'hidden';
-        return () => { document.body.style.overflow = prev; };
-    }, []);
     const iconByTab = {
         events: CalendarPlus,
         users: UserPlus,
@@ -50,6 +44,12 @@ export function AdminPanel() {
         }
     }, [activeTab, menuItems]);
 
+    React.useEffect(() => {
+        const prev = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => { document.body.style.overflow = prev; };
+    }, []);
+
     if (menuItems.length === 0) {
         return (
             <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-8 text-center text-white/50">
@@ -59,7 +59,7 @@ export function AdminPanel() {
     }
 
     return (
-        <div className="flex gap-4 h-[calc(100vh-140px)] animate-[fadeIn_0.5s_ease-out] -mx-[calc(50vw-50%)] pl-6 lg:pl-12 pr-10 lg:pr-20">
+        <div className="flex h-[calc(100vh-140px)] gap-4 animate-[fadeIn_0.5s_ease-out] -mx-[calc(50vw-50%)] pl-6 lg:pl-12 pr-10 lg:pr-20">
             {/* Sidebar */}
             <div className="w-64 shrink-0 flex flex-col">
                 <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-4 flex flex-col gap-2 h-full">

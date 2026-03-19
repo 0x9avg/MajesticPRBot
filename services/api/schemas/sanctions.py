@@ -33,6 +33,22 @@ class WorkoffItemInput(BaseModel):
         return self
 
 
+class WorkoffPreviewRequest(BaseModel):
+    assistant_ids: list[Snowflake] = Field(default_factory=list)
+    workoff_items: list[WorkoffItemInput] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_preview_request(self):
+        if not self.assistant_ids:
+            raise ValueError("Нужно указать хотя бы одного ассистента")
+        if len(self.assistant_ids) != len(set(self.assistant_ids)):
+            raise ValueError("Нельзя добавить одного ассистента в предпросмотр несколько раз")
+        metrics = [item.metric for item in self.workoff_items]
+        if len(metrics) != len(set(metrics)):
+            raise ValueError("Каждый тип отработки можно выбрать только один раз")
+        return self
+
+
 class AssistantDayPointAdjustmentUpsertRequest(BaseModel):
     assistant_id: Snowflake
     work_date: date

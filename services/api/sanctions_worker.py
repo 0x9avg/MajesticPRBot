@@ -30,10 +30,18 @@ def _amqp_url() -> str:
 
 async def _process_day(database: Database, basis_date):
     result = await database.process_queued_sanction_batches_for_date(basis_date)
+    if result.get("skipped"):
+        logger.info(
+            "Skipped nightly sanctions for %s: status=%s",
+            basis_date,
+            (result.get("nightly_run") or {}).get("status"),
+        )
+        return
     logger.info(
-        "Processed nightly sanctions for %s: batches=%s auto_expired=%s relieved=%s month_reset=%s",
+        "Processed nightly sanctions for %s: batches=%s custom_workoff=%s auto_expired=%s relieved=%s month_reset=%s",
         basis_date,
         len(result.get("processed_batches") or []),
+        len((result.get("custom_workoff") or {}).get("relieved") or []),
         len((result.get("warning_auto_expiry") or {}).get("relieved") or []),
         len((result.get("default_relief") or {}).get("relieved") or []),
         (result.get("month_reset") or {}).get("reset_count", 0),
@@ -76,13 +84,20 @@ async def _consume_issue_now_message(database: Database, message: IncomingMessag
     try:
         await _process_issue_now(database, payload)
     except Exception as exc:
+        headers = getattr(message, "headers", {}) or {}
+        try:
+            retry_count = int(headers.get("x-retry-count") or 0)
+        except Exception:
+            retry_count = 0
+        redelivered = bool(getattr(message, "redelivered", False))
+        requeue = retry_count < 3 and not redelivered
         logger.error(
             "Failed to process manual sanction message for operation %s: %s",
             payload.get("operation_id"),
             exc,
             exc_info=True,
         )
-        await message.nack(requeue=True)
+        await message.nack(requeue=requeue)
         return
 
     await message.ack()
@@ -126,17 +141,17 @@ async def main():
     channel = None
     logger.info("Sanctions worker started")
 
-    last_processed_basis_date = None
+    last_attempted_basis_date = None
     try:
         connection, channel = await _run_broker_consumer(database)
         while True:
             now_msk = datetime.now(MSK)
             basis_date = now_msk.date() - timedelta(days=1)
 
-            if now_msk.hour >= 0 and basis_date != last_processed_basis_date:
+            if basis_date != last_attempted_basis_date:
                 try:
                     await _process_day(database, basis_date)
-                    last_processed_basis_date = basis_date
+                    last_attempted_basis_date = basis_date
                 except Exception as exc:
                     logger.error(
                         "Nightly sanctions processing failed for %s: %s",

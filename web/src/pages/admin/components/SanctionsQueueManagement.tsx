@@ -12,6 +12,9 @@ import type {
     MonthlySanctionSettings,
     SanctionOperation,
     WorkoffItem,
+    WorkoffPreviewAssistant,
+    WorkoffPreviewResponse,
+    WorkoffProgressDay,
 } from '../../../types/domain';
 import { formatMskToLocal, getMskDateOffsetStr } from '../../../utils/datetime';
 
@@ -27,6 +30,44 @@ interface WorkoffDraftItem {
     period_start: string;
     period_end: string;
 }
+
+const workoffMetricLabel = (metric: WorkoffMetric) => ({
+    spec: 'Спек',
+    complaints: 'Жалобы',
+    mchat: 'MChat',
+}[metric]);
+
+const workoffStatusLabel = (status?: string | null) => ({
+    pending: 'В процессе',
+    completed: 'Завершена',
+    failed: 'Не выполнена',
+    leave_skipped: 'Пропуск по У/О',
+}[status || ''] || status || 'Неизвестно');
+
+const workoffDayStatusLabel = (status?: string | null) => ({
+    pending: 'Ожидает',
+    completed: 'выполнена',
+    failed: 'не выполнена',
+    leave_skipped: 'У/О',
+}[status || ''] || status || 'Неизвестно');
+
+const workoffCountedLabel = (countsForWorkoff?: boolean) => (countsForWorkoff ? 'учтен' : 'не учтен');
+
+const workoffManualStatusLabel = (manualStatus?: string | null) => ({
+    P: 'вручную: П',
+    U: 'вручную: У',
+    O: 'вручную: О',
+}[manualStatus || ''] || (manualStatus ? `вручную: ${manualStatus}` : ''));
+
+const workoffPreviewItemKey = (assistantId: string, metric: WorkoffMetric, index: number) =>
+    `${assistantId}-${metric}-${index}`;
+
+const workoffDayStatusTone = (status?: string | null) => {
+    if (status === 'completed') return 'text-emerald-200 bg-emerald-500/10 border-emerald-400/20';
+    if (status === 'failed') return 'text-rose-200 bg-rose-500/10 border-rose-400/20';
+    if (status === 'leave_skipped') return 'text-amber-200 bg-amber-500/10 border-amber-400/20';
+    return 'text-sky-200 bg-sky-500/10 border-sky-400/20';
+};
 
 const DEFAULT_SETTINGS: MonthlySanctionSettings = {
     check_cycle_size: 5,
@@ -137,18 +178,13 @@ const processedByLabel = (operation: SanctionOperation) => {
     return 'Не указано';
 };
 
-const issueStatusLabel = (status: 'pending' | 'issued' | 'skipped_immunity' | 'failed') => ({
+const issueStatusLabel = (status: 'pending' | 'issued' | 'skipped_immunity' | 'skipped_leave' | 'failed') => ({
     pending: 'Ожидает',
     issued: 'Выдано',
     skipped_immunity: 'Пропущен по иммунитету',
+    skipped_leave: 'Пропущен по У/О',
     failed: 'Ошибка',
 }[status]);
-
-const workoffMetricLabel = (metric: WorkoffMetric) => ({
-    spec: 'Спек',
-    complaints: 'Жалобы',
-    mchat: 'MChat',
-}[metric]);
 
 const rangeUpperBound = (end: number | null) => (end === null ? Number.POSITIVE_INFINITY : end);
 
@@ -186,6 +222,16 @@ const normalizeCheckRule = (rule: MonthlyCheckRule): MonthlyCheckRule => ({
     penalty_amount: isFixedAmountKind(rule.penalty_kind as SanctionKind) ? 1 : rule.penalty_amount,
 });
 
+const normalizeWorkoffPreviewResponse = (payload: unknown): WorkoffPreviewAssistant[] => {
+    const data = unwrapApiData<WorkoffPreviewResponse | WorkoffPreviewAssistant[] | { assistants?: WorkoffPreviewAssistant[]; items?: WorkoffPreviewAssistant[] }>(payload);
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object') {
+        if (Array.isArray(data.assistants)) return data.assistants;
+        if (Array.isArray(data.items)) return data.items;
+    }
+    return [];
+};
+
 const SanctionsQueueManagement = () => {
     const { toast, showToast, closeToast } = usePopupToast(3500);
     const { confirm, dialogProps } = useConfirmDialog();
@@ -210,6 +256,10 @@ const SanctionsQueueManagement = () => {
         selectedAssistantIds: [] as string[],
         workoffItems: [] as WorkoffDraftItem[],
     });
+    const [workoffPreview, setWorkoffPreview] = React.useState<WorkoffPreviewAssistant[]>([]);
+    const [workoffPreviewLoading, setWorkoffPreviewLoading] = React.useState(false);
+    const [workoffPreviewError, setWorkoffPreviewError] = React.useState<string | null>(null);
+    const [workoffPreviewExpanded, setWorkoffPreviewExpanded] = React.useState<Record<string, boolean>>({});
 
     const assistantOptions = React.useMemo(
         () => assistants.map((assistant) => ({ value: String(assistant.pr_id), label: getAssistantDisplay(assistant) })),
@@ -259,6 +309,8 @@ const SanctionsQueueManagement = () => {
         () => checkRules.map((rule) => normalizeCheckRule(rule)),
         [checkRules],
     );
+
+    const workoffItemsPayload = React.useMemo(() => buildWorkoffPayload(operationForm.workoffItems), [operationForm.workoffItems]);
 
     const loadAssistants = React.useCallback(async () => {
         const response = await apiFetch('/api/assistants');
@@ -396,6 +448,59 @@ const SanctionsQueueManagement = () => {
         }));
     }, [assistants, selectionDirty]);
 
+    React.useEffect(() => {
+        if (workoffItemsPayload.length === 0 || operationForm.selectedAssistantIds.length === 0) {
+            setWorkoffPreview([]);
+            setWorkoffPreviewError(null);
+            setWorkoffPreviewLoading(false);
+            setWorkoffPreviewExpanded({});
+            return;
+        }
+
+        let cancelled = false;
+        setWorkoffPreviewLoading(true);
+        setWorkoffPreviewError(null);
+
+        const timerId = window.setTimeout(() => {
+            void (async () => {
+                try {
+                    const response = await apiFetch('/api/sanctions/workoff-preview', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            assistant_ids: operationForm.selectedAssistantIds,
+                            workoff_items: workoffItemsPayload,
+                        }),
+                    });
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({} as unknown));
+                        throw new Error((payload as { detail?: string }).detail || 'Не удалось загрузить предпросмотр отработки');
+                    }
+                    const payload = await response.json() as unknown;
+                    if (!cancelled) {
+                        setWorkoffPreviewExpanded({});
+                        setWorkoffPreview(normalizeWorkoffPreviewResponse(payload));
+                    }
+                } catch (error: unknown) {
+                    if (!cancelled) {
+                        setWorkoffPreview([]);
+                        setWorkoffPreviewExpanded({});
+                        setWorkoffPreviewError(error instanceof Error ? error.message : 'Не удалось загрузить предпросмотр отработки');
+                    }
+                } finally {
+                    if (!cancelled) {
+                        setWorkoffPreviewLoading(false);
+                    }
+                }
+            })();
+        }, 250);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timerId);
+        };
+    }, [operationForm.selectedAssistantIds, workoffItemsPayload]);
+
     const runMutation = React.useCallback(async (successMessage: string, action: () => Promise<void>) => {
         setBusy(true);
         try {
@@ -406,7 +511,7 @@ const SanctionsQueueManagement = () => {
         } finally {
             setBusy(false);
         }
-        }, [showToast]);
+    }, [showToast]);
 
     const handleRecipientModeChange = (mode: RecipientMode) => {
         setOperationForm((prev) => ({
@@ -436,7 +541,7 @@ const SanctionsQueueManagement = () => {
                 ...(needsWarningDate ? { auto_relief_date: operationForm.auto_relief_date } : {}),
                 recipient_mode: operationForm.recipient_mode,
                 assistant_ids: operationForm.selectedAssistantIds,
-                workoff_items: buildWorkoffPayload(operationForm.workoffItems),
+                workoff_items: workoffItemsPayload,
             }),
         });
         const payload = await response.json().catch(() => ({} as unknown));
@@ -830,6 +935,108 @@ const SanctionsQueueManagement = () => {
                             {renderWorkoffItems(operationForm.workoffItems, (nextItems) => setOperationForm((prev) => ({ ...prev, workoffItems: nextItems })))}
                         </div>
 
+                        {operationForm.workoffItems.length > 0 && (
+                            <div className="rounded-2xl border border-white/10 bg-sky-500/5 p-4 space-y-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="text-white font-medium">Предпросмотр отработки</div>
+                                    {workoffPreviewLoading && <div className="text-xs text-white/45">Обновляем...</div>}
+                                </div>
+                                {workoffPreviewError && (
+                                    <div className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
+                                        {workoffPreviewError}
+                                    </div>
+                                )}
+                                {!workoffPreviewLoading && workoffPreview.length === 0 && !workoffPreviewError && (
+                                    <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/50">
+                                        Добавьте валидную отработку, чтобы увидеть расчет.
+                                    </div>
+                                )}
+                                <div className="space-y-3">
+                                    {workoffPreview.map((assistantPreview) => (
+                                        <div key={assistantPreview.assistant_id} className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-3">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="text-sm text-white/80 font-medium">
+                                                    {assistantPreview.nickname || getAssistantLabel(assistantPreview.assistant_id)}
+                                                </div>
+                                                <div className="text-xs text-white/45">ID {assistantPreview.assistant_id}</div>
+                                            </div>
+                                            <div className="space-y-2">
+                                                {assistantPreview.items.map((item, index) => (
+                                                    <div key={`${assistantPreview.assistant_id}-${item.metric}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] p-3 space-y-2">
+                                                        {(() => {
+                                                            const itemKey = workoffPreviewItemKey(assistantPreview.assistant_id, item.metric, index);
+                                                            const isExpanded = Boolean(workoffPreviewExpanded[itemKey]);
+                                                            const days = item.days ?? [];
+                                                            const hasDays = days.length > 0;
+                                                            return (
+                                                                <>
+                                                                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                                                                        <span className="text-white/80">{workoffMetricLabel(item.metric)}</span>
+                                                                        <span className="text-white/45">x{item.multiplier}</span>
+                                                                        <span className="text-white/45">{item.period_start} - {item.period_end}</span>
+                                                                    </div>
+                                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                                        <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                            Дней по плану: {item.required_work_days ?? 0}
+                                                                        </div>
+                                                                        <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                            Учтено: {item.counted_work_days ?? 0}
+                                                                        </div>
+                                                                        <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                            У/О: {item.uo_days_count ?? 0}
+                                                                        </div>
+                                                                        <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70 md:col-span-2">
+                                                                            Статус: {workoffStatusLabel(item.status)}
+                                                                        </div>
+                                                                        <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70 md:col-span-2">
+                                                                            Эффективная дата окончания: {item.effective_period_end || 'не определена'}
+                                                                        </div>
+                                                                    </div>
+                                                                    {hasDays && (
+                                                                        <div className="pt-1">
+                                                                            <button
+                                                                                type="button"
+                                                                                className="inline-flex items-center rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-white/75 transition hover:bg-white/10 hover:text-white"
+                                                                                onClick={() => setWorkoffPreviewExpanded((prev) => ({ ...prev, [itemKey]: !prev[itemKey] }))}
+                                                                            >
+                                                                                {isExpanded ? 'Скрыть дни' : `Показать дни (${days.length})`}
+                                                                            </button>
+                                                                        </div>
+                                                                    )}
+                                                                    {hasDays && isExpanded && (
+                                                                        <div className="space-y-2">
+                                                                            {days.map((day: WorkoffProgressDay) => (
+                                                                                <div key={`${assistantPreview.assistant_id}-${item.metric}-${day.date}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
+                                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                                        <span className="text-white/90">{day.date}</span>
+                                                                                        <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                                                                                            {workoffDayStatusLabel(day.day_status)}
+                                                                                        </span>
+                                                                                        {day.manual_status && (
+                                                                                            <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                    <div className="flex flex-wrap gap-3 text-white/50">
+                                                                                        <span>Требуется: {day.required_amount ?? 0}</span>
+                                                                                        <span>Отработано: {day.actual_amount ?? 0}</span>
+                                                                                        <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                </>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
                         <button
                             disabled={busy}
                             onClick={() => runMutation('Операция добавлена в очередь выдачи', submitOperation)}
@@ -906,6 +1113,12 @@ const SanctionsQueueManagement = () => {
                                         <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Кому выдать<div className="text-white font-medium">{recipientLabel(selectedDraft.recipient_mode)}</div></div>
                                         <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Статус<div className="text-white font-medium">{operationStatusLabel(selectedDraft.status)}</div></div>
                                         <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Участников<div className="text-white font-medium">{selectedDraft.effective_members ?? 0}</div></div>
+                                        {(selectedDraft.skipped_immunity_members ?? 0) > 0 && (
+                                            <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Пропуск по иммунитету<div className="text-white font-medium">{selectedDraft.skipped_immunity_members ?? 0}</div></div>
+                                        )}
+                                        {(selectedDraft.skipped_leave_members ?? 0) > 0 && (
+                                            <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Пропуск по У/О<div className="text-white font-medium">{selectedDraft.skipped_leave_members ?? 0}</div></div>
+                                        )}
                                         {selectedDraft.auto_relief_date && (
                                             <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Дата автоснятия<div className="text-white font-medium">{selectedDraft.auto_relief_date}</div></div>
                                         )}
@@ -915,8 +1128,41 @@ const SanctionsQueueManagement = () => {
                                         <div className="space-y-2">
                                             <div className="text-white font-medium">Отработка</div>
                                             {selectedDraft.workoff_items.map((item, index) => (
-                                                <div key={`${selectedDraft.id}-workoff-${index}`} className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white/70">
-                                                    {workoffMetricLabel(item.metric)} · x{item.multiplier} · {item.period_start} - {item.period_end}
+                                                <div key={`${selectedDraft.id}-workoff-${index}`} className="rounded-xl border border-white/10 bg-black/20 p-4 space-y-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-white/70">
+                                                        <div>
+                                                            {workoffMetricLabel(item.metric)} · x{item.multiplier} · {item.period_start} - {item.period_end}
+                                                        </div>
+                                                        <div>{workoffStatusLabel(item.status)}</div>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                        <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">План: {item.required_work_days ?? item.target_amount ?? 0}</div>
+                                                        <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">Учтено: {item.counted_work_days ?? item.amount_done ?? 0}</div>
+                                                        <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">У/О: {item.uo_days_count ?? 0}</div>
+                                                        <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70 md:col-span-2">Эффективный конец: {item.effective_period_end || 'не определена'}</div>
+                                                    </div>
+                                                    {item.days && item.days.length > 0 && (
+                                                        <div className="space-y-2">
+                                                            {item.days.map((day: WorkoffProgressDay) => (
+                                                                <div key={`${selectedDraft.id}-workoff-${index}-${day.date}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
+                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                        <span className="text-white/90">{day.date}</span>
+                                                                        <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                                                                            {workoffDayStatusLabel(day.day_status)}
+                                                                        </span>
+                                                                        {day.manual_status && (
+                                                                            <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="flex flex-wrap gap-3 text-white/50">
+                                                                        <span>Требуется: {day.required_amount ?? 0}</span>
+                                                                        <span>Отработано: {day.actual_amount ?? 0}</span>
+                                                                        <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>
@@ -1029,6 +1275,12 @@ const SanctionsQueueManagement = () => {
                                     <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Статус<div className="text-white font-medium">{operationStatusLabel(selectedHistory.status)}</div></div>
                                     <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Как выдано<div className="text-white font-medium">{processingModeLabel(selectedHistory.processing_mode)}</div></div>
                                     <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Кем выдано<div className="text-white font-medium">{processedByLabel(selectedHistory)}</div></div>
+                                    {(selectedHistory.skipped_immunity_members ?? 0) > 0 && (
+                                        <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Пропуск по иммунитету<div className="text-white font-medium">{selectedHistory.skipped_immunity_members ?? 0}</div></div>
+                                    )}
+                                    {(selectedHistory.skipped_leave_members ?? 0) > 0 && (
+                                        <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Пропуск по У/О<div className="text-white font-medium">{selectedHistory.skipped_leave_members ?? 0}</div></div>
+                                    )}
                                     {selectedHistory.auto_relief_date && (
                                         <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-white/70">Дата автоснятия<div className="text-white font-medium">{selectedHistory.auto_relief_date}</div></div>
                                     )}
@@ -1038,8 +1290,41 @@ const SanctionsQueueManagement = () => {
                                     <div className="space-y-2">
                                         <div className="text-white font-medium">Отработка</div>
                                         {selectedHistory.workoff_items.map((item, index) => (
-                                            <div key={`${selectedHistory.id}-history-workoff-${index}`} className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white/70">
-                                                {workoffMetricLabel(item.metric)} · x{item.multiplier} · {item.period_start} - {item.period_end}
+                                            <div key={`${selectedHistory.id}-history-workoff-${index}`} className="rounded-xl border border-white/10 bg-black/20 p-4 space-y-3">
+                                                <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-white/70">
+                                                    <div>
+                                                        {workoffMetricLabel(item.metric)} · x{item.multiplier} · {item.period_start} - {item.period_end}
+                                                    </div>
+                                                    <div>{workoffStatusLabel(item.status)}</div>
+                                                </div>
+                                                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">План: {item.required_work_days ?? item.target_amount ?? 0}</div>
+                                                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">Учтено: {item.counted_work_days ?? item.amount_done ?? 0}</div>
+                                                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">У/О: {item.uo_days_count ?? 0}</div>
+                                                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70 md:col-span-2">Эффективный конец: {item.effective_period_end || 'не определена'}</div>
+                                                </div>
+                                                {item.days && item.days.length > 0 && (
+                                                    <div className="space-y-2">
+                                                        {item.days.map((day: WorkoffProgressDay) => (
+                                                            <div key={`${selectedHistory.id}-history-workoff-${index}-${day.date}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <span className="text-white/90">{day.date}</span>
+                                                                    <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                                                                        {workoffDayStatusLabel(day.day_status)}
+                                                                    </span>
+                                                                    {day.manual_status && (
+                                                                        <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="flex flex-wrap gap-3 text-white/50">
+                                                                    <span>Требуется: {day.required_amount ?? 0}</span>
+                                                                    <span>Отработано: {day.actual_amount ?? 0}</span>
+                                                                    <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </div>

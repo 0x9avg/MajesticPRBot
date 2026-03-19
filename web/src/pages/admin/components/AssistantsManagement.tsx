@@ -5,7 +5,16 @@ import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from
 import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
 import NotificationToast from '../../../components/feedback/NotificationToast';
 import { useConfirmDialog, usePopupToast } from '../../../components/feedback/hooks';
-import type { ActiveSanction, Assistant, Event, SanctionDayStatus, Streamer } from '../../../types/domain';
+import type {
+    ActiveSanction,
+    Assistant,
+    Event,
+    SanctionDayStatus,
+    Streamer,
+    WorkoffPreviewAssistant,
+    WorkoffPreviewResponse,
+    WorkoffProgressDay,
+} from '../../../types/domain';
 import { unwrapApiData } from '../../../types/api';
 import { parseMskDate, getMskDateOffsetStr, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
@@ -48,6 +57,44 @@ interface WorkoffDraftItem {
     period_start: string;
     period_end: string;
 }
+
+const workoffMetricLabel = (metric: WorkoffMetric) => ({
+    spec: 'Спек',
+    complaints: 'Жалобы',
+    mchat: 'MChat',
+}[metric]);
+
+const workoffStatusLabel = (status?: string | null) => ({
+    pending: 'В процессе',
+    completed: 'Завершена',
+    failed: 'Не выполнена',
+    leave_skipped: 'Пропуск по У/О',
+}[status || ''] || status || 'Неизвестно');
+
+const workoffDayStatusLabel = (status?: string | null) => ({
+    pending: 'Ожидает',
+    completed: 'выполнена',
+    failed: 'не выполнена',
+    leave_skipped: 'У/О',
+}[status || ''] || status || 'Неизвестно');
+
+const workoffCountedLabel = (countsForWorkoff?: boolean) => (countsForWorkoff ? 'учтен' : 'не учтен');
+
+const workoffManualStatusLabel = (manualStatus?: string | null) => ({
+    P: 'вручную: П',
+    U: 'вручную: У',
+    O: 'вручную: О',
+}[manualStatus || ''] || (manualStatus ? `вручную: ${manualStatus}` : ''));
+
+const workoffPreviewItemKey = (assistantId: string, metric: WorkoffMetric, index: number) =>
+    `${assistantId}-${metric}-${index}`;
+
+const workoffDayStatusTone = (status?: string | null) => {
+    if (status === 'completed') return 'text-emerald-200 bg-emerald-500/10 border-emerald-400/20';
+    if (status === 'failed') return 'text-rose-200 bg-rose-500/10 border-rose-400/20';
+    if (status === 'leave_skipped') return 'text-amber-200 bg-amber-500/10 border-amber-400/20';
+    return 'text-sky-200 bg-sky-500/10 border-sky-400/20';
+};
 
 const formatDateTime = (value?: string | null) => {
     return formatMskToLocal(value);
@@ -133,6 +180,18 @@ const getAvailableWorkoffMetrics = (items: WorkoffDraftItem[], currentId?: strin
     return (['spec', 'complaints', 'mchat'] as WorkoffMetric[]).filter((metric) => !used.has(metric));
 };
 
+const normalizeWorkoffPreviewResponse = (payload: unknown): WorkoffPreviewAssistant[] => {
+    const data = unwrapApiData<WorkoffPreviewResponse | WorkoffPreviewAssistant[] | { assistants?: WorkoffPreviewAssistant[]; items?: WorkoffPreviewAssistant[] }>(payload);
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object') {
+        if (Array.isArray(data.assistants)) return data.assistants;
+        if (Array.isArray(data.items)) return data.items;
+    }
+    return [];
+};
+
+const formatWorkoffCounter = (value?: number | null) => Number(value ?? 0);
+
 const getSourceTypeLabel = (value?: string | null) => {
     switch (value) {
         case 'manual':
@@ -213,6 +272,10 @@ const AssistantsManagement = () => {
         auto_relief_date: '',
         workoffItems: [] as WorkoffDraftItem[],
     });
+    const [manualWorkoffPreview, setManualWorkoffPreview] = useState<WorkoffPreviewAssistant[]>([]);
+    const [manualWorkoffPreviewLoading, setManualWorkoffPreviewLoading] = useState(false);
+    const [manualWorkoffPreviewError, setManualWorkoffPreviewError] = useState<string | null>(null);
+    const [manualWorkoffPreviewExpanded, setManualWorkoffPreviewExpanded] = useState<Record<string, boolean>>({});
     const [manualReliefAmountBySanctionId, setManualReliefAmountBySanctionId] = useState<Record<string, string>>({});
     const manualWindow = getDefaultManualWindow();
     const [manualSessionForm, setManualSessionForm] = useState({
@@ -246,6 +309,24 @@ const AssistantsManagement = () => {
             { check: 0, point: 0, percent: 0, oral: 0, strict: 0 },
         )
     ), [activeSanctions]);
+
+    const manualWorkoffItemsPayload = useMemo(() => {
+        const seen = new Set<WorkoffMetric>();
+        return manualSanctionForm.workoffItems
+            .map((item) => ({
+                metric: item.metric,
+                multiplier: Number(item.multiplier),
+                period_start: item.period_start,
+                period_end: item.period_end,
+            }))
+            .filter(
+                (item) => item.period_start
+                    && item.period_end
+                    && Number.isFinite(item.multiplier)
+                    && item.multiplier > 0
+                    && (seen.has(item.metric) ? false : (seen.add(item.metric), true)),
+            );
+    }, [manualSanctionForm.workoffItems]);
 
     const canUseStreamerOrEventSelectors = !optionsLoading && !optionsError;
 
@@ -494,6 +575,59 @@ const AssistantsManagement = () => {
         void loadDayStatus();
     }, [dayStatusDate, fetchAssistantDayStatus, selectedPrId, showToast]);
 
+    useEffect(() => {
+        if (!selectedPrId || manualWorkoffItemsPayload.length === 0) {
+            setManualWorkoffPreview([]);
+            setManualWorkoffPreviewError(null);
+            setManualWorkoffPreviewLoading(false);
+            setManualWorkoffPreviewExpanded({});
+            return;
+        }
+
+        let cancelled = false;
+        setManualWorkoffPreviewLoading(true);
+        setManualWorkoffPreviewError(null);
+
+        const timerId = window.setTimeout(() => {
+            void (async () => {
+                try {
+                    const response = await apiFetch('/api/sanctions/workoff-preview', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            assistant_ids: [selectedPrId],
+                            workoff_items: manualWorkoffItemsPayload,
+                        }),
+                    });
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({} as unknown));
+                        throw new Error((payload as { detail?: string }).detail || 'Не удалось загрузить предпросмотр отработки');
+                    }
+                    const payload = await response.json() as unknown;
+                    if (!cancelled) {
+                        setManualWorkoffPreviewExpanded({});
+                        setManualWorkoffPreview(normalizeWorkoffPreviewResponse(payload));
+                    }
+                } catch (error: unknown) {
+                    if (!cancelled) {
+                        setManualWorkoffPreview([]);
+                        setManualWorkoffPreviewExpanded({});
+                        setManualWorkoffPreviewError(error instanceof Error ? error.message : 'Не удалось загрузить предпросмотр отработки');
+                    }
+                } finally {
+                    if (!cancelled) {
+                        setManualWorkoffPreviewLoading(false);
+                    }
+                }
+            })();
+        }, 250);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timerId);
+        };
+    }, [manualWorkoffItemsPayload, selectedPrId]);
+
     const runMutation = async (
         endpoint: string,
         method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -523,24 +657,6 @@ const AssistantsManagement = () => {
         }
     };
 
-    const buildWorkoffItemsPayload = (items: WorkoffDraftItem[]) => {
-        const seen = new Set<WorkoffMetric>();
-        return items
-            .map((item) => ({
-                metric: item.metric,
-                multiplier: Number(item.multiplier),
-                period_start: item.period_start,
-                period_end: item.period_end,
-            }))
-            .filter(
-                (item) => item.period_start
-                    && item.period_end
-                    && Number.isFinite(item.multiplier)
-                    && item.multiplier > 0
-                    && (seen.has(item.metric) ? false : (seen.add(item.metric), true)),
-            );
-    };
-
     const handleManualSanctionCreate = async () => {
         if (!selectedPrId) return;
         const fixedAmountKind = ['check', 'oral', 'strict'].includes(manualSanctionForm.kind);
@@ -560,7 +676,7 @@ const AssistantsManagement = () => {
             kind: manualSanctionForm.kind,
             ...(needsAmount ? { amount } : {}),
             ...(needsWarningDate ? { auto_relief_date: manualSanctionForm.auto_relief_date } : {}),
-            workoff_items: buildWorkoffItemsPayload(manualSanctionForm.workoffItems),
+            workoff_items: manualWorkoffItemsPayload,
         };
         await runMutation('/api/assistant-sanctions', 'POST', payload);
     };
@@ -1164,6 +1280,110 @@ const AssistantsManagement = () => {
                                         </div>
                                     )}
 
+                                    {manualSanctionForm.workoffItems.length > 0 && (
+                                        <div className="rounded-xl border border-white/10 bg-sky-500/5 p-4 space-y-3">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="text-sm font-medium text-white">Предпросмотр отработки</div>
+                                                {manualWorkoffPreviewLoading && (
+                                                    <div className="text-xs text-white/45">Обновляем...</div>
+                                                )}
+                                            </div>
+                                            {manualWorkoffPreviewError && (
+                                                <div className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
+                                                    {manualWorkoffPreviewError}
+                                                </div>
+                                            )}
+                                            {!manualWorkoffPreviewLoading && manualWorkoffPreview.length === 0 && !manualWorkoffPreviewError && (
+                                                <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/50">
+                                                    Добавьте валидную отработку, чтобы увидеть расчет.
+                                                </div>
+                                            )}
+                                            <div className="space-y-3">
+                                                {manualWorkoffPreview.map((previewAssistant) => (
+                                                    <div key={previewAssistant.assistant_id} className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-3">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <div className="text-sm text-white/80 font-medium">
+                                                                {previewAssistant.nickname || selectedAssistant?.nickname || `Ассистент ${previewAssistant.assistant_id}`}
+                                                            </div>
+                                                            <div className="text-xs text-white/45">ID {previewAssistant.assistant_id}</div>
+                                                        </div>
+                                                        <div className="space-y-2">
+                                                            {previewAssistant.items.map((item, index) => (
+                                                                <div key={`${previewAssistant.assistant_id}-${item.metric}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] p-3 space-y-2">
+                                                                    {(() => {
+                                                                        const itemKey = workoffPreviewItemKey(previewAssistant.assistant_id, item.metric, index);
+                                                                        const isExpanded = Boolean(manualWorkoffPreviewExpanded[itemKey]);
+                                                                        const days = item.days ?? [];
+                                                                        const hasDays = days.length > 0;
+                                                                        return (
+                                                                            <>
+                                                                                <div className="flex flex-wrap items-center gap-2 text-sm">
+                                                                                    <span className="text-white/80">{workoffMetricLabel(item.metric)}</span>
+                                                                                    <span className="text-white/45">x{formatMetricValue(item.multiplier, 1)}</span>
+                                                                                    <span className="text-white/45">{item.period_start} - {item.period_end}</span>
+                                                                                </div>
+                                                                                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                                                    <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                                        Дней по плану: {formatWorkoffCounter(item.required_work_days)}
+                                                                                    </div>
+                                                                                    <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                                        Учтено: {formatWorkoffCounter(item.counted_work_days)}
+                                                                                    </div>
+                                                                                    <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
+                                                                                        У/О: {formatWorkoffCounter(item.uo_days_count)}
+                                                                                    </div>
+                                                                                    <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70 md:col-span-2">
+                                                                                        Статус: {workoffStatusLabel(item.status)}
+                                                                                    </div>
+                                                                                    <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70 md:col-span-2">
+                                                                                        Эффективная дата окончания: {item.effective_period_end || 'не определена'}
+                                                                                    </div>
+                                                                                </div>
+                                                                                {hasDays && (
+                                                                                    <div className="pt-1">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            className="inline-flex items-center rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-white/75 transition hover:bg-white/10 hover:text-white"
+                                                                                            onClick={() => setManualWorkoffPreviewExpanded((prev) => ({ ...prev, [itemKey]: !prev[itemKey] }))}
+                                                                                        >
+                                                                                            {isExpanded ? 'Скрыть дни' : `Показать дни (${days.length})`}
+                                                                                        </button>
+                                                                                    </div>
+                                                                                )}
+                                                                                {hasDays && isExpanded && (
+                                                                                    <div className="space-y-2">
+                                                                                        {days.map((day: WorkoffProgressDay) => (
+                                                                                            <div key={`${previewAssistant.assistant_id}-${item.metric}-${day.date}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
+                                                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                                                    <span className="text-white/90">{day.date}</span>
+                                                                                                    <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                                                                                                        {workoffDayStatusLabel(day.day_status)}
+                                                                                                    </span>
+                                                                                                    {day.manual_status && (
+                                                                                                        <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                                                                                                    )}
+                                                                                                </div>
+                                                                                                <div className="flex flex-wrap gap-3 text-white/50">
+                                                                                                    <span>Требуется: {formatMetricValue(day.required_amount ?? 0)}</span>
+                                                                                                    <span>Отработано: {formatMetricValue(day.actual_amount ?? 0)}</span>
+                                                                                                    <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </>
+                                                                        );
+                                                                    })()}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <button
                                         onClick={() => void handleManualSanctionCreate()}
                                         disabled={busy}
@@ -1200,10 +1420,57 @@ const AssistantsManagement = () => {
                                                             </div>
                                                         </div>
                                                         {sanction.workoff_progress_summary.items.length > 0 && (
-                                                            <div className="space-y-2">
+                                                            <div className="space-y-3">
                                                                 {sanction.workoff_progress_summary.items.map((item, index) => (
-                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}`} className="rounded-lg bg-black/30 px-3 py-2 text-sm text-white/70">
-                                                                        {item.metric} · x{item.multiplier} · {item.period_start} - {item.period_end} · {item.amount_done ?? 0}/{item.target_amount ?? 0}
+                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}`} className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-3">
+                                                                        <div className="flex flex-wrap items-center justify-between gap-3">
+                                                                            <div className="text-sm text-white/80">
+                                                                                {workoffMetricLabel(item.metric as 'spec' | 'complaints' | 'mchat')} · x{formatMetricValue(item.multiplier, 1)} · {item.period_start} - {item.period_end}
+                                                                            </div>
+                                                                            <div className="text-xs text-white/50">
+                                                                                {workoffStatusLabel(item.status)}
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                                            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">
+                                                                                План: {formatWorkoffCounter(item.required_work_days ?? item.target_amount)}
+                                                                            </div>
+                                                                            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">
+                                                                                Учтено: {formatWorkoffCounter(item.counted_work_days ?? item.amount_done)}
+                                                                            </div>
+                                                                            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">
+                                                                                У/О: {formatWorkoffCounter(item.uo_days_count)}
+                                                                            </div>
+                                                                            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70 md:col-span-2">
+                                                                                Эффективная дата конца: {item.effective_period_end || 'не определена'}
+                                                                            </div>
+                                                                        </div>
+                                                                        {item.days && item.days.length > 0 ? (
+                                                                            <div className="space-y-2">
+                                                                                {item.days.map((day, dayIndex) => (
+                                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}-${day.date}-${dayIndex}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
+                                                                                        <div className="flex flex-wrap items-center gap-2">
+                                                                                            <span className="text-white/90">{day.date}</span>
+                                                                                            <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                                                                                                {workoffDayStatusLabel(day.day_status)}
+                                                                                            </span>
+                                                                                            {day.manual_status && (
+                                                                                                <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                        <div className="flex flex-wrap gap-3 text-white/50">
+                                                                                            <span>Требуется: {formatMetricValue(day.required_amount ?? 0)}</span>
+                                                                                            <span>Отработано: {formatMetricValue(day.actual_amount ?? 0)}</span>
+                                                                                            <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="text-xs text-white/45">
+                                                                                {formatMetricValue(item.amount_done ?? 0)}/{formatMetricValue(item.target_amount ?? 0)}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 ))}
                                                             </div>

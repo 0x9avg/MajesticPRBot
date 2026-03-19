@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { PermissionKey } from '../../../rbac/guards';
 import type { UserContext } from '../../../types/auth';
 
 let mockedUser: UserContext | null = null;
@@ -18,7 +19,7 @@ vi.mock('react-router-dom', async () => {
 
 import MainHub from '../MainHub';
 
-const makeUser = (role: UserContext['role']): UserContext => ({
+const makeUser = (role: UserContext['role'], permissions: Partial<Record<PermissionKey, boolean>> = {}): UserContext => ({
     id: 1,
     discord_id: '1001',
     username: 'tester',
@@ -31,6 +32,7 @@ const makeUser = (role: UserContext['role']): UserContext => ({
         ...(role === 'manager' || role === 'developer'
             ? {
                 'admin.users.create': true,
+                'assistants.weekly.manage': true,
                 'events.create': true,
                 'streamers.create': true,
                 'streamers.update': true,
@@ -42,6 +44,7 @@ const makeUser = (role: UserContext['role']): UserContext => ({
                 'monitoring.view': true
             }
             : {}),
+        ...permissions,
     },
 });
 
@@ -154,5 +157,22 @@ describe('MainHub', () => {
 
         await ui.click(screen.getByText('Возвраты'));
         expect(navigateMock).toHaveBeenCalledWith('/returns');
+    });
+
+    it('shows weekly management card in Управление and navigates to the full-screen page', async () => {
+        createFetchMock();
+        mockedUser = makeUser('employee', { 'assistants.weekly.manage': true });
+
+        const ui = userEvent.setup();
+        render(<MainHub />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Недельная статистика')).toBeInTheDocument();
+        });
+
+        expect(screen.queryByText('Админ-панель')).not.toBeInTheDocument();
+
+        await ui.click(screen.getByText('Недельная статистика'));
+        expect(navigateMock).toHaveBeenCalledWith('/assistants/weekly/manage');
     });
 });

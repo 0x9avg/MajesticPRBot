@@ -74,6 +74,46 @@ export interface SanctionDayStatus {
     streak_percent_days: number;
 }
 
+export type WorkoffOverrideStatus = 'P' | 'U' | 'O' | null;
+export type WorkoffProgressStatus = 'pending' | 'completed' | 'failed' | 'leave_skipped' | string;
+
+export interface WorkoffProgressDay {
+    date: string;
+    manual_status?: WorkoffOverrideStatus;
+    counts_for_workoff?: boolean;
+    required_amount?: number;
+    actual_amount?: number;
+    day_status?: WorkoffProgressStatus;
+}
+
+export interface WorkoffProgressItem {
+    metric: 'spec' | 'complaints' | 'mchat';
+    multiplier: number;
+    period_start: string;
+    period_end: string;
+    required_work_days?: number;
+    counted_work_days?: number;
+    effective_period_end?: string | null;
+    uo_days_count?: number;
+    status?: WorkoffProgressStatus;
+    days?: WorkoffProgressDay[];
+    target_amount?: number;
+    amount_done?: number;
+    remaining_amount?: number;
+    is_completed?: boolean;
+}
+
+export interface WorkoffPreviewAssistant {
+    assistant_id: string;
+    nickname?: string | null;
+    items: WorkoffProgressItem[];
+}
+
+export interface WorkoffPreviewResponse {
+    assistants?: WorkoffPreviewAssistant[];
+    items?: WorkoffPreviewAssistant[];
+}
+
 export interface SanctionSummary {
     assistant_id: string;
     as_of_date: string;
@@ -100,6 +140,12 @@ export interface WorkoffItem {
     amount_done?: number;
     remaining_amount?: number;
     is_completed?: boolean;
+    required_work_days?: number;
+    counted_work_days?: number;
+    effective_period_end?: string | null;
+    uo_days_count?: number;
+    status?: WorkoffProgressStatus;
+    days?: WorkoffProgressDay[];
 }
 
 export interface ActiveSanction {
@@ -130,7 +176,7 @@ export interface SanctionOperationMember {
     operation_id: string;
     assistant_id: string;
     nickname?: string | null;
-    issue_status: 'pending' | 'issued' | 'skipped_immunity' | 'failed';
+    issue_status: 'pending' | 'issued' | 'skipped_immunity' | 'skipped_leave' | 'failed';
     issue_reason?: string | null;
     issued_sanction_id?: string | null;
 }
@@ -158,6 +204,7 @@ export interface SanctionOperation {
     effective_members?: number;
     issued_members?: number;
     skipped_immunity_members?: number;
+    skipped_leave_members?: number;
     members?: SanctionOperationMember[];
 }
 
@@ -184,6 +231,191 @@ export interface MonthlyCheckRule {
     range_end: number | null;
     penalty_kind: 'point' | 'percent' | 'oral' | 'strict';
     penalty_amount: number;
+}
+
+export type WeeklyDayStatus = 'P' | 'U' | 'O';
+export type WeeklySuggestedResult = 'Ультра-Актив' | 'Актив' | 'Инактив/Актив' | 'Инактив';
+export type WeeklySelectedResult = WeeklySuggestedResult | 'Актив/Отпуск' | 'Инактив/Отпуск' | 'Отпуск';
+export type WeeklyPayoutType = 'EXP' | 'Premium' | 'MC' | 'MONEY';
+export type WeeklyPayoutIssueStatus = 'pending' | 'issued';
+export type WeeklyPayoutServer = string;
+export type WeeklyStatusSource = 'manual' | 'auto' | 'none';
+export type WeeklyPayoutReason =
+    | 'selected_result_not_payout_eligible'
+    | 'incomplete_payout_data'
+    | 'payout_type_rule_missing'
+    | 'amount_rule_missing'
+    | string;
+
+export interface WeeklyApiDayHeader {
+    work_date: string;
+    weekday_index: number;
+    weekday_short: string;
+    label_short: string;
+}
+
+export interface WeeklyApiDay {
+    work_date: string;
+    weekday_index: number;
+    is_roster_day: boolean;
+    spec_seconds: number;
+    spec_hours: number;
+    mchat_count: number;
+    complaints_count: number;
+    daily_norm_spec: number;
+    daily_norm_mchat: number;
+    daily_norm_complaints: number;
+    manual_status: WeeklyDayStatus | null;
+    auto_status: WeeklyDayStatus | null;
+    resolved_status: WeeklyDayStatus | null;
+    status_source: WeeklyStatusSource;
+    manual_status_updated_at?: string | null;
+    manual_status_updated_by_id?: string | null;
+}
+
+export interface WeeklyApiPayout {
+    type: WeeklyPayoutType | null;
+    server: WeeklyPayoutServer | null;
+    static: string | null;
+    command_name?: string | null;
+    amount?: string | null;
+    command: string | null;
+    command_available: boolean;
+    command_unavailable_reason: WeeklyPayoutReason | null;
+    role_group?: string | null;
+}
+
+export interface WeeklyApiAssistantItem {
+    assistant_id: string;
+    nickname: string;
+    role: string;
+    week_start: string;
+    week_end: string;
+    days?: WeeklyApiDay[];
+    totals: {
+        spec_hours: number;
+        mchat_count: number;
+        complaints_count: number;
+    };
+    counts: {
+        P: number;
+        U: number;
+        O: number;
+    };
+    suggested_result: WeeklySuggestedResult | null;
+    suggested_reason: string | null;
+    suggestion_metrics?: {
+        metric_hits: number;
+        weekly_norm_spec: number;
+        weekly_norm_mchat: number;
+        weekly_norm_complaints: number;
+    };
+    selected_result: WeeklySelectedResult | null;
+    result_display: WeeklySelectedResult | WeeklySuggestedResult | null;
+    payout: WeeklyApiPayout;
+    payout_issue_status?: WeeklyPayoutIssueStatus;
+    payout_issued_at?: string | null;
+    payout_issued_by_id?: string | null;
+    review_updated_at?: string | null;
+    review_updated_by_id?: string | null;
+}
+
+export interface WeeklyApiPayoutOptions {
+    types: Array<{ value: WeeklyPayoutType; command_name: string }>;
+    servers: WeeklyPayoutServer[];
+    selected_results: WeeklySelectedResult[];
+    manual_statuses: WeeklyDayStatus[];
+}
+
+export interface WeeklyAssistantDay {
+    work_date: string;
+    weekday_label?: string;
+    spec_hours_on_day: number;
+    mchat_count: number;
+    complaints_count: number;
+    manual_status: WeeklyDayStatus | null;
+    auto_status: WeeklyDayStatus | null;
+    resolved_status: WeeklyDayStatus | null;
+    status_source: WeeklyStatusSource;
+}
+
+export interface WeeklyAssistantSummary {
+    assistant_id: string;
+    nickname: string;
+    role: string;
+    week_start: string;
+    week_end: string;
+    days: WeeklyAssistantDay[];
+    total_spec_hours: number;
+    total_mchat: number;
+    total_complaints: number;
+    suggested_result: WeeklySuggestedResult | null;
+    selected_result: WeeklySelectedResult | null;
+    result_display: WeeklySelectedResult | WeeklySuggestedResult | null;
+    count_P: number;
+    count_U: number;
+    count_O: number;
+    payout_type: WeeklyPayoutType | null;
+    payout_server: WeeklyPayoutServer | null;
+    payout_static: string | null;
+    payout_issue_status: WeeklyPayoutIssueStatus;
+    payout_issued_at: string | null;
+    payout_issued_by_id: string | null;
+    generated_payout_command: string | null;
+    generated_payout_available: boolean;
+    generated_payout_reason: string | null;
+}
+
+export interface WeeklyCurrentResponse {
+    week_start: string;
+    week_end: string;
+    day_labels: { work_date: string; label: string }[];
+    items: WeeklyAssistantSummary[];
+}
+
+export interface WeeklyCurrentApiResponse {
+    week_start: string;
+    week_end: string;
+    day_headers: WeeklyApiDayHeader[];
+    items: WeeklyApiAssistantItem[];
+}
+
+export interface WeeklyAdminListResponse {
+    week_start: string;
+    week_end: string;
+    day_labels: { work_date: string; label: string }[];
+    items: WeeklyAssistantSummary[];
+    payout_types: { value: WeeklyPayoutType; label: string }[];
+    payout_servers: WeeklyPayoutServer[];
+    result_options: WeeklySelectedResult[];
+}
+
+export interface WeeklyAdminListApiResponse {
+    week_start: string;
+    week_end: string;
+    day_headers: WeeklyApiDayHeader[];
+    items: WeeklyApiAssistantItem[];
+    payout_options: WeeklyApiPayoutOptions;
+}
+
+export interface WeeklyAssistantDetail extends WeeklyAssistantSummary {
+    day_overrides: { work_date: string; manual_status: WeeklyDayStatus | null; is_manual_override: boolean }[];
+}
+
+export interface WeeklyAssistantDetailApiResponse {
+    week_start: string;
+    week_end: string;
+    day_headers: WeeklyApiDayHeader[];
+    payout_options: WeeklyApiPayoutOptions;
+    detail: WeeklyApiAssistantItem & { days: WeeklyApiDay[] };
+}
+
+export interface WeeklyAssistantSaveRequest {
+    day_overrides: { work_date: string; manual_status: WeeklyDayStatus | null; is_manual_override: boolean }[];
+    selected_result: WeeklySelectedResult | null;
+    payout_type: WeeklyPayoutType | null;
+    payout_server: WeeklyPayoutServer | null;
+    payout_static: string | null;
 }
 
 export interface EventParticipant {

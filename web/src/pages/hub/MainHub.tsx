@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
-import { Users, Wifi, UserPlus, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock } from 'lucide-react';
+import { Users, Wifi, UserPlus, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock, CalendarClock } from 'lucide-react';
 import type { OutletUserContext } from '../../types/auth';
 import type { DashboardStats, Event, EventParticipant, Streamer, StreamerAssignment } from '../../types/domain';
 import { unwrapApiData, getApiErrorMessage } from '../../types/api';
@@ -25,8 +25,9 @@ export function MainHub() {
     const { confirm, dialogProps } = useConfirmDialog();
     const canManageStreamers = hasAny(user, ['streamers.update', 'streamers.delete']);
     const canManageEvents = hasAny(user, ['events.manage', 'events.update']);
-    const canViewAdminSection = hasAny(user, ADMIN_SECTION_PERMISSIONS);
+    const canViewAdminPanel = hasAny(user, ADMIN_SECTION_PERMISSIONS);
     const canViewBotDashboard = hasAny(user, ['monitoring.view']);
+    const canManageWeeklyStats = hasPerm(user, 'assistants.weekly.manage');
     const canViewReturns = hasAny(user, ['returns.view', 'returns.history.view']);
     const canClaimMain = hasPerm(user, 'spec.claim.main');
     const canClaimProbation = hasPerm(user, 'spec.claim.probation');
@@ -398,7 +399,15 @@ export function MainHub() {
             path: '/admin',
             icon: ShieldAlert,
             color: 'from-red-500/20 to-red-600/5 hover:border-red-500/50 text-red-400',
-            visible: canViewAdminSection,
+            visible: canViewAdminPanel,
+        },
+        {
+            title: 'Недельная статистика',
+            desc: 'Закрытие недели, статусы и выплаты ассистентов',
+            path: '/assistants/weekly/manage',
+            icon: CalendarClock,
+            color: 'from-fuchsia-500/20 to-fuchsia-600/5 hover:border-fuchsia-500/50',
+            visible: canManageWeeklyStats,
         },
         {
             title: 'Bot Dashboard',

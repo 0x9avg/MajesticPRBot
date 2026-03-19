@@ -32,9 +32,149 @@ BROKER_OUTBOX_STATUS_PENDING = "pending"
 BROKER_OUTBOX_STATUS_PROCESSING = "processing"
 BROKER_OUTBOX_STATUS_SENT = "sent"
 SANCTIONS_GLOBAL_LOCK_NAME = "prmajesticbot:sanctions:global"
+SANCTIONS_NIGHTLY_STALE_SECONDS = 3600
 CURRENT_SANCTION_POLICY_MONTH = date(2000, 1, 1)
 FIXED_SIZE_SANCTION_KINDS = {"check", "oral", "strict"}
 WARNING_SANCTION_KINDS = {"oral", "strict"}
+MSK = timezone(timedelta(hours=3))
+WEEKLY_DAY_STATUS_VALUES = ("P", "U", "O")
+WEEKLY_MANUAL_STATUSES = set(WEEKLY_DAY_STATUS_VALUES)
+LEAVE_MANUAL_STATUSES = {"U", "O"}
+WEEKLY_MANUAL_STATUS_NONE = "NONE"
+WEEKLY_SUGGESTED_RESULT_ULTRA = "Ультра-Актив"
+WEEKLY_SUGGESTED_RESULT_ACTIVE = "Актив"
+WEEKLY_SUGGESTED_RESULT_MIXED = "Инактив/Актив"
+WEEKLY_SUGGESTED_RESULT_INACTIVE = "Инактив"
+WEEKLY_SUGGESTED_RESULT_OPTIONS = (
+    WEEKLY_SUGGESTED_RESULT_ULTRA,
+    WEEKLY_SUGGESTED_RESULT_ACTIVE,
+    WEEKLY_SUGGESTED_RESULT_MIXED,
+    WEEKLY_SUGGESTED_RESULT_INACTIVE,
+)
+WEEKLY_SUGGESTED_RESULTS = set(WEEKLY_SUGGESTED_RESULT_OPTIONS)
+WEEKLY_SELECTED_RESULT_OPTIONS = (
+    WEEKLY_SUGGESTED_RESULT_ULTRA,
+    WEEKLY_SUGGESTED_RESULT_ACTIVE,
+    "Актив/Отпуск",
+    WEEKLY_SUGGESTED_RESULT_INACTIVE,
+    "Инактив/Отпуск",
+    "Отпуск",
+    WEEKLY_SUGGESTED_RESULT_MIXED,
+)
+WEEKLY_SELECTED_RESULTS = set(WEEKLY_SELECTED_RESULT_OPTIONS)
+WEEKLY_RESULT_ALIASES = {
+    "Ультра-актив": WEEKLY_SUGGESTED_RESULT_ULTRA,
+    WEEKLY_SUGGESTED_RESULT_ULTRA: WEEKLY_SUGGESTED_RESULT_ULTRA,
+}
+WEEKLY_PAYOUT_TYPES = ("EXP", "Premium", "MC", "MONEY")
+WEEKLY_PAYOUT_ISSUE_STATUS_PENDING = "pending"
+WEEKLY_PAYOUT_ISSUE_STATUS_ISSUED = "issued"
+WEEKLY_PAYOUT_ISSUE_STATUS_OPTIONS = (
+    WEEKLY_PAYOUT_ISSUE_STATUS_PENDING,
+    WEEKLY_PAYOUT_ISSUE_STATUS_ISSUED,
+)
+WEEKLY_PAYOUT_ISSUE_STATUSES = set(WEEKLY_PAYOUT_ISSUE_STATUS_OPTIONS)
+WEEKLY_PAYOUT_TYPE_COMMANDS = {
+    "EXP": "giveexp",
+    "Premium": "setvip",
+    "MC": "givedonate",
+    "MONEY": "givemoney",
+}
+WEEKLY_PAYOUT_ROLE_GROUPS = {
+    "junior_employee": "junior",
+    "employee": "default",
+    "senior_employee": "Senior",
+    "manager": "default",
+    "developer": "default",
+}
+WEEKLY_PAYOUT_AMOUNT_RULES = {
+    ("junior", "EXP", WEEKLY_SUGGESTED_RESULT_ACTIVE): "20000",
+    ("junior", "EXP", WEEKLY_SUGGESTED_RESULT_ULTRA): "35000",
+    ("junior", "Premium", WEEKLY_SUGGESTED_RESULT_ACTIVE): "4",
+    ("junior", "Premium", WEEKLY_SUGGESTED_RESULT_ULTRA): "7",
+    ("junior", "MC", WEEKLY_SUGGESTED_RESULT_ACTIVE): "1000",
+    ("junior", "MC", WEEKLY_SUGGESTED_RESULT_ULTRA): "1200",
+    ("junior", "MONEY", WEEKLY_SUGGESTED_RESULT_ACTIVE): "150000",
+    ("junior", "MONEY", WEEKLY_SUGGESTED_RESULT_ULTRA): "200000",
+    ("default", "EXP", WEEKLY_SUGGESTED_RESULT_ACTIVE): "35000",
+    ("default", "EXP", WEEKLY_SUGGESTED_RESULT_ULTRA): "50000",
+    ("default", "Premium", WEEKLY_SUGGESTED_RESULT_ACTIVE): "7",
+    ("default", "Premium", WEEKLY_SUGGESTED_RESULT_ULTRA): "14",
+    ("default", "MC", WEEKLY_SUGGESTED_RESULT_ACTIVE): "1200",
+    ("default", "MC", WEEKLY_SUGGESTED_RESULT_ULTRA): "2000",
+    ("default", "MONEY", WEEKLY_SUGGESTED_RESULT_ACTIVE): "200000",
+    ("default", "MONEY", WEEKLY_SUGGESTED_RESULT_ULTRA): "250000",
+    ("Senior", "EXP", WEEKLY_SUGGESTED_RESULT_ACTIVE): "35000",
+    ("Senior", "EXP", WEEKLY_SUGGESTED_RESULT_ULTRA): "50000",
+    ("Senior", "Premium", WEEKLY_SUGGESTED_RESULT_ACTIVE): "7",
+    ("Senior", "Premium", WEEKLY_SUGGESTED_RESULT_ULTRA): "14",
+    ("Senior", "MC", WEEKLY_SUGGESTED_RESULT_ACTIVE): "1200",
+    ("Senior", "MC", WEEKLY_SUGGESTED_RESULT_ULTRA): "2000",
+    ("Senior", "MONEY", WEEKLY_SUGGESTED_RESULT_ACTIVE): "200000",
+    ("Senior", "MONEY", WEEKLY_SUGGESTED_RESULT_ULTRA): "250000",
+}
+WEEKLY_PAYOUT_SERVERS = tuple(f"RU{i}" for i in range(1, 19))
+WEEKLY_PAYOUT_SUFFIX = "pr-assist_byStynee"
+
+
+def _msk_now() -> datetime:
+    return datetime.now(MSK)
+
+
+def _msk_today() -> date:
+    return _msk_now().date()
+
+
+def _week_start_msk(value: Optional[date] = None) -> date:
+    target = value or _msk_today()
+    return target - timedelta(days=target.weekday())
+
+
+def _week_dates(week_start: date) -> List[date]:
+    return [week_start + timedelta(days=index) for index in range(7)]
+
+
+def _month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def _date_only(value: Any) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _canonical_weekly_result(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = WEEKLY_RESULT_ALIASES.get(str(value).strip(), str(value).strip())
+    return normalized or None
+
+
+def _canonical_weekly_payout_issue_status(value: Optional[str]) -> str:
+    normalized = str(value or WEEKLY_PAYOUT_ISSUE_STATUS_PENDING).strip().lower()
+    if normalized not in WEEKLY_PAYOUT_ISSUE_STATUSES:
+        return WEEKLY_PAYOUT_ISSUE_STATUS_PENDING
+    return normalized
+
+
+def _weekly_role_group(role: Optional[str]) -> str:
+    if role == "junior_employee":
+        return "junior"
+    if role == "senior_employee":
+        return "Senior"
+    return "default"
+
+
+def _sum_numeric(values: List[float]) -> float:
+    return round(sum(float(value or 0) for value in values), 4)
 
 
 def db_retry(max_retries: int = 3, base_delay: float = 1.0):
@@ -639,7 +779,92 @@ class Database:
                     )
 
                     # =========================================================
-                    # 14. Complaints
+                    # 14. Weekly Assistant Statistics
+                    # =========================================================
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_day_status_overrides (
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            work_date DATE NOT NULL,
+                            manual_status ENUM('P', 'U', 'O', 'NONE') NOT NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            updated_by_id BIGINT UNSIGNED NULL,
+                            PRIMARY KEY (assistant_id, work_date),
+                            INDEX idx_day_status_overrides_work_date (work_date),
+                            INDEX idx_day_status_overrides_updated_by (updated_by_id)
+                        )
+                        """
+                    )
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_day_status_overrides
+                        MODIFY COLUMN manual_status ENUM('P', 'U', 'O', 'NONE') NOT NULL
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_weekly_reviews (
+                            assistant_id BIGINT UNSIGNED NOT NULL,
+                            week_start DATE NOT NULL,
+                            selected_result ENUM(
+                                'Ультра-Актив',
+                                'Актив',
+                                'Актив/Отпуск',
+                                'Инактив',
+                                'Инактив/Отпуск',
+                                'Отпуск',
+                                'Инактив/Актив'
+                            ) NULL,
+                            payout_type ENUM('EXP', 'Premium', 'MC', 'MONEY') NULL,
+                            payout_server VARCHAR(16) NULL,
+                            payout_static VARCHAR(64) NULL,
+                            payout_issue_status ENUM('pending', 'issued') NOT NULL DEFAULT 'pending',
+                            payout_issued_at DATETIME NULL,
+                            payout_issued_by_id BIGINT UNSIGNED NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            updated_by_id BIGINT UNSIGNED NULL,
+                            PRIMARY KEY (assistant_id, week_start),
+                            INDEX idx_weekly_reviews_week_start (week_start),
+                            INDEX idx_weekly_reviews_updated_by (updated_by_id)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_weekly_payout_type_rules (
+                            payout_type ENUM('EXP', 'Premium', 'MC', 'MONEY') PRIMARY KEY,
+                            command_name VARCHAR(64) NOT NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_weekly_payout_amount_rules (
+                            role_group ENUM('junior', 'default', 'Senior') NOT NULL,
+                            payout_type ENUM('EXP', 'Premium', 'MC', 'MONEY') NOT NULL,
+                            result_code ENUM('Актив', 'Ультра-Актив') NOT NULL,
+                            amount VARCHAR(64) NOT NULL,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            PRIMARY KEY (role_group, payout_type, result_code)
+                        )
+                        """
+                    )
+
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS assistant_weekly_payout_servers (
+                            server_code VARCHAR(16) PRIMARY KEY,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+
+                    # =========================================================
+                    # 15. Complaints
                     # =========================================================
                     await cursor.execute(
                         """
@@ -658,7 +883,7 @@ class Database:
                     )
 
                     # =========================================================
-                    # 15. Monthly Sanction Policies
+                    # 16. Monthly Sanction Policies
                     # =========================================================
                     await cursor.execute(
                         """
@@ -698,7 +923,7 @@ class Database:
                     )
 
                     # =========================================================
-                    # 16. Sanction Operations
+                    # 17. Sanction Operations
                     # =========================================================
                     await cursor.execute(
                         """
@@ -730,7 +955,7 @@ class Database:
                         CREATE TABLE IF NOT EXISTS sanction_operation_members (
                             operation_id BIGINT UNSIGNED NOT NULL,
                             assistant_id BIGINT UNSIGNED NOT NULL,
-                            issue_status ENUM('pending', 'issued', 'skipped_immunity', 'failed') NOT NULL DEFAULT 'pending',
+                            issue_status ENUM('pending', 'issued', 'skipped_immunity', 'skipped_leave', 'failed') NOT NULL DEFAULT 'pending',
                             issue_reason VARCHAR(255) NULL,
                             issued_sanction_id BIGINT UNSIGNED NULL,
                             PRIMARY KEY (operation_id, assistant_id),
@@ -757,7 +982,7 @@ class Database:
                     )
 
                     # =========================================================
-                    # 17. Sanction Ledger
+                    # 18. Sanction Ledger
                     # =========================================================
                     await cursor.execute(
                         """
@@ -814,8 +1039,21 @@ class Database:
                         """
                     )
 
+                    await cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS sanction_nightly_runs (
+                            basis_date DATE PRIMARY KEY,
+                            status ENUM('processing', 'completed', 'failed') NOT NULL,
+                            started_at DATETIME NOT NULL,
+                            finished_at DATETIME NULL,
+                            failure_reason TEXT NULL,
+                            INDEX idx_sanction_nightly_runs_status (status, started_at)
+                        )
+                        """
+                    )
+
                     # =========================================================
-                    # 18. Integration Delivery Outbox
+                    # 19. Integration Delivery Outbox
                     # =========================================================
                     await cursor.execute(
                         """
@@ -1036,6 +1274,7 @@ class Database:
                     await conn.commit()
 
                     await self._init_default_permissions(conn)
+                    await self._init_weekly_payout_config(conn)
                     await self._init_default_service_principals(conn)
                     await self._ensure_singleton_settings(conn)
                     await self._init_cutover_schema(conn)
@@ -1266,6 +1505,7 @@ class Database:
                 ("assistant_sanctions", "assistant_sanctions"),
                 ("assistant_sanction_workoffs", "assistant_sanction_workoffs"),
                 ("assistant_sanction_reliefs", "assistant_sanction_reliefs"),
+                ("sanction_nightly_runs", "sanction_nightly_runs"),
             ]
             for old_name, new_name in table_renames:
                 if await self._table_exists(cursor, old_name) and not await self._table_exists(cursor, new_name):
@@ -1281,7 +1521,7 @@ class Database:
                 ("sanction_operations", "sanction_amount", "penalty_amount", "FLOAT NOT NULL"),
                 ("sanction_operations", "audience_mode", "recipient_mode", "ENUM('all_active', 'live_without_active_session', 'selected_only') NOT NULL"),
                 ("sanction_operation_members", "batch_id", "operation_id", "BIGINT UNSIGNED NOT NULL"),
-                ("sanction_operation_members", "execution_status", "issue_status", "ENUM('pending', 'issued', 'skipped_immunity', 'failed') NOT NULL DEFAULT 'pending'"),
+                ("sanction_operation_members", "execution_status", "issue_status", "ENUM('pending', 'issued', 'skipped_immunity', 'skipped_leave', 'failed') NOT NULL DEFAULT 'pending'"),
                 ("sanction_operation_members", "execution_reason", "issue_reason", "VARCHAR(255) NULL"),
                 ("sanction_operation_workoffs", "batch_id", "operation_id", "BIGINT UNSIGNED NOT NULL"),
                 ("assistant_sanctions", "source_batch_id", "operation_id", "BIGINT UNSIGNED NULL"),
@@ -1350,6 +1590,20 @@ class Database:
                         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_broker_outbox_delivery (status, available_at, id),
                         INDEX idx_broker_outbox_created (created_at)
+                    )
+                    """
+                )
+
+            if not await self._table_exists(cursor, "sanction_nightly_runs"):
+                await cursor.execute(
+                    """
+                    CREATE TABLE sanction_nightly_runs (
+                        basis_date DATE PRIMARY KEY,
+                        status ENUM('processing', 'completed', 'failed') NOT NULL,
+                        started_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        failure_reason TEXT NULL,
+                        INDEX idx_sanction_nightly_runs_status (status, started_at)
                     )
                     """
                 )
@@ -1444,6 +1698,23 @@ class Database:
                 except Exception:
                     pass
 
+            if await self._table_exists(cursor, "sanction_operation_members"):
+                try:
+                    await cursor.execute(
+                        """
+                        ALTER TABLE sanction_operation_members
+                        MODIFY COLUMN issue_status ENUM(
+                            'pending',
+                            'issued',
+                            'skipped_immunity',
+                            'skipped_leave',
+                            'failed'
+                        ) NOT NULL DEFAULT 'pending'
+                        """
+                    )
+                except Exception:
+                    pass
+
             if await self._table_exists(cursor, "spec_sessions") and await self._column_exists(
                 cursor, "spec_sessions", "end_reason"
             ):
@@ -1465,6 +1736,37 @@ class Database:
             if not await self._column_exists(cursor, "admin_logs", "trace_id"):
                 await cursor.execute(
                     "ALTER TABLE admin_logs ADD COLUMN trace_id VARCHAR(64) NULL AFTER actor_type"
+                )
+            if await self._table_exists(cursor, "assistant_weekly_reviews"):
+                if not await self._column_exists(cursor, "assistant_weekly_reviews", "payout_issue_status"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_weekly_reviews
+                        ADD COLUMN payout_issue_status ENUM('pending', 'issued') NOT NULL DEFAULT 'pending'
+                        AFTER payout_static
+                        """
+                    )
+                if not await self._column_exists(cursor, "assistant_weekly_reviews", "payout_issued_at"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_weekly_reviews
+                        ADD COLUMN payout_issued_at DATETIME NULL
+                        AFTER payout_issue_status
+                        """
+                    )
+                if not await self._column_exists(cursor, "assistant_weekly_reviews", "payout_issued_by_id"):
+                    await cursor.execute(
+                        """
+                        ALTER TABLE assistant_weekly_reviews
+                        ADD COLUMN payout_issued_by_id BIGINT UNSIGNED NULL
+                        AFTER payout_issued_at
+                        """
+                    )
+                await cursor.execute(
+                    """
+                    ALTER TABLE assistant_weekly_reviews
+                    MODIFY COLUMN payout_issue_status ENUM('pending', 'issued') NOT NULL DEFAULT 'pending'
+                    """
                 )
             await self._seed_default_monthly_policies(cursor)
             await self._backfill_legacy_balances(cursor)
@@ -2082,6 +2384,8 @@ class Database:
                 "assistants.points.manage",
                 "assistants.sanctions.manage",
                 "assistants.warnings.manage",
+                "assistants.weekly.view",
+                "assistants.weekly.manage",
                 "admin.users.create",
                 "logs.pr_actions.view",
                 "logs.admin.view",
@@ -2153,6 +2457,8 @@ class Database:
                 "assistants.points.manage": True,
                 "assistants.sanctions.manage": True,
                 "assistants.warnings.manage": True,
+                "assistants.weekly.view": True,
+                "assistants.weekly.manage": True,
                 "events.update": True,
                 "events.manage": True,
                 "events.spec.manage": True,
@@ -2235,6 +2541,75 @@ class Database:
                 )
             await conn.commit()
             self.logger.debug("  ✓ Default permissions reconciled")
+
+    async def _init_weekly_payout_config(self, conn):
+        """Seed config-driven payout metadata for weekly assistant reviews."""
+        type_rules = {
+            "EXP": "giveexp",
+            "Premium": "setvip",
+            "MC": "givedonate",
+            "MONEY": "givemoney",
+        }
+        amount_rules = {
+            ("junior", "EXP", "Актив"): "20000",
+            ("junior", "EXP", "Ультра-Актив"): "35000",
+            ("junior", "Premium", "Актив"): "4",
+            ("junior", "Premium", "Ультра-Актив"): "7",
+            ("junior", "MC", "Актив"): "1000",
+            ("junior", "MC", "Ультра-Актив"): "1200",
+            ("junior", "MONEY", "Актив"): "150000",
+            ("junior", "MONEY", "Ультра-Актив"): "200000",
+            ("default", "EXP", "Актив"): "35000",
+            ("default", "EXP", "Ультра-Актив"): "50000",
+            ("default", "Premium", "Актив"): "7",
+            ("default", "Premium", "Ультра-Актив"): "14",
+            ("default", "MC", "Актив"): "1200",
+            ("default", "MC", "Ультра-Актив"): "2000",
+            ("default", "MONEY", "Актив"): "200000",
+            ("default", "MONEY", "Ультра-Актив"): "250000",
+            ("Senior", "EXP", "Актив"): "35000",
+            ("Senior", "EXP", "Ультра-Актив"): "50000",
+            ("Senior", "Premium", "Актив"): "7",
+            ("Senior", "Premium", "Ультра-Актив"): "14",
+            ("Senior", "MC", "Актив"): "1200",
+            ("Senior", "MC", "Ультра-Актив"): "2000",
+            ("Senior", "MONEY", "Актив"): "200000",
+            ("Senior", "MONEY", "Ультра-Актив"): "250000",
+        }
+        server_codes = [f"RU{index}" for index in range(1, 19)]
+
+        async with conn.cursor() as cursor:
+            for payout_type, command_name in type_rules.items():
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_weekly_payout_type_rules (payout_type, command_name)
+                    VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE command_name = command_name
+                    """,
+                    (payout_type, command_name),
+                )
+            for (role_group, payout_type, result_code), amount in amount_rules.items():
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_weekly_payout_amount_rules (
+                        role_group, payout_type, result_code, amount
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE amount = amount
+                    """,
+                    (role_group, payout_type, result_code, amount),
+                )
+            for server_code in server_codes:
+                await cursor.execute(
+                    """
+                    INSERT INTO assistant_weekly_payout_servers (server_code)
+                    VALUES (%s)
+                    ON DUPLICATE KEY UPDATE server_code = server_code
+                    """,
+                    (server_code,),
+                )
+        await conn.commit()
+        self.logger.debug("  ✓ Weekly payout config seeded")
 
     @staticmethod
     def _get_default_service_permissions(service_name: str) -> dict[str, bool]:
@@ -8933,6 +9308,182 @@ class Database:
 
         return row
 
+    @staticmethod
+    def _nightly_run_context_for_basis_date(
+        basis_date: date,
+    ) -> Dict[str, Any]:
+        processing_date = basis_date + timedelta(days=1)
+        run_started_at = datetime.combine(processing_date, datetime.min.time())
+        return {
+            "basis_date": basis_date,
+            "processing_date": processing_date,
+            "run_started_at": run_started_at,
+        }
+
+    @staticmethod
+    def _normalize_manual_status(
+        value: Any,
+    ) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip().upper()
+        if normalized == WEEKLY_MANUAL_STATUS_NONE:
+            return None
+        if normalized not in WEEKLY_MANUAL_STATUSES:
+            return None
+        return normalized
+
+    async def _get_day_manual_status_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        work_date: date,
+    ) -> Dict[str, Any]:
+        await cursor.execute(
+            """
+            SELECT manual_status, updated_at, updated_by_id
+            FROM assistant_day_status_overrides
+            WHERE assistant_id = %s
+              AND work_date = %s
+            LIMIT 1
+            """,
+            (assistant_id, work_date),
+        )
+        row = await cursor.fetchone() or {}
+        manual_status = self._normalize_manual_status(row.get("manual_status"))
+        return {
+            "manual_status": manual_status,
+            "is_leave_day": manual_status in LEAVE_MANUAL_STATUSES,
+            "updated_at": row.get("updated_at"),
+            "updated_by_id": row.get("updated_by_id"),
+        }
+
+    async def _claim_sanction_nightly_run_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+    ) -> Dict[str, Any]:
+        claimed_at = _msk_now().replace(tzinfo=None)
+        stale_before = claimed_at - timedelta(seconds=SANCTIONS_NIGHTLY_STALE_SECONDS)
+        await cursor.execute(
+            """
+            SELECT basis_date, status, started_at, finished_at, failure_reason
+            FROM sanction_nightly_runs
+            WHERE basis_date = %s
+            LIMIT 1
+            """,
+            (basis_date,),
+        )
+        existing = await cursor.fetchone() or {}
+        status = str(existing.get("status") or "")
+        started_at = existing.get("started_at")
+
+        if not existing:
+            await cursor.execute(
+                """
+                INSERT INTO sanction_nightly_runs (
+                    basis_date,
+                    status,
+                    started_at,
+                    finished_at,
+                    failure_reason
+                )
+                VALUES (%s, 'processing', %s, NULL, NULL)
+                """,
+                (basis_date, claimed_at),
+            )
+            return {
+                "claimed": True,
+                "status": "processing",
+                "stale_recovered": False,
+            }
+
+        if status == "processing" and started_at is not None and started_at < stale_before:
+            await cursor.execute(
+                """
+                UPDATE sanction_nightly_runs
+                SET status = 'processing',
+                    started_at = %s,
+                    finished_at = NULL,
+                    failure_reason = NULL
+                WHERE basis_date = %s
+                """,
+                (claimed_at, basis_date),
+            )
+            return {
+                "claimed": True,
+                "status": "processing",
+                "stale_recovered": True,
+            }
+
+        if status == "failed":
+            await cursor.execute(
+                """
+                UPDATE sanction_nightly_runs
+                SET status = 'processing',
+                    started_at = %s,
+                    finished_at = NULL,
+                    failure_reason = NULL
+                WHERE basis_date = %s
+                """,
+                (claimed_at, basis_date),
+            )
+            return {
+                "claimed": True,
+                "status": "processing",
+                "stale_recovered": False,
+                "replayed_failed_run": True,
+            }
+
+        return {
+            "claimed": False,
+            "status": status or None,
+            "stale_recovered": False,
+            "finished_at": existing.get("finished_at"),
+            "failure_reason": existing.get("failure_reason"),
+        }
+
+    async def _complete_sanction_nightly_run_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+    ) -> None:
+        await cursor.execute(
+            """
+            UPDATE sanction_nightly_runs
+            SET status = 'completed',
+                finished_at = %s,
+                failure_reason = NULL
+            WHERE basis_date = %s
+            """,
+            (_msk_now().replace(tzinfo=None), basis_date),
+        )
+
+    async def _fail_sanction_nightly_run_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+        failure_reason: str,
+    ) -> None:
+        await cursor.execute(
+            """
+            UPDATE sanction_nightly_runs
+            SET status = 'failed',
+                finished_at = %s,
+                failure_reason = %s
+            WHERE basis_date = %s
+            """,
+            (
+                _msk_now().replace(tzinfo=None),
+                str(failure_reason or "")[:65535],
+                basis_date,
+            ),
+        )
+
     async def _compute_workoff_targets(
         self,
         cursor,
@@ -9008,18 +9559,84 @@ class Database:
         period_start: date,
         period_end: date,
     ) -> float:
-        policy = await self._ensure_current_policy_row(cursor)
-        total_days = (period_end - period_start).days + 1
+        target = 0.0
+        cursor_day = period_start
+        while cursor_day <= period_end:
+            target += await self._daily_norm_amount_locked(
+                cursor,
+                metric=metric,
+                work_date=cursor_day,
+                multiplier=multiplier,
+            )
+            cursor_day += timedelta(days=1)
+        if metric == "spec":
+            return round(target, 4)
+        return float(int(round(target)))
+
+    async def _daily_norm_amount_locked(
+        self,
+        cursor,
+        *,
+        metric: str,
+        work_date: date,
+        multiplier: float,
+    ) -> float:
+        policy = await self._ensure_monthly_policy_row(
+            cursor,
+            self._month_start_for(work_date),
+        )
         field_name = {
             "spec": "daily_norm_spec",
             "complaints": "daily_norm_complaints",
             "mchat": "daily_norm_mchat",
         }[metric]
-        base_total = float(policy.get(field_name) or 0) * total_days
-        target = base_total * float(multiplier)
+        amount = float(policy.get(field_name) or 0) * float(multiplier)
         if metric == "spec":
-            return round(target, 4)
-        return float(int(round(target)))
+            return round(amount, 4)
+        return float(int(round(amount)))
+
+    async def _day_metric_amount_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        metric: str,
+        work_date: date,
+    ) -> float:
+        if metric == "spec":
+            metrics = await self._get_day_spec_metrics_locked(
+                cursor,
+                assistant_id=assistant_id,
+                work_date=work_date,
+            )
+            return round(float(metrics.get("spec_hours_on_day") or 0), 4)
+
+        if metric == "complaints":
+            await cursor.execute(
+                """
+                SELECT COUNT(*) AS amount_done
+                FROM complaints
+                WHERE assistant_id = %s
+                  AND status = 'completed'
+                  AND DATE(completed_at) = %s
+                """,
+                (assistant_id, work_date),
+            )
+            row = await cursor.fetchone() or {}
+            return float(int(row.get("amount_done") or 0))
+
+        await cursor.execute(
+            """
+            SELECT mchat_count
+            FROM assistant_day_mchat
+            WHERE assistant_id = %s
+              AND work_date = %s
+            LIMIT 1
+            """,
+            (assistant_id, work_date),
+        )
+        row = await cursor.fetchone() or {}
+        return float(int(row.get("mchat_count") or 0))
 
     async def _replace_batch_workoff_items_locked(
         self,
@@ -9171,57 +9788,144 @@ class Database:
         *,
         assistant_id: int,
         workoff_items: List[Dict[str, Any]],
+        evaluation_cutoff: Optional[date] = None,
     ) -> List[Dict[str, Any]]:
         progress_items: List[Dict[str, Any]] = []
         for item in workoff_items:
-            metric = str(item["metric"])
-            period_start = item["period_start"]
-            period_end = item["period_end"]
-            if metric == "spec":
-                await cursor.execute(
-                    """
-                    SELECT ROUND(COALESCE(SUM(spec_hours_on_day), 0), 4) AS amount_done
-                    FROM assistant_day_spec_totals
-                    WHERE assistant_id = %s
-                      AND work_date BETWEEN %s AND %s
-                    """,
-                    (assistant_id, period_start, period_end),
-                )
-            elif metric == "complaints":
-                await cursor.execute(
-                    """
-                    SELECT COUNT(*) AS amount_done
-                    FROM complaints
-                    WHERE assistant_id = %s
-                      AND status = 'completed'
-                      AND DATE(completed_at) BETWEEN %s AND %s
-                    """,
-                    (assistant_id, period_start, period_end),
-                )
-            else:
-                await cursor.execute(
-                    """
-                    SELECT COALESCE(SUM(mchat_count), 0) AS amount_done
-                    FROM assistant_day_mchat
-                    WHERE assistant_id = %s
-                      AND work_date BETWEEN %s AND %s
-                    """,
-                    (assistant_id, period_start, period_end),
-                )
-            row = await cursor.fetchone() or {}
-            amount_done = float(row.get("amount_done") or 0)
-            if metric != "spec":
-                amount_done = float(int(round(amount_done)))
-            target_amount = float(item.get("target_amount") or 0)
             progress_items.append(
-                {
-                    **item,
-                    "amount_done": round(amount_done, 4) if metric == "spec" else int(round(amount_done)),
-                    "remaining_amount": max(round(target_amount - amount_done, 4), 0),
-                    "is_completed": amount_done + 1e-9 >= target_amount,
-                }
+                await self._evaluate_workoff_item_progress_locked(
+                    cursor,
+                    assistant_id=assistant_id,
+                    item=item,
+                    evaluation_cutoff=evaluation_cutoff,
+                )
             )
         return progress_items
+
+    async def _evaluate_workoff_item_progress_locked(
+        self,
+        cursor,
+        *,
+        assistant_id: int,
+        item: Dict[str, Any],
+        evaluation_cutoff: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        metric = str(item["metric"])
+        period_start = item["period_start"]
+        period_end = item["period_end"]
+        cutoff = evaluation_cutoff or self._current_msk_date()
+        required_work_days = (period_end - period_start).days + 1
+        counted_projected_days = 0
+        counted_work_days = 0
+        uo_days_count = 0
+        amount_done = 0.0
+        target_amount = 0.0
+        failed = False
+        days: List[Dict[str, Any]] = []
+        cursor_day = period_start
+        effective_period_end = period_end
+
+        while counted_projected_days < required_work_days:
+            manual_status_row = await self._get_day_manual_status_locked(
+                cursor,
+                assistant_id=assistant_id,
+                work_date=cursor_day,
+            )
+            manual_status = manual_status_row.get("manual_status")
+            is_leave_day = bool(manual_status_row.get("is_leave_day"))
+            actual_amount: Optional[float] = None
+            required_amount: Optional[float] = None
+
+            if is_leave_day:
+                uo_days_count += 1
+                day_status = "leave_skipped"
+                counts_for_workoff = False
+            else:
+                counts_for_workoff = True
+                required_amount = await self._daily_norm_amount_locked(
+                    cursor,
+                    metric=metric,
+                    work_date=cursor_day,
+                    multiplier=float(item.get("multiplier") or 0),
+                )
+                target_amount += float(required_amount or 0)
+                counted_projected_days += 1
+                if cursor_day > cutoff:
+                    day_status = "pending"
+                else:
+                    actual_amount = await self._day_metric_amount_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        metric=metric,
+                        work_date=cursor_day,
+                    )
+                    counted_work_days += 1
+                    amount_done += float(actual_amount or 0)
+                    if float(actual_amount or 0) + 1e-9 >= float(required_amount or 0):
+                        day_status = "completed"
+                    else:
+                        day_status = "failed"
+                        failed = True
+
+            days.append(
+                {
+                    "date": cursor_day,
+                    "manual_status": manual_status,
+                    "counts_for_workoff": counts_for_workoff,
+                    "required_amount": round(float(required_amount), 4)
+                    if required_amount is not None and metric == "spec"
+                    else (int(round(required_amount)) if required_amount is not None else None),
+                    "actual_amount": round(float(actual_amount), 4)
+                    if actual_amount is not None and metric == "spec"
+                    else (int(round(actual_amount)) if actual_amount is not None else None),
+                    "day_status": day_status,
+                }
+            )
+            effective_period_end = cursor_day
+            cursor_day += timedelta(days=1)
+
+        if failed:
+            status = "failed"
+        elif cutoff < effective_period_end:
+            status = "pending"
+        else:
+            status = "completed"
+
+        normalized_target_amount = round(target_amount, 4) if metric == "spec" else int(round(target_amount))
+        normalized_amount_done = round(amount_done, 4) if metric == "spec" else int(round(amount_done))
+        remaining_amount = max(float(normalized_target_amount) - float(normalized_amount_done), 0.0)
+        normalized_remaining_amount = (
+            round(remaining_amount, 4)
+            if metric == "spec"
+            else int(round(remaining_amount))
+        )
+
+        return {
+            **item,
+            "required_work_days": required_work_days,
+            "counted_work_days": counted_work_days,
+            "effective_period_end": effective_period_end,
+            "uo_days_count": uo_days_count,
+            "status": status,
+            "days": days,
+            "target_amount": normalized_target_amount,
+            "amount_done": normalized_amount_done,
+            "remaining_amount": normalized_remaining_amount,
+            "is_completed": status == "completed",
+        }
+
+    @staticmethod
+    def _build_workoff_progress_summary(
+        progress_items: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        return {
+            "has_workoff": bool(progress_items),
+            "total_items": len(progress_items),
+            "completed_items": sum(
+                1 for item in progress_items if str(item.get("status") or "") == "completed"
+            ),
+            "items": progress_items,
+        }
 
     async def _get_day_spec_metrics_locked(
         self,
@@ -9295,6 +9999,88 @@ class Database:
             "spec_points_auto": round(float(row.get("spec_points_auto") or 0), 4),
         }
 
+    async def _get_day_spec_metrics_map_locked(
+        self,
+        cursor,
+        *,
+        assistant_ids: List[int],
+        work_date: date,
+    ) -> Dict[int, Dict[str, Any]]:
+        if not assistant_ids:
+            return {}
+
+        day_start = datetime.combine(work_date, datetime.min.time())
+        day_end = day_start + timedelta(days=1)
+        placeholders = ", ".join(["%s"] * len(assistant_ids))
+        await cursor.execute(
+            f"""
+            SELECT
+                ss.pr_id AS assistant_id,
+                COALESCE(
+                    SUM(
+                        GREATEST(
+                            0,
+                            TIMESTAMPDIFF(
+                                SECOND,
+                                GREATEST(ss.started_at, %s),
+                                LEAST(COALESCE(ss.ended_at, %s), %s)
+                            )
+                        )
+                    ),
+                    0
+                ) AS spec_seconds_on_day,
+                ROUND(
+                    COALESCE(
+                        SUM(
+                            (GREATEST(
+                                0,
+                                TIMESTAMPDIFF(
+                                    SECOND,
+                                    GREATEST(ss.started_at, %s),
+                                    LEAST(COALESCE(ss.ended_at, %s), %s)
+                                )
+                            ) / 3600.0) * ss.applied_hourly_rate
+                        ),
+                        0
+                    ),
+                    4
+                ) AS spec_points_auto
+            FROM spec_sessions ss
+            LEFT JOIN events e
+              ON ss.target_type = 'event'
+             AND e.id = ss.target_id
+            WHERE ss.pr_id IN ({placeholders})
+              AND ss.deleted_at IS NULL
+              AND ss.started_at < %s
+              AND COALESCE(ss.ended_at, %s) > %s
+              AND (ss.target_type <> 'event' OR e.approval_status = 'approved')
+            GROUP BY ss.pr_id
+            """,
+            (
+                day_start,
+                day_end,
+                day_end,
+                day_start,
+                day_end,
+                day_end,
+                *assistant_ids,
+                day_end,
+                day_end,
+                day_start,
+            ),
+        )
+        rows = await cursor.fetchall() or []
+        result: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            assistant_id_value = int(row.get("assistant_id") or 0)
+            seconds = int(row.get("spec_seconds_on_day") or 0)
+            result[assistant_id_value] = {
+                "spec_seconds_on_day": seconds,
+                "spec_hours_on_day": round(seconds / 3600.0, 4),
+                "spec_points_auto": round(float(row.get("spec_points_auto") or 0), 4),
+            }
+        return result
+
     async def _get_streak_days_locked(
         self,
         cursor,
@@ -9307,6 +10093,13 @@ class Database:
         streak = 0
         cursor_date = work_date
         for _ in range(limit_days):
+            manual_status_row = await self._get_day_manual_status_locked(
+                cursor,
+                assistant_id=assistant_id,
+                work_date=cursor_date,
+            )
+            if manual_status_row.get("is_leave_day"):
+                break
             metrics = await self._get_day_spec_metrics_locked(
                 cursor,
                 assistant_id=assistant_id,
@@ -9325,12 +10118,22 @@ class Database:
         assistant_id: int,
         work_date: date,
     ) -> Dict[str, Any]:
-        policy = await self._ensure_current_policy_row(cursor)
+        policy = await self._ensure_monthly_policy_row(
+            cursor,
+            self._month_start_for(work_date),
+        )
         metrics = await self._get_day_spec_metrics_locked(
             cursor,
             assistant_id=assistant_id,
             work_date=work_date,
         )
+        manual_status_row = await self._get_day_manual_status_locked(
+            cursor,
+            assistant_id=assistant_id,
+            work_date=work_date,
+        )
+        manual_status = manual_status_row.get("manual_status")
+        is_leave_day = bool(manual_status_row.get("is_leave_day"))
 
         await cursor.execute(
             """
@@ -9387,6 +10190,8 @@ class Database:
         return {
             "assistant_id": assistant_id,
             "work_date": work_date,
+            "manual_status": manual_status,
+            "is_leave_day": is_leave_day,
             "spec_seconds_on_day": int(metrics.get("spec_seconds_on_day") or 0),
             "spec_hours_on_day": round(spec_hours, 4),
             "spec_points_auto": round(float(metrics.get("spec_points_auto") or 0), 4),
@@ -9492,7 +10297,7 @@ class Database:
         run_timestamp: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
         month_start = self._month_start_for(basis_date)
-        policy = await self._ensure_current_policy_row(cursor)
+        policy = await self._ensure_monthly_policy_row(cursor, month_start)
         cycle_size = int(policy.get("check_cycle_size") or 5)
 
         await cursor.execute(
@@ -9539,7 +10344,7 @@ class Database:
             ORDER BY range_start DESC, COALESCE(range_end, 4294967295) DESC, id DESC
             LIMIT 1
             """,
-            (CURRENT_SANCTION_POLICY_MONTH, cycle_no, cycle_no),
+            (month_start, cycle_no, cycle_no),
         )
         rule = await cursor.fetchone()
         if not rule:
@@ -9623,11 +10428,140 @@ class Database:
                     AND sr.basis_date = %s
               )
             ORDER BY s.issued_at ASC, s.id ASC
-            LIMIT 1
             """,
             (assistant_id, kind, run_started_at, basis_date),
         )
-        return await cursor.fetchone()
+        candidates = await cursor.fetchall() or []
+        for candidate in candidates:
+            workoff_state = await self._get_sanction_workoff_state_locked(
+                cursor,
+                sanction_id=int(candidate["sanction_id"]),
+                assistant_id=assistant_id,
+                evaluation_cutoff=basis_date,
+            )
+            effective_period_end = workoff_state.get("effective_period_end")
+            if workoff_state.get("has_workoff") and effective_period_end is not None and effective_period_end > basis_date:
+                continue
+            return candidate
+        return None
+
+    async def _get_sanction_workoff_state_locked(
+        self,
+        cursor,
+        *,
+        sanction_id: int,
+        assistant_id: int,
+        evaluation_cutoff: Optional[date],
+    ) -> Dict[str, Any]:
+        workoff_items = await self._get_sanction_workoff_items_locked(
+            cursor,
+            sanction_id=sanction_id,
+        )
+        if not workoff_items:
+            return {
+                "has_workoff": False,
+                "items": [],
+                "effective_period_end": None,
+                "all_completed": False,
+                "any_failed": False,
+            }
+
+        progress_items = await self._get_workoff_progress_items_locked(
+            cursor,
+            assistant_id=assistant_id,
+            workoff_items=workoff_items,
+            evaluation_cutoff=evaluation_cutoff,
+        )
+        effective_period_end = max(
+            (
+                item.get("effective_period_end")
+                for item in progress_items
+                if item.get("effective_period_end") is not None
+            ),
+            default=None,
+        )
+        return {
+            "has_workoff": True,
+            "items": progress_items,
+            "effective_period_end": effective_period_end,
+            "all_completed": bool(progress_items)
+            and all(str(item.get("status") or "") == "completed" for item in progress_items),
+            "any_failed": any(str(item.get("status") or "") == "failed" for item in progress_items),
+        }
+
+    async def _apply_custom_workoff_relief_locked(
+        self,
+        cursor,
+        *,
+        basis_date: date,
+        run_started_at: datetime,
+        assistant_filter: Optional[Set[int]] = None,
+    ) -> Dict[str, Any]:
+        await cursor.execute(
+            """
+            SELECT
+                sb.sanction_id,
+                sb.assistant_id,
+                sb.kind,
+                sb.active_amount
+            FROM sanction_balances sb
+            JOIN assistant_sanctions s ON s.id = sb.sanction_id
+            WHERE s.issued_at < %s
+              AND sb.active_amount > 0
+              AND EXISTS (
+                  SELECT 1
+                  FROM assistant_sanction_workoffs sw
+                  WHERE sw.sanction_id = s.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM assistant_sanction_reliefs sr
+                  WHERE sr.sanction_id = s.id
+                    AND sr.relief_type = 'custom_workoff'
+              )
+            ORDER BY s.issued_at ASC, s.id ASC
+            """,
+            (run_started_at,),
+        )
+        rows = await cursor.fetchall() or []
+        relieved: List[Dict[str, Any]] = []
+        for row in rows:
+            assistant_id = int(row["assistant_id"])
+            if assistant_filter is not None and assistant_id not in assistant_filter:
+                continue
+            workoff_state = await self._get_sanction_workoff_state_locked(
+                cursor,
+                sanction_id=int(row["sanction_id"]),
+                assistant_id=assistant_id,
+                evaluation_cutoff=basis_date,
+            )
+            effective_period_end = workoff_state.get("effective_period_end")
+            if effective_period_end is None or effective_period_end > basis_date:
+                continue
+            if not workoff_state.get("all_completed"):
+                continue
+            amount = round(float(row.get("active_amount") or 0), 4)
+            if amount <= 0:
+                continue
+            await cursor.execute(
+                """
+                INSERT INTO assistant_sanction_reliefs (
+                    sanction_id, amount, relieved_at, basis_date, relief_type
+                )
+                VALUES (%s, %s, %s, %s, 'custom_workoff')
+                """,
+                (row["sanction_id"], amount, run_started_at, basis_date),
+            )
+            relieved.append(
+                {
+                    "assistant_id": assistant_id,
+                    "sanction_id": int(row["sanction_id"]),
+                    "kind": str(row["kind"]),
+                    "amount": amount,
+                    "effective_period_end": effective_period_end,
+                }
+            )
+        return {"relieved": relieved}
 
     async def _apply_warning_auto_expiry_locked(
         self,
@@ -10200,6 +11134,964 @@ class Database:
                 await conn.commit()
                 return status
 
+    async def _get_weekly_payout_config_locked(self, cursor) -> Dict[str, Any]:
+        await cursor.execute(
+            """
+            SELECT payout_type, command_name
+            FROM assistant_weekly_payout_type_rules
+            ORDER BY payout_type ASC
+            """
+        )
+        type_rows = await cursor.fetchall() or []
+
+        await cursor.execute(
+            """
+            SELECT role_group, payout_type, result_code, amount
+            FROM assistant_weekly_payout_amount_rules
+            """
+        )
+        amount_rows = await cursor.fetchall() or []
+
+        await cursor.execute(
+            """
+            SELECT server_code
+            FROM assistant_weekly_payout_servers
+            ORDER BY server_code ASC
+            """
+        )
+        server_rows = await cursor.fetchall() or []
+
+        return {
+            "types": [
+                {
+                    "value": str(row.get("payout_type")),
+                    "command_name": str(row.get("command_name") or ""),
+                }
+                for row in type_rows
+            ],
+            "type_command_map": {
+                str(row.get("payout_type")): str(row.get("command_name") or "")
+                for row in type_rows
+                if row.get("payout_type")
+            },
+            "amount_map": {
+                (
+                    str(row.get("role_group")),
+                    str(row.get("payout_type")),
+                    str(row.get("result_code")),
+                ): str(row.get("amount") or "")
+                for row in amount_rows
+                if row.get("role_group") and row.get("payout_type") and row.get("result_code")
+            },
+            "servers": [
+                str(row.get("server_code"))
+                for row in server_rows
+                if row.get("server_code")
+            ],
+            "selected_results": list(WEEKLY_SELECTED_RESULT_OPTIONS),
+            "manual_statuses": list(WEEKLY_DAY_STATUS_VALUES),
+        }
+
+    def _build_weekly_payout_preview(
+        self,
+        *,
+        assistant_role: Optional[str],
+        selected_result: Optional[str],
+        payout_type: Optional[str],
+        payout_server: Optional[str],
+        payout_static: Optional[str],
+        payout_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_result = _canonical_weekly_result(selected_result)
+        normalized_static = str(payout_static or "").strip() or None
+        command_name = (
+            payout_config.get("type_command_map", {}).get(str(payout_type))
+            if payout_type
+            else None
+        )
+        preview = {
+            "type": payout_type,
+            "server": payout_server,
+            "static": normalized_static,
+            "command_name": command_name,
+            "amount": None,
+            "command": None,
+            "command_available": False,
+            "command_unavailable_reason": None,
+            "role_group": _weekly_role_group(assistant_role),
+        }
+
+        if normalized_result not in {"Актив", "Ультра-Актив"}:
+            preview["command_unavailable_reason"] = "selected_result_not_payout_eligible"
+            return preview
+        if not payout_type or not payout_server or not normalized_static:
+            preview["command_unavailable_reason"] = "incomplete_payout_data"
+            return preview
+        if not command_name:
+            preview["command_unavailable_reason"] = "payout_type_rule_missing"
+            return preview
+
+        amount = payout_config.get("amount_map", {}).get(
+            (_weekly_role_group(assistant_role), str(payout_type), normalized_result)
+        )
+        if not amount:
+            preview["command_unavailable_reason"] = "amount_rule_missing"
+            return preview
+
+        preview["amount"] = amount
+        preview["command"] = (
+            f"{payout_server}:{command_name} {normalized_static} {amount} {WEEKLY_PAYOUT_SUFFIX}"
+        )
+        preview["command_available"] = True
+        return preview
+
+    def _calculate_weekly_suggested_result(
+        self,
+        *,
+        active_day_records: List[Dict[str, Any]],
+        total_spec_hours: float,
+        total_mchat: int,
+        total_complaints: int,
+        count_p: int,
+        count_o: int,
+    ) -> Dict[str, Any]:
+        if not active_day_records:
+            return {
+                "suggested_result": None,
+                "suggested_reason": "unconfigured",
+                "metric_hits": 0,
+                "weekly_norm_spec": 0.0,
+                "weekly_norm_mchat": 0,
+                "weekly_norm_complaints": 0,
+            }
+
+        if any(
+            float(day.get("daily_norm_spec") or 0) <= 0
+            or int(day.get("daily_norm_mchat") or 0) <= 0
+            or int(day.get("daily_norm_complaints") or 0) <= 0
+            for day in active_day_records
+        ):
+            return {
+                "suggested_result": None,
+                "suggested_reason": "unconfigured",
+                "metric_hits": 0,
+                "weekly_norm_spec": 0.0,
+                "weekly_norm_mchat": 0,
+                "weekly_norm_complaints": 0,
+            }
+
+        weekly_norm_spec = round(
+            sum(float(day.get("daily_norm_spec") or 0) for day in active_day_records),
+            4,
+        )
+        weekly_norm_mchat = int(
+            sum(int(day.get("daily_norm_mchat") or 0) for day in active_day_records)
+        )
+        weekly_norm_complaints = int(
+            sum(int(day.get("daily_norm_complaints") or 0) for day in active_day_records)
+        )
+
+        metric_hits = 0
+        if total_spec_hours + 1e-9 >= weekly_norm_spec:
+            metric_hits += 1
+        if total_mchat >= weekly_norm_mchat:
+            metric_hits += 1
+        if total_complaints >= weekly_norm_complaints:
+            metric_hits += 1
+
+        ultra_daily_ok = all(
+            (
+                day.get("resolved_status") == "O"
+                or (
+                    float(day.get("spec_hours") or 0) + 1e-9 >= float(day.get("daily_norm_spec") or 0)
+                    and int(day.get("mchat_count") or 0) >= int(day.get("daily_norm_mchat") or 0)
+                    and int(day.get("complaints_count") or 0) >= int(day.get("daily_norm_complaints") or 0)
+                )
+            )
+            for day in active_day_records
+        )
+        ultra_boosted = (
+            total_spec_hours + 1e-9 >= round(weekly_norm_spec * 1.5, 4)
+            or total_mchat >= weekly_norm_mchat * 2
+            or total_complaints >= weekly_norm_complaints * 2
+        )
+
+        if count_p == 0 and count_o <= 1 and ultra_daily_ok and ultra_boosted:
+            suggested_result = "Ультра-Актив"
+        elif metric_hits == 3 and count_p <= 1:
+            suggested_result = "Актив"
+        elif metric_hits == 2 and count_p <= 2:
+            suggested_result = "Инактив/Актив"
+        else:
+            suggested_result = "Инактив"
+
+        return {
+            "suggested_result": suggested_result,
+            "suggested_reason": None,
+            "metric_hits": metric_hits,
+            "weekly_norm_spec": weekly_norm_spec,
+            "weekly_norm_mchat": weekly_norm_mchat,
+            "weekly_norm_complaints": weekly_norm_complaints,
+        }
+
+    async def _build_assistant_weekly_read_model_locked(
+        self,
+        cursor,
+        *,
+        week_start: date,
+        assistant_id: Optional[int] = None,
+        include_day_matrix: bool,
+        include_payout_options: bool,
+    ) -> Dict[str, Any]:
+        normalized_week_start = _week_start_msk(week_start)
+        week_end = normalized_week_start + timedelta(days=6)
+        week_days = _week_dates(normalized_week_start)
+        current_msk_date = _msk_today()
+        roster_start_dt = datetime.combine(normalized_week_start, datetime.min.time())
+        roster_end_exclusive = datetime.combine(
+            week_end + timedelta(days=1),
+            datetime.min.time(),
+        )
+        assistant_where = ""
+        assistant_params: List[Any] = [roster_end_exclusive, roster_start_dt]
+        if assistant_id is not None:
+            assistant_where = " AND a.pr_id = %s"
+            assistant_params.append(assistant_id)
+
+        await cursor.execute(
+            f"""
+            SELECT
+                a.pr_id,
+                a.nickname,
+                a.role,
+                a.added_at,
+                a.appointed_at,
+                a.dismissed_at
+            FROM assistants a
+            WHERE COALESCE(a.appointed_at, a.added_at, CURRENT_TIMESTAMP) < %s
+              AND (a.dismissed_at IS NULL OR a.dismissed_at >= %s)
+              {assistant_where}
+            ORDER BY a.nickname ASC, a.pr_id ASC
+            """,
+            tuple(assistant_params),
+        )
+        assistants = await cursor.fetchall() or []
+        assistant_ids = [int(row.get("pr_id")) for row in assistants if row.get("pr_id") is not None]
+
+        payout_config = (
+            await self._get_weekly_payout_config_locked(cursor)
+            if include_payout_options
+            else {"types": [], "type_command_map": {}, "amount_map": {}, "servers": []}
+        )
+
+        policy_by_month: Dict[date, Dict[str, Any]] = {}
+        for month_start in sorted({_month_start(work_date) for work_date in week_days}):
+            policy_by_month[month_start] = await self._ensure_monthly_policy_row(cursor, month_start)
+
+        spec_map: Dict[tuple[int, date], Dict[str, Any]] = {}
+        mchat_map: Dict[tuple[int, date], int] = {}
+        complaints_map: Dict[tuple[int, date], int] = {}
+        override_map: Dict[tuple[int, date], Dict[str, Any]] = {}
+        review_map: Dict[int, Dict[str, Any]] = {}
+
+        if assistant_ids:
+            placeholders = ", ".join(["%s"] * len(assistant_ids))
+
+            await cursor.execute(
+                f"""
+                SELECT assistant_id, work_date, spec_seconds_on_day, spec_hours_on_day, spec_points_auto
+                FROM assistant_day_spec_totals
+                WHERE assistant_id IN ({placeholders})
+                  AND work_date BETWEEN %s AND %s
+                """,
+                (*assistant_ids, normalized_week_start, week_end),
+            )
+            for row in await cursor.fetchall() or []:
+                work_date = row.get("work_date")
+                if isinstance(work_date, datetime):
+                    work_date = work_date.date()
+                spec_map[(int(row.get("assistant_id") or 0), work_date)] = {
+                    "spec_seconds_on_day": int(row.get("spec_seconds_on_day") or 0),
+                    "spec_hours_on_day": round(float(row.get("spec_hours_on_day") or 0), 4),
+                    "spec_points_auto": round(float(row.get("spec_points_auto") or 0), 4),
+                }
+
+            if normalized_week_start <= current_msk_date <= week_end:
+                live_spec_map = await self._get_day_spec_metrics_map_locked(
+                    cursor,
+                    assistant_ids=assistant_ids,
+                    work_date=current_msk_date,
+                )
+                for current_assistant_id, metrics in live_spec_map.items():
+                    spec_map[(current_assistant_id, current_msk_date)] = metrics
+
+            await cursor.execute(
+                f"""
+                SELECT assistant_id, work_date, mchat_count
+                FROM assistant_day_mchat
+                WHERE assistant_id IN ({placeholders})
+                  AND work_date BETWEEN %s AND %s
+                """,
+                (*assistant_ids, normalized_week_start, week_end),
+            )
+            for row in await cursor.fetchall() or []:
+                work_date = row.get("work_date")
+                if isinstance(work_date, datetime):
+                    work_date = work_date.date()
+                mchat_map[(int(row.get("assistant_id") or 0), work_date)] = int(row.get("mchat_count") or 0)
+
+            await cursor.execute(
+                f"""
+                SELECT assistant_id, DATE(completed_at) AS work_date, COUNT(*) AS complaints_count
+                FROM complaints
+                WHERE assistant_id IN ({placeholders})
+                  AND status = 'completed'
+                  AND DATE(completed_at) BETWEEN %s AND %s
+                GROUP BY assistant_id, DATE(completed_at)
+                """,
+                (*assistant_ids, normalized_week_start, week_end),
+            )
+            for row in await cursor.fetchall() or []:
+                work_date = row.get("work_date")
+                if isinstance(work_date, datetime):
+                    work_date = work_date.date()
+                if isinstance(work_date, str):
+                    work_date = date.fromisoformat(work_date)
+                complaints_map[(int(row.get("assistant_id") or 0), work_date)] = int(
+                    row.get("complaints_count") or 0
+                )
+
+            await cursor.execute(
+                f"""
+                SELECT assistant_id, work_date, manual_status, updated_at, updated_by_id
+                FROM assistant_day_status_overrides
+                WHERE assistant_id IN ({placeholders})
+                  AND work_date BETWEEN %s AND %s
+                """,
+                (*assistant_ids, normalized_week_start, week_end),
+            )
+            for row in await cursor.fetchall() or []:
+                work_date = row.get("work_date")
+                if isinstance(work_date, datetime):
+                    work_date = work_date.date()
+                override_map[(int(row.get("assistant_id") or 0), work_date)] = {
+                    "manual_status": row.get("manual_status"),
+                    "updated_at": row.get("updated_at"),
+                    "updated_by_id": row.get("updated_by_id"),
+                }
+
+            await cursor.execute(
+                f"""
+                SELECT
+                    assistant_id,
+                    selected_result,
+                    payout_type,
+                    payout_server,
+                    payout_static,
+                    payout_issue_status,
+                    payout_issued_at,
+                    payout_issued_by_id,
+                    updated_at,
+                    updated_by_id
+                FROM assistant_weekly_reviews
+                WHERE assistant_id IN ({placeholders})
+                  AND week_start = %s
+                """,
+                (*assistant_ids, normalized_week_start),
+            )
+            for row in await cursor.fetchall() or []:
+                review_map[int(row.get("assistant_id") or 0)] = dict(row)
+
+        day_headers = [
+            {
+                "work_date": work_date,
+                "weekday_index": index,
+                "weekday_short": ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")[index],
+                "label_short": work_date.strftime("%d.%m"),
+            }
+            for index, work_date in enumerate(week_days)
+        ]
+
+        items: List[Dict[str, Any]] = []
+        for assistant in assistants:
+            current_assistant_id = int(assistant.get("pr_id") or 0)
+            appointed_date = _date_only(
+                assistant.get("appointed_at") or assistant.get("added_at")
+            ) or normalized_week_start
+            dismissed_date = _date_only(assistant.get("dismissed_at"))
+
+            day_payloads: List[Dict[str, Any]] = []
+            active_day_records: List[Dict[str, Any]] = []
+            total_spec_hours = 0.0
+            total_mchat = 0
+            total_complaints = 0
+            count_p = 0
+            count_u = 0
+            count_o = 0
+
+            for index, work_date in enumerate(week_days):
+                policy = policy_by_month[_month_start(work_date)]
+                daily_norm_spec = round(float(policy.get("daily_norm_spec") or 0), 4)
+                daily_norm_mchat = int(policy.get("daily_norm_mchat") or 0)
+                daily_norm_complaints = int(policy.get("daily_norm_complaints") or 0)
+                is_roster_day = work_date >= appointed_date and (
+                    dismissed_date is None or work_date <= dismissed_date
+                )
+                spec_metrics = spec_map.get(
+                    (current_assistant_id, work_date),
+                    {
+                        "spec_seconds_on_day": 0,
+                        "spec_hours_on_day": 0.0,
+                        "spec_points_auto": 0.0,
+                    },
+                )
+                spec_hours = round(float(spec_metrics.get("spec_hours_on_day") or 0), 4)
+                mchat_count = int(mchat_map.get((current_assistant_id, work_date), 0))
+                complaints_count = int(complaints_map.get((current_assistant_id, work_date), 0))
+                override = override_map.get((current_assistant_id, work_date), {})
+                has_manual_override = (current_assistant_id, work_date) in override_map
+                raw_manual_status = override.get("manual_status")
+                manual_status = (
+                    None
+                    if raw_manual_status in (None, WEEKLY_MANUAL_STATUS_NONE)
+                    else raw_manual_status
+                )
+                auto_status = None
+                if (
+                    is_roster_day
+                    and work_date < current_msk_date
+                    and daily_norm_spec > 0
+                    and spec_hours + 1e-9 < daily_norm_spec
+                ):
+                    auto_status = "P"
+                resolved_status = manual_status if has_manual_override else auto_status
+                status_source = "manual" if has_manual_override else ("auto" if auto_status else "none")
+
+                if is_roster_day and resolved_status == "P":
+                    count_p += 1
+                elif is_roster_day and resolved_status == "U":
+                    count_u += 1
+                elif is_roster_day and resolved_status == "O":
+                    count_o += 1
+
+                total_spec_hours = round(total_spec_hours + spec_hours, 4)
+                total_mchat += mchat_count
+                total_complaints += complaints_count
+
+                day_payload = {
+                    "work_date": work_date,
+                    "weekday_index": index,
+                    "is_roster_day": is_roster_day,
+                    "spec_seconds": int(spec_metrics.get("spec_seconds_on_day") or 0),
+                    "spec_hours": spec_hours,
+                    "mchat_count": mchat_count,
+                    "complaints_count": complaints_count,
+                    "daily_norm_spec": daily_norm_spec,
+                    "daily_norm_mchat": daily_norm_mchat,
+                    "daily_norm_complaints": daily_norm_complaints,
+                    "manual_status": manual_status,
+                    "auto_status": auto_status,
+                    "resolved_status": resolved_status,
+                    "status_source": status_source,
+                    "manual_status_updated_at": override.get("updated_at"),
+                    "manual_status_updated_by_id": override.get("updated_by_id"),
+                }
+                day_payloads.append(day_payload)
+                if is_roster_day:
+                    active_day_records.append(day_payload)
+
+            suggestion = self._calculate_weekly_suggested_result(
+                active_day_records=active_day_records,
+                total_spec_hours=total_spec_hours,
+                total_mchat=total_mchat,
+                total_complaints=total_complaints,
+                count_p=count_p,
+                count_o=count_o,
+            )
+            review = review_map.get(current_assistant_id, {})
+            selected_result = _canonical_weekly_result(review.get("selected_result"))
+            payout = self._build_weekly_payout_preview(
+                assistant_role=assistant.get("role"),
+                selected_result=selected_result,
+                payout_type=review.get("payout_type"),
+                payout_server=review.get("payout_server"),
+                payout_static=review.get("payout_static"),
+                payout_config=payout_config,
+            )
+            payout_issue_status = _canonical_weekly_payout_issue_status(
+                review.get("payout_issue_status")
+            )
+
+            item = {
+                "assistant_id": current_assistant_id,
+                "nickname": assistant.get("nickname"),
+                "role": assistant.get("role"),
+                "week_start": normalized_week_start,
+                "week_end": week_end,
+                "totals": {
+                    "spec_hours": round(total_spec_hours, 4),
+                    "mchat_count": total_mchat,
+                    "complaints_count": total_complaints,
+                },
+                "counts": {
+                    "P": count_p,
+                    "U": count_u,
+                    "O": count_o,
+                },
+                "suggested_result": suggestion.get("suggested_result"),
+                "suggested_reason": suggestion.get("suggested_reason"),
+                "suggestion_metrics": {
+                    "metric_hits": suggestion.get("metric_hits"),
+                    "weekly_norm_spec": suggestion.get("weekly_norm_spec"),
+                    "weekly_norm_mchat": suggestion.get("weekly_norm_mchat"),
+                    "weekly_norm_complaints": suggestion.get("weekly_norm_complaints"),
+                },
+                "selected_result": selected_result,
+                "result_display": selected_result or suggestion.get("suggested_result"),
+                "payout": payout,
+                "payout_type": review.get("payout_type"),
+                "payout_server": review.get("payout_server"),
+                "payout_static": review.get("payout_static"),
+                "payout_issue_status": payout_issue_status,
+                "payout_issued_at": review.get("payout_issued_at"),
+                "payout_issued_by_id": review.get("payout_issued_by_id"),
+                "review_updated_at": review.get("updated_at"),
+                "review_updated_by_id": review.get("updated_by_id"),
+            }
+            if include_day_matrix:
+                item["days"] = day_payloads
+            items.append(item)
+
+        payload = {
+            "week_start": normalized_week_start,
+            "week_end": week_end,
+            "day_headers": day_headers,
+            "items": items,
+        }
+        if include_payout_options:
+            payload["payout_options"] = {
+                "types": payout_config.get("types", []),
+                "servers": payout_config.get("servers", []),
+                "selected_results": payout_config.get("selected_results", []),
+                "manual_statuses": payout_config.get("manual_statuses", []),
+            }
+        return payload
+
+    @db_retry()
+    async def get_current_assistant_weekly_overview(self) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                payload = await self._build_assistant_weekly_read_model_locked(
+                    cursor,
+                    week_start=_week_start_msk(),
+                    include_day_matrix=True,
+                    include_payout_options=False,
+                )
+                await conn.commit()
+                return payload
+
+    @db_retry()
+    async def get_assistant_weekly_admin_overview(
+        self,
+        *,
+        week_start: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                payload = await self._build_assistant_weekly_read_model_locked(
+                    cursor,
+                    week_start=week_start or _week_start_msk(),
+                    include_day_matrix=True,
+                    include_payout_options=True,
+                )
+                await conn.commit()
+                return payload
+
+    @db_retry()
+    async def get_assistant_weekly_admin_detail(
+        self,
+        *,
+        assistant_id: int,
+        week_start: Optional[date] = None,
+    ) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                payload = await self._build_assistant_weekly_read_model_locked(
+                    cursor,
+                    week_start=week_start or _week_start_msk(),
+                    assistant_id=assistant_id,
+                    include_day_matrix=True,
+                    include_payout_options=True,
+                )
+                await conn.commit()
+                if not payload.get("items"):
+                    return None
+                return {
+                    "week_start": payload.get("week_start"),
+                    "week_end": payload.get("week_end"),
+                    "day_headers": payload.get("day_headers", []),
+                    "payout_options": payload.get("payout_options", {}),
+                    "detail": payload["items"][0],
+                }
+
+    @db_retry()
+    async def save_assistant_weekly_admin_review(
+        self,
+        *,
+        assistant_id: int,
+        week_start: date,
+        actor_id: Optional[int],
+        day_overrides: List[Dict[str, Any]],
+        selected_result: Optional[str],
+        payout_type: Optional[str],
+        payout_server: Optional[str],
+        payout_static: Optional[str],
+    ) -> Dict[str, Any]:
+        normalized_week_start = _week_start_msk(week_start)
+        week_end = normalized_week_start + timedelta(days=6)
+        normalized_result = _canonical_weekly_result(selected_result)
+        if normalized_result is not None and normalized_result not in WEEKLY_SELECTED_RESULTS:
+            raise ValueError("Невалидный weekly result")
+        if payout_type is not None and payout_type not in WEEKLY_PAYOUT_TYPES:
+            raise ValueError("Невалидный payout type")
+        normalized_static = str(payout_static or "").strip() or None
+        payout_issue_transition = None
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT pr_id, role
+                    FROM assistants
+                    WHERE pr_id = %s
+                      AND COALESCE(appointed_at, added_at, CURRENT_TIMESTAMP) < %s
+                      AND (dismissed_at IS NULL OR dismissed_at >= %s)
+                    LIMIT 1
+                    """,
+                    (
+                        assistant_id,
+                        datetime.combine(week_end + timedelta(days=1), datetime.min.time()),
+                        datetime.combine(normalized_week_start, datetime.min.time()),
+                    ),
+                )
+                assistant = await cursor.fetchone()
+                if not assistant:
+                    raise ValueError("Ассистент не найден")
+                assistant_role = assistant.get("role")
+
+                payout_config = await self._get_weekly_payout_config_locked(cursor)
+                allowed_servers = set(payout_config.get("servers", []))
+                if payout_server is not None and payout_server not in allowed_servers:
+                    raise ValueError("Невалидный payout server")
+
+                await cursor.execute(
+                    """
+                    SELECT
+                        selected_result,
+                        payout_type,
+                        payout_server,
+                        payout_static,
+                        payout_issue_status,
+                        payout_issued_at,
+                        payout_issued_by_id
+                    FROM assistant_weekly_reviews
+                    WHERE assistant_id = %s
+                      AND week_start = %s
+                    LIMIT 1
+                    """,
+                    (assistant_id, normalized_week_start),
+                )
+                previous_review = await cursor.fetchone() or {}
+                previous_result = _canonical_weekly_result(previous_review.get("selected_result"))
+                previous_static = str(previous_review.get("payout_static") or "").strip() or None
+                previous_issue_status = _canonical_weekly_payout_issue_status(
+                    previous_review.get("payout_issue_status")
+                )
+                payout_fields_changed = (
+                    previous_result != normalized_result
+                    or previous_review.get("payout_type") != payout_type
+                    or previous_review.get("payout_server") != payout_server
+                    or previous_static != normalized_static
+                )
+                payout_issue_reset = (
+                    bool(previous_review)
+                    and previous_issue_status == WEEKLY_PAYOUT_ISSUE_STATUS_ISSUED
+                    and payout_fields_changed
+                )
+                if payout_issue_reset:
+                    previous_payout_preview = self._build_weekly_payout_preview(
+                        assistant_role=assistant_role,
+                        selected_result=previous_result,
+                        payout_type=previous_review.get("payout_type"),
+                        payout_server=previous_review.get("payout_server"),
+                        payout_static=previous_static,
+                        payout_config=payout_config,
+                    )
+                    payout_issue_transition = {
+                        "from_status": previous_issue_status,
+                        "to_status": WEEKLY_PAYOUT_ISSUE_STATUS_PENDING,
+                        "issued_at": previous_review.get("payout_issued_at"),
+                        "issued_by_id": previous_review.get("payout_issued_by_id"),
+                        "generated_payout_command": previous_payout_preview.get("command"),
+                        "auto_reset": True,
+                    }
+
+                seen_dates: Set[date] = set()
+                for override in day_overrides:
+                    work_date = override.get("work_date")
+                    manual_status = override.get("manual_status")
+                    is_manual_override = bool(override.get("is_manual_override"))
+                    if work_date is None:
+                        raise ValueError("work_date is required")
+                    if work_date in seen_dates:
+                        raise ValueError("Повторяющиеся daily overrides недопустимы")
+                    seen_dates.add(work_date)
+                    if work_date < normalized_week_start or work_date > week_end:
+                        raise ValueError("work_date должен находиться внутри выбранной недели")
+                    if manual_status is not None and manual_status not in WEEKLY_MANUAL_STATUSES:
+                        raise ValueError("Невалидный day status")
+
+                    if not is_manual_override:
+                        await cursor.execute(
+                            """
+                            DELETE FROM assistant_day_status_overrides
+                            WHERE assistant_id = %s AND work_date = %s
+                            """,
+                            (assistant_id, work_date),
+                        )
+                    else:
+                        stored_manual_status = manual_status or WEEKLY_MANUAL_STATUS_NONE
+                        await cursor.execute(
+                            """
+                            INSERT INTO assistant_day_status_overrides (
+                                assistant_id,
+                                work_date,
+                                manual_status,
+                                updated_by_id
+                            )
+                            VALUES (%s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                manual_status = VALUES(manual_status),
+                                updated_by_id = VALUES(updated_by_id),
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (assistant_id, work_date, stored_manual_status, actor_id),
+                        )
+
+                if (
+                    normalized_result is None
+                    and payout_type is None
+                    and payout_server is None
+                    and normalized_static is None
+                ):
+                    await cursor.execute(
+                        """
+                        DELETE FROM assistant_weekly_reviews
+                        WHERE assistant_id = %s AND week_start = %s
+                        """,
+                        (assistant_id, normalized_week_start),
+                    )
+                else:
+                    await cursor.execute(
+                        """
+                        INSERT INTO assistant_weekly_reviews (
+                            assistant_id,
+                            week_start,
+                            selected_result,
+                            payout_type,
+                            payout_server,
+                            payout_static,
+                            payout_issue_status,
+                            payout_issued_at,
+                            payout_issued_by_id,
+                            updated_by_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            selected_result = VALUES(selected_result),
+                            payout_type = VALUES(payout_type),
+                            payout_server = VALUES(payout_server),
+                            payout_static = VALUES(payout_static),
+                            payout_issue_status = VALUES(payout_issue_status),
+                            payout_issued_at = VALUES(payout_issued_at),
+                            payout_issued_by_id = VALUES(payout_issued_by_id),
+                            updated_by_id = VALUES(updated_by_id),
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            assistant_id,
+                            normalized_week_start,
+                            normalized_result,
+                            payout_type,
+                            payout_server,
+                            normalized_static,
+                            WEEKLY_PAYOUT_ISSUE_STATUS_PENDING
+                            if payout_issue_reset
+                            else _canonical_weekly_payout_issue_status(
+                                previous_review.get("payout_issue_status")
+                            ),
+                            None
+                            if payout_issue_reset
+                            else previous_review.get("payout_issued_at"),
+                            None
+                            if payout_issue_reset
+                            else previous_review.get("payout_issued_by_id"),
+                            actor_id,
+                        ),
+                    )
+                await conn.commit()
+
+        detail = await self.get_assistant_weekly_admin_detail(
+            assistant_id=assistant_id,
+            week_start=normalized_week_start,
+        )
+        if detail is None:
+            raise ValueError("Не удалось получить weekly detail после сохранения")
+        if payout_issue_transition:
+            detail["payout_issue_transition"] = payout_issue_transition
+        return detail
+
+    @db_retry()
+    async def save_assistant_weekly_payout_issue_status(
+        self,
+        *,
+        assistant_id: int,
+        week_start: date,
+        actor_id: Optional[int],
+        payout_issue_status: str,
+    ) -> Dict[str, Any]:
+        normalized_week_start = _week_start_msk(week_start)
+        week_end = normalized_week_start + timedelta(days=6)
+        normalized_status = _canonical_weekly_payout_issue_status(payout_issue_status)
+        payout_issue_transition = None
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT pr_id, role
+                    FROM assistants
+                    WHERE pr_id = %s
+                      AND COALESCE(appointed_at, added_at, CURRENT_TIMESTAMP) < %s
+                      AND (dismissed_at IS NULL OR dismissed_at >= %s)
+                    LIMIT 1
+                    """,
+                    (
+                        assistant_id,
+                        datetime.combine(week_end + timedelta(days=1), datetime.min.time()),
+                        datetime.combine(normalized_week_start, datetime.min.time()),
+                    ),
+                )
+                assistant = await cursor.fetchone()
+                if not assistant:
+                    raise ValueError("Ассистент не найден")
+
+                payout_config = await self._get_weekly_payout_config_locked(cursor)
+                await cursor.execute(
+                    """
+                    SELECT
+                        selected_result,
+                        payout_type,
+                        payout_server,
+                        payout_static,
+                        payout_issue_status,
+                        payout_issued_at,
+                        payout_issued_by_id
+                    FROM assistant_weekly_reviews
+                    WHERE assistant_id = %s
+                      AND week_start = %s
+                    LIMIT 1
+                    """,
+                    (assistant_id, normalized_week_start),
+                )
+                review = await cursor.fetchone() or {}
+                current_status = _canonical_weekly_payout_issue_status(
+                    review.get("payout_issue_status")
+                )
+
+                if not review:
+                    if normalized_status == WEEKLY_PAYOUT_ISSUE_STATUS_ISSUED:
+                        raise ValueError("Нельзя отметить выдачу без сохранённой weekly review")
+                    detail = await self.get_assistant_weekly_admin_detail(
+                        assistant_id=assistant_id,
+                        week_start=normalized_week_start,
+                    )
+                    if detail is None:
+                        raise ValueError("Не удалось получить weekly detail")
+                    return detail
+
+                selected_result = _canonical_weekly_result(review.get("selected_result"))
+                normalized_static = str(review.get("payout_static") or "").strip() or None
+                payout_preview = self._build_weekly_payout_preview(
+                    assistant_role=assistant.get("role"),
+                    selected_result=selected_result,
+                    payout_type=review.get("payout_type"),
+                    payout_server=review.get("payout_server"),
+                    payout_static=normalized_static,
+                    payout_config=payout_config,
+                )
+
+                if normalized_status == current_status:
+                    detail = await self.get_assistant_weekly_admin_detail(
+                        assistant_id=assistant_id,
+                        week_start=normalized_week_start,
+                    )
+                    if detail is None:
+                        raise ValueError("Не удалось получить weekly detail")
+                    return detail
+
+                if (
+                    normalized_status == WEEKLY_PAYOUT_ISSUE_STATUS_ISSUED
+                    and not payout_preview.get("command_available")
+                ):
+                    raise ValueError("Команда недоступна для выдачи")
+
+                await cursor.execute(
+                    """
+                    UPDATE assistant_weekly_reviews
+                    SET payout_issue_status = %s,
+                        payout_issued_at = CASE
+                            WHEN %s = 'issued' THEN CURRENT_TIMESTAMP
+                            ELSE NULL
+                        END,
+                        payout_issued_by_id = CASE
+                            WHEN %s = 'issued' THEN %s
+                            ELSE NULL
+                        END,
+                        updated_by_id = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE assistant_id = %s
+                      AND week_start = %s
+                    """,
+                    (
+                        normalized_status,
+                        normalized_status,
+                        normalized_status,
+                        actor_id,
+                        actor_id,
+                        assistant_id,
+                        normalized_week_start,
+                    ),
+                )
+                await conn.commit()
+                payout_issue_transition = {
+                    "from_status": current_status,
+                    "to_status": normalized_status,
+                    "issued_at": review.get("payout_issued_at"),
+                    "issued_by_id": review.get("payout_issued_by_id"),
+                    "generated_payout_command": payout_preview.get("command"),
+                    "auto_reset": False,
+                }
+
+        detail = await self.get_assistant_weekly_admin_detail(
+            assistant_id=assistant_id,
+            week_start=normalized_week_start,
+        )
+        if detail is None:
+            raise ValueError("Не удалось получить weekly detail")
+        detail["payout_issue_transition"] = payout_issue_transition
+        return detail
+
     @db_retry()
     async def get_assistant_sanctions_summary(
         self,
@@ -10315,12 +12207,7 @@ class Database:
                                 "check_rule_hit_no": sanction.get("cycle_no"),
                             },
                             "workoff_items": workoff_items,
-                            "workoff_progress_summary": {
-                                "has_workoff": bool(workoff_items),
-                                "total_items": len(progress_items),
-                                "completed_items": sum(1 for item in progress_items if bool(item.get("is_completed"))),
-                                "items": progress_items,
-                            },
+                            "workoff_progress_summary": self._build_workoff_progress_summary(progress_items),
                         }
                     )
                 return result
@@ -10362,9 +12249,53 @@ class Database:
                     "sanction_id": sanction_id,
                     "has_workoff": True,
                     "items": progress_items,
-                    "completed_items": sum(1 for item in progress_items if bool(item.get("is_completed"))),
+                    "completed_items": sum(
+                        1 for item in progress_items if str(item.get("status") or "") == "completed"
+                    ),
                     "total_items": len(progress_items),
                 }
+
+    @db_retry()
+    async def preview_workoff_for_assistants(
+        self,
+        *,
+        assistant_ids: List[int],
+        workoff_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized_assistant_ids = sorted({int(value) for value in assistant_ids})
+        normalized_items = self._normalize_workoff_items(workoff_items)
+        if not normalized_assistant_ids or not normalized_items:
+            return []
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                placeholders = ", ".join(["%s"] * len(normalized_assistant_ids))
+                await cursor.execute(
+                    f"""
+                    SELECT pr_id AS assistant_id, nickname
+                    FROM assistants
+                    WHERE pr_id IN ({placeholders})
+                    ORDER BY nickname ASC, pr_id ASC
+                    """,
+                    tuple(normalized_assistant_ids),
+                )
+                assistant_rows = await cursor.fetchall() or []
+                results: List[Dict[str, Any]] = []
+                for assistant in assistant_rows:
+                    assistant_id = int(assistant["assistant_id"])
+                    progress_items = await self._get_workoff_progress_items_locked(
+                        cursor,
+                        assistant_id=assistant_id,
+                        workoff_items=normalized_items,
+                    )
+                    results.append(
+                        {
+                            "assistant_id": assistant_id,
+                            "nickname": assistant.get("nickname"),
+                            "items": progress_items,
+                        }
+                    )
+                return results
 
     @db_retry()
     async def create_manual_sanction(
@@ -10889,7 +12820,8 @@ class Database:
                         COUNT(m.assistant_id) AS members_total,
                         COUNT(m.assistant_id) AS effective_members,
                         SUM(CASE WHEN m.issue_status = 'issued' THEN 1 ELSE 0 END) AS issued_members,
-                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members
+                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members,
+                        SUM(CASE WHEN m.issue_status = 'skipped_leave' THEN 1 ELSE 0 END) AS skipped_leave_members
                     FROM sanction_operations b
                     LEFT JOIN sanction_operation_members m ON m.operation_id = b.id
                     LEFT JOIN web_auth created_user ON created_user.discord_id = b.created_by_id
@@ -10931,7 +12863,8 @@ class Database:
                         COUNT(m.assistant_id) AS members_total,
                         COUNT(m.assistant_id) AS effective_members,
                         SUM(CASE WHEN m.issue_status = 'issued' THEN 1 ELSE 0 END) AS issued_members,
-                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members
+                        SUM(CASE WHEN m.issue_status = 'skipped_immunity' THEN 1 ELSE 0 END) AS skipped_immunity_members,
+                        SUM(CASE WHEN m.issue_status = 'skipped_leave' THEN 1 ELSE 0 END) AS skipped_leave_members
                     FROM sanction_operations b
                     LEFT JOIN sanction_operation_members m ON m.operation_id = b.id
                     LEFT JOIN web_auth created_user ON created_user.discord_id = b.created_by_id
@@ -11063,6 +12996,7 @@ class Database:
             "batch_id": batch_id,
             "issued": [],
             "skipped_immunity": [],
+            "skipped_leave": [],
             "failed": [],
             "derived": [],
         }
@@ -11076,6 +13010,19 @@ class Database:
                     work_date=batch["basis_date"],
                 )
                 kind = str(batch["sanction_kind"])
+                if not ignore_immunity and bool(day_status.get("is_leave_day")):
+                    await cursor.execute(
+                        """
+                        UPDATE sanction_operation_members
+                        SET issue_status = 'skipped_leave',
+                            issue_reason = %s,
+                            issued_sanction_id = NULL
+                        WHERE operation_id = %s AND assistant_id = %s
+                        """,
+                        ("Skipped by U/O day override", batch_id, assistant_id),
+                    )
+                    batch_result["skipped_leave"].append(assistant_id)
+                    continue
                 immunity = False
                 if not ignore_immunity:
                     immunity = (
@@ -11313,7 +13260,7 @@ class Database:
             JOIN assistant_sanctions s ON s.id = sr.sanction_id
             WHERE s.assistant_id = %s
               AND sr.basis_date BETWEEN %s AND %s
-              AND sr.relief_type IN ('default', 'cycle_reset', 'month_reset', 'auto_expire')
+              AND sr.relief_type IN ('default', 'custom_workoff', 'cycle_reset', 'month_reset', 'auto_expire')
             """,
             (assistant_id, start_date, end_date),
         )
@@ -11342,9 +13289,36 @@ class Database:
             )
 
     @db_retry()
-    async def process_queued_sanction_batches_for_date(self, basis_date: date) -> Dict[str, Any]:
-        run_started_at = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None)
+    async def process_queued_sanction_batches_for_date(
+        self,
+        basis_date: date,
+        *,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        nightly_context = self._nightly_run_context_for_basis_date(basis_date)
+        processing_date = nightly_context["processing_date"]
+        run_started_at = nightly_context["run_started_at"]
+        if not force and self._current_msk_date() < processing_date:
+            return {
+                "basis_date": basis_date,
+                "processing_date": processing_date,
+                "processed_batches": [],
+                "custom_workoff": {"relieved": []},
+                "warning_auto_expiry": {"relieved": []},
+                "default_relief": {"relieved": []},
+                "month_reset": {"reset_count": 0},
+                "nightly_run": {
+                    "claimed": False,
+                    "status": "too_early",
+                },
+                "skipped": True,
+            }
         processed_batches: List[Dict[str, Any]] = []
+        custom_workoff_result: Dict[str, Any] = {"relieved": []}
+        warning_auto_expiry_result: Dict[str, Any] = {"relieved": []}
+        relief_result: Dict[str, Any] = {"relieved": []}
+        month_reset_result: Dict[str, Any] = {"reset_count": 0}
+        nightly_run_state: Dict[str, Any] = {"claimed": False, "status": None}
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 acquired = await self._acquire_named_lock(
@@ -11354,6 +13328,23 @@ class Database:
                 if not acquired:
                     raise RuntimeError("Timed out acquiring sanctions processing lock")
                 try:
+                    nightly_run_state = await self._claim_sanction_nightly_run_locked(
+                        cursor,
+                        basis_date=basis_date,
+                    )
+                    if not nightly_run_state.get("claimed"):
+                        await conn.commit()
+                        return {
+                            "basis_date": basis_date,
+                            "processing_date": processing_date,
+                            "processed_batches": [],
+                            "custom_workoff": {"relieved": []},
+                            "warning_auto_expiry": {"relieved": []},
+                            "default_relief": {"relieved": []},
+                            "month_reset": {"reset_count": 0},
+                            "nightly_run": nightly_run_state,
+                            "skipped": True,
+                        }
                     await cursor.execute(
                         """
                         SELECT
@@ -11379,9 +13370,9 @@ class Database:
                         if batch_result:
                             processed_batches.append(batch_result)
 
-                    warning_auto_expiry_result = await self._apply_warning_auto_expiry_locked(
+                    custom_workoff_result = await self._apply_custom_workoff_relief_locked(
                         cursor,
-                        current_date=run_started_at.date(),
+                        basis_date=basis_date,
                         run_started_at=run_started_at,
                     )
                     relief_result = await self._apply_default_auto_relief_locked(
@@ -11389,12 +13380,30 @@ class Database:
                         basis_date=basis_date,
                         run_started_at=run_started_at,
                     )
+                    warning_auto_expiry_result = await self._apply_warning_auto_expiry_locked(
+                        cursor,
+                        current_date=processing_date,
+                        run_started_at=run_started_at,
+                    )
                     month_reset_result = await self._apply_month_end_check_reset_locked(
                         cursor,
                         basis_date=basis_date,
                         run_started_at=run_started_at,
                     )
+                    await self._complete_sanction_nightly_run_locked(
+                        cursor,
+                        basis_date=basis_date,
+                    )
+                    nightly_run_state = {**nightly_run_state, "status": "completed"}
                     await conn.commit()
+                except Exception as exc:
+                    await self._fail_sanction_nightly_run_locked(
+                        cursor,
+                        basis_date=basis_date,
+                        failure_reason=str(exc),
+                    )
+                    await conn.commit()
+                    raise
                 finally:
                     await self._release_named_lock(
                         cursor,
@@ -11402,10 +13411,14 @@ class Database:
                     )
         return {
             "basis_date": basis_date,
+            "processing_date": processing_date,
             "processed_batches": processed_batches,
+            "custom_workoff": custom_workoff_result,
             "warning_auto_expiry": warning_auto_expiry_result,
             "default_relief": relief_result,
             "month_reset": month_reset_result,
+            "nightly_run": nightly_run_state,
+            "skipped": False,
         }
 
     @db_retry()
@@ -11525,6 +13538,7 @@ class Database:
                             "basis_date": cursor_day,
                             "batches": [],
                             "derived": [],
+                            "custom_workoff": None,
                             "warning_auto_expiry": None,
                             "default_relief": None,
                             "month_reset": None,
@@ -11562,6 +13576,12 @@ class Database:
                             assistant_id=assistant_id,
                             basis_date=cursor_day,
                             run_started_at=run_started_at,
+                        )
+                        day_result["custom_workoff"] = await self._apply_custom_workoff_relief_locked(
+                            cursor,
+                            basis_date=cursor_day,
+                            run_started_at=run_started_at,
+                            assistant_filter={assistant_id},
                         )
                         day_result["warning_auto_expiry"] = await self._apply_warning_auto_expiry_locked(
                             cursor,

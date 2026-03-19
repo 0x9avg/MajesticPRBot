@@ -77,6 +77,56 @@ const createFetchMock = (rulesPayload = defaultRules) =>
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
 
+        if (url.endsWith('/api/sanctions/workoff-preview')) {
+            const body = JSON.parse(String(init?.body || '{}')) as {
+                assistant_ids?: Array<string | number>;
+                workoff_items?: Array<Record<string, unknown>>;
+            };
+            expect(body.assistant_ids).toContain('101');
+            expect(body.workoff_items?.length ?? 0).toBeGreaterThan(0);
+            return ok({
+                status: 'success',
+                data: {
+                    assistants: [
+                        {
+                            assistant_id: '101',
+                            nickname: 'Tester',
+                            items: [
+                                {
+                                    metric: 'spec',
+                                    multiplier: 1,
+                                    period_start: '2026-03-20',
+                                    period_end: '2026-03-22',
+                                    required_work_days: 3,
+                                    counted_work_days: 2,
+                                    effective_period_end: '2026-03-24',
+                                    uo_days_count: 1,
+                                    status: 'pending',
+                                    days: [
+                                        {
+                                            date: '2026-03-20',
+                                            manual_status: 'P',
+                                            counts_for_workoff: true,
+                                            required_amount: 4,
+                                            actual_amount: 4,
+                                            day_status: 'completed',
+                                        },
+                                        {
+                                            date: '2026-03-21',
+                                            manual_status: 'O',
+                                            counts_for_workoff: false,
+                                            required_amount: 4,
+                                            actual_amount: 0,
+                                            day_status: 'leave_skipped',
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            });
+        }
         if (url.endsWith('/api/assistants')) {
             return ok({ status: 'success', data: [assistant] });
         }
@@ -111,8 +161,17 @@ const createFetchMock = (rulesPayload = defaultRules) =>
                         processed_by_name: 'Система',
                         effective_members: 3,
                         issued_members: 3,
+                        skipped_leave_members: 1,
                         workoff_items: [],
-                        members: [],
+                        members: [
+                            {
+                                operation_id: '2',
+                                assistant_id: '101',
+                                nickname: 'Tester',
+                                issue_status: 'skipped_leave',
+                                issue_reason: 'Skipped by U/O day override',
+                            },
+                        ],
                     },
                 ],
             });
@@ -219,5 +278,58 @@ describe('SanctionsQueueManagement', () => {
             String(url) === '/api/sanction-settings/check-rules' && (init as RequestInit | undefined)?.method === 'PUT'
         ));
         expect(putRulesCalls).toHaveLength(0);
+    });
+
+    it('fetches and renders batch workoff preview with leave-aware days', async () => {
+        const fetchMock = createFetchMock();
+        vi.stubGlobal('fetch', fetchMock);
+
+        const user = userEvent.setup();
+        render(<SanctionsQueueManagement />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Выдать общую санкцию')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: '+ Добавить отработку' }));
+
+        await waitFor(() => {
+            expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sanctions/workoff-preview')).toBe(true);
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Предпросмотр отработки')).toBeInTheDocument();
+        });
+
+        expect(screen.getByText('U/O не засчитываются и продлевают отработку.')).toBeInTheDocument();
+        expect(screen.getByText('Дней по плану: 3')).toBeInTheDocument();
+        expect(screen.getByText('Эффективная дата окончания: 2026-03-24')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Показать дни/i })).toBeInTheDocument();
+        expect(screen.queryByText('вручную: О')).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: /Показать дни/i }));
+        await waitFor(() => {
+            expect(screen.getByRole('button', { name: 'Скрыть дни' })).toBeInTheDocument();
+        });
+        expect(screen.getByText('вручную: О')).toBeInTheDocument();
+    });
+
+    it('shows skipped_leave counters and labels in history details', async () => {
+        const fetchMock = createFetchMock();
+        vi.stubGlobal('fetch', fetchMock);
+
+        const user = userEvent.setup();
+        render(<SanctionsQueueManagement />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Очередь выдачи')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: 'История выдач' }));
+
+        await waitFor(() => {
+            expect(screen.getAllByText('Пропуск по У/О').length).toBeGreaterThan(0);
+        });
+
+        expect(screen.getByText('Skipped by U/O day override')).toBeInTheDocument();
     });
 });

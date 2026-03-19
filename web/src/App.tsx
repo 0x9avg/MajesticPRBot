@@ -8,6 +8,7 @@ import PermissionRoute from './components/rbac/PermissionRoute'
 import MainHub from './pages/hub/MainHub'
 import MediaList from './pages/media/MediaList'
 import PRStats from './pages/stats/PRStats'
+import AssistantWeeklyStatsPage from './pages/stats/AssistantWeeklyStatsPage'
 import SpectateLogs from './pages/action-logs/SpectateLogs'
 import PunishmentReturns from './pages/returns/PunishmentReturns'
 import AdminPanel from './pages/admin/AdminPanel'
@@ -21,6 +22,7 @@ import { APP_TITLE, formatDocumentTitle } from './utils/documentTitle'
 const routeTitles = [
     { path: '/login', title: 'Вход' },
     { path: '/hub', title: 'Хаб' },
+    { path: '/assistants/weekly/manage', title: 'Недельная статистика' },
     { path: '/assistants/:id', title: 'Ассистенты' },
     { path: '/assistants', title: 'Ассистенты' },
     { path: '/media/:id', title: 'Медиа' },
@@ -71,6 +73,14 @@ function App() {
                         <Route path="/media" element={<MediaList />} />
                         <Route path="/media/:id" element={<MediaProfile />} />
                         <Route path="/assistants" element={<PRStats />} />
+                        <Route
+                            path="/assistants/weekly/manage"
+                            element={
+                                <PermissionRoute requireAny={['assistants.weekly.manage']}>
+                                    <AssistantWeeklyStatsPage />
+                                </PermissionRoute>
+                            }
+                        />
                         <Route path="/logs" element={<SpectateLogs />} />
                         <Route
                             path="/returns"

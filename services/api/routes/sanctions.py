@@ -24,6 +24,7 @@ from schemas.sanctions import (
     SanctionOperationUpdateRequest,
     SanctionReliefCreateRequest,
     SanctionReplaceRequest,
+    WorkoffPreviewRequest,
 )
 from services.outbox import publish_integration_event
 
@@ -492,6 +493,27 @@ async def get_sanction_workoff_progress(
         content=success_envelope(
             data=_response_data(result),
             message="Прогресс отработки получен",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.post("/sanctions/workoff-preview")
+async def preview_workoff(
+    request: Request,
+    data: WorkoffPreviewRequest,
+    db: "Database" = Depends(get_db),
+    principal: dict = Depends(require_permission("assistants.sanctions.manage")),
+):
+    trace_id = get_trace_id(request)
+    result = await db.preview_workoff_for_assistants(
+        assistant_ids=[int(value) for value in data.assistant_ids],
+        workoff_items=_workoff_items_payload(data.workoff_items),
+    )
+    return JSONResponse(
+        content=success_envelope(
+            data=_response_data({"assistants": result}),
+            message="Предпросмотр отработки получен",
             trace_id=trace_id,
         )
     )

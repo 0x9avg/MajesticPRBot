@@ -561,3 +561,94 @@ async def test_issue_now_without_broker_has_predictable_result(
 
     assert created.status_code == 200
     assert issued.status_code == (202 if supports_outbox else 503)
+
+
+async def test_workoff_preview_extends_effective_period_for_leave_day(
+    build_api_app,
+    fake_db,
+) -> None:
+    _seed_assistant(fake_db, 1001, "Tester")
+    fake_db.current_sanction_policy["daily_norm_spec"] = 4
+    fake_db.assistant_day_status_overrides[(1001, "2026-03-02")] = {
+        "manual_status": "O",
+        "updated_at": datetime.now(MSK),
+        "updated_by_id": 1,
+    }
+
+    async with await _client(build_api_app) as client:
+        response = await client.post(
+            "/api/sanctions/workoff-preview",
+            json={
+                "assistant_ids": [1001],
+                "workoff_items": [
+                    {
+                        "metric": "spec",
+                        "multiplier": 1,
+                        "period_start": "2026-03-01",
+                        "period_end": "2026-03-03",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    preview = response.json()["data"]["assistants"][0]["items"][0]
+    assert preview["required_work_days"] == 3
+    assert preview["uo_days_count"] == 1
+    assert preview["effective_period_end"] == "2026-03-04"
+    assert any(day["day_status"] == "leave_skipped" for day in preview["days"])
+
+
+async def test_nightly_processing_skips_leave_day_members(fake_db) -> None:
+    _seed_assistant(fake_db, 1001, "Tester")
+    fake_db.assistant_day_status_overrides[(1001, "2026-03-18")] = {
+        "manual_status": "U",
+        "updated_at": datetime.now(MSK),
+        "updated_by_id": 1,
+    }
+    batch = await fake_db.create_queued_sanction_batch(
+        basis_date=date(2026, 3, 18),
+        created_by_id=1,
+        sanction_kind="point",
+        sanction_amount=3,
+        auto_relief_date=None,
+        audience_mode="selected_only",
+        assistant_ids=[1001],
+        workoff_items=[],
+    )
+
+    result = await fake_db.process_queued_sanction_batches_for_date(date(2026, 3, 18), force=True)
+    stored_batch = await fake_db.get_queued_sanction_batch(int(batch["id"]))
+    active = await fake_db.get_assistant_active_sanctions(1001)
+
+    assert result["processed_batches"][0]["skipped_leave"] == [1001]
+    assert stored_batch["skipped_leave_members"] == 1
+    assert stored_batch["issued_members"] == 0
+    assert active == []
+
+
+async def test_manual_issue_now_ignores_leave_day(fake_db) -> None:
+    _seed_assistant(fake_db, 1001, "Tester")
+    fake_db.assistant_day_status_overrides[(1001, "2026-03-18")] = {
+        "manual_status": "O",
+        "updated_at": datetime.now(MSK),
+        "updated_by_id": 1,
+    }
+    batch = await fake_db.create_queued_sanction_batch(
+        basis_date=date(2026, 3, 18),
+        created_by_id=1,
+        sanction_kind="point",
+        sanction_amount=2,
+        auto_relief_date=None,
+        audience_mode="selected_only",
+        assistant_ids=[1001],
+        workoff_items=[],
+    )
+
+    result = await fake_db.process_sanction_operation_now(int(batch["id"]), requested_by_id=5)
+    active = await fake_db.get_assistant_active_sanctions(1001)
+
+    assert result["processed"] is True
+    assert result["issued"] == [{"assistant_id": 1001, "sanction_id": active[0]["sanction_id"]}]
+    assert result["skipped_leave"] == []
+    assert len(active) == 1

@@ -5,7 +5,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom';
 import { ExternalLink, Users, Settings, Trash2 } from 'lucide-react';
 import type { OutletUserContext } from '../../../types/auth';
 import type { Streamer } from '../../../types/domain';
-import { hasAny } from '../../../rbac/guards';
+import { hasPerm } from '../../../rbac/guards';
 
 void React;
 
@@ -18,7 +18,8 @@ interface StreamerCardProps {
 const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps) => {
     const navigate = useNavigate();
     const { user } = useOutletContext<OutletUserContext>();
-    const canManageStreamer = hasAny(user, ['streamers.update', 'streamers.delete']);
+    const canUpdateStreamer = hasPerm(user, 'media.update');
+    const canDeleteStreamer = hasPerm(user, 'media.delete');
     const effectivePriority = streamer.current_stream_priority_override ?? streamer.priority;
 
     return (
@@ -59,20 +60,24 @@ const StreamerCard = ({ streamer, onSettingsClick, onDelete }: StreamerCardProps
                 </div>
 
                 {/* Right Section: Settings (Border Left) */}
-                {canManageStreamer && (
-                    <div className="flex justify-center pl-4 border-l border-white/10">
-                        <button
-                            onClick={() => onSettingsClick && onSettingsClick(streamer)}
-                            className="p-2 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
-                        >
-                            <Settings className="w-5 h-5" />
-                        </button>
-                        {onDelete && (
+                {(canUpdateStreamer || canDeleteStreamer) && (
+                    <div className="flex items-center justify-center gap-1.5 pl-4 border-l border-white/10">
+                        {canUpdateStreamer && onSettingsClick && (
+                            <button
+                                onClick={() => onSettingsClick(streamer)}
+                                className="p-2 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
+                                title="Настройки стримера"
+                            >
+                                <Settings className="w-5 h-5" />
+                            </button>
+                        )}
+                        {canDeleteStreamer && onDelete && (
                             <button
                                 onClick={() => {
                                     onDelete(streamer);
                                 }}
                                 className="p-2 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-400 transition-colors"
+                                title="Удалить стримера"
                             >
                                 <Trash2 className="w-5 h-5" />
                             </button>

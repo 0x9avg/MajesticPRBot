@@ -2,7 +2,7 @@ import React from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { Users, Wifi, UserPlus, Radio, FileText, ShieldAlert, Bot, ChevronDown, ArrowRight, MapPin, CalendarDays, Settings, Trash2, Twitch, Plus, Clock, CalendarClock } from 'lucide-react';
 import type { OutletUserContext } from '../../types/auth';
-import type { DashboardStats, Event, EventParticipant, Streamer, StreamerAssignment } from '../../types/domain';
+import type { DashboardStats, Event, EventParticipant, PunishmentReturnQueueItem, Streamer, StreamerAssignment } from '../../types/domain';
 import { unwrapApiData, getApiErrorMessage } from '../../types/api';
 import { formatMskToLocal } from '../../utils/datetime';
 import StreamerSettingsModal from '../media/components/StreamerSettingsModal';
@@ -11,7 +11,6 @@ import ConfirmDialog from '../../components/feedback/ConfirmDialog';
 import NotificationToast from '../../components/feedback/NotificationToast';
 import { useConfirmDialog, usePopupToast } from '../../components/feedback/hooks';
 import { apiFetch } from '../../api/client';
-import { ADMIN_SECTION_PERMISSIONS } from '../../rbac/catalog';
 import { hasAny, hasPerm } from '../../rbac/guards';
 
 type ActivityItem =
@@ -23,18 +22,26 @@ export function MainHub() {
     const { user } = useOutletContext<OutletUserContext>();
     const { toast, showToast, closeToast } = usePopupToast(3000);
     const { confirm, dialogProps } = useConfirmDialog();
-    const canManageStreamers = hasAny(user, ['streamers.update', 'streamers.delete']);
-    const canManageEvents = hasAny(user, ['events.manage', 'events.update']);
-    const canViewAdminPanel = hasAny(user, ADMIN_SECTION_PERMISSIONS);
+    const canViewStreamers = hasPerm(user, 'media.view');
+    const canUpdateStreamers = hasPerm(user, 'media.update');
+    const canDeleteStreamers = hasPerm(user, 'media.delete');
+    const canViewEvents = hasPerm(user, 'events.view');
+    const canUpdateEvents = hasPerm(user, 'events.update');
+    const canManageEvents = hasPerm(user, 'events.runtime.manage');
+    const canViewAssistants = hasPerm(user, 'assistants.view');
+    const canViewAdminPanel = hasPerm(user, 'admin.panel.view');
     const canViewBotDashboard = hasAny(user, ['monitoring.view']);
     const canManageWeeklyStats = hasPerm(user, 'assistants.weekly.manage');
-    const canViewReturns = hasAny(user, ['returns.view', 'returns.history.view']);
+    const canViewReturnsQueue = hasPerm(user, 'returns.queue.view');
+    const canViewReturns = hasAny(user, ['returns.queue.view', 'returns.history.view']);
+    const canViewComplaints = hasAny(user, ['complaints.queue.view', 'complaints.history.view']);
+    const canViewRemovals = hasAny(user, ['removals.queue.view', 'removals.history.view']);
     const canClaimMain = hasPerm(user, 'spec.claim.main');
     const canClaimProbation = hasPerm(user, 'spec.claim.probation');
     const canUnclaimSelf = hasPerm(user, 'spec.unclaim.self');
-    const canJoinEvents = hasPerm(user, 'events.join.self');
-    const canLeaveEvents = hasPerm(user, 'events.leave.self');
-    const canRequestSpec = hasPerm(user, 'events.spec.request');
+    const canJoinEvents = hasPerm(user, 'events.participation.self.join');
+    const canLeaveEvents = hasPerm(user, 'events.participation.self.leave');
+    const canRequestSpec = hasPerm(user, 'events.spec_requests.create');
 
     // Collapsible states
     const [isMenuOpen, setIsMenuOpen] = React.useState(true);
@@ -47,6 +54,7 @@ export function MainHub() {
         events_today_count: 0
     });
 
+    const [readyReturnsCount, setReadyReturnsCount] = React.useState<number | null>(null);
     const [onlineStreamers, setOnlineStreamers] = React.useState<Streamer[]>([]);
     const [activeEvents, setActiveEvents] = React.useState<Event[]>([]);
     const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
@@ -74,6 +82,10 @@ export function MainHub() {
         };
 
         const fetchOnlineStreamers = async () => {
+            if (!canViewStreamers) {
+                setOnlineStreamers([]);
+                return;
+            }
             try {
                 const response = await apiFetch('/api/streamers?online_only=true&gta_only=true');
                 if (response.ok) {
@@ -88,6 +100,10 @@ export function MainHub() {
         };
 
         const fetchActiveEvents = async () => {
+            if (!canViewEvents) {
+                setActiveEvents([]);
+                return;
+            }
             try {
                 const response = await apiFetch('/api/events/active');
                 if (response.ok) {
@@ -100,18 +116,45 @@ export function MainHub() {
             }
         };
 
+        const fetchReadyReturns = async () => {
+            if (!canViewReturnsQueue) {
+                setReadyReturnsCount(null);
+                return;
+            }
+            try {
+                const response = await apiFetch('/api/returns/queue');
+                if (response.ok) {
+                    const json = await response.json() as unknown;
+                    const data = unwrapApiData<PunishmentReturnQueueItem[]>(json);
+                    const normalized = Array.isArray(data) ? data : [];
+                    const claimableCount = normalized.filter((record) => record.can_claim === true).length;
+                    setReadyReturnsCount(claimableCount > 0 ? claimableCount : null);
+                } else {
+                    setReadyReturnsCount(null);
+                }
+            } catch (error) {
+                console.error('Failed to fetch returns queue:', error);
+                setReadyReturnsCount(null);
+            }
+        };
+
         const fetchAll = () => {
             void fetchStats();
             void fetchOnlineStreamers();
             void fetchActiveEvents();
+            void fetchReadyReturns();
         };
 
         fetchAll();
         const interval = setInterval(fetchAll, 10000);
         return () => clearInterval(interval);
-    }, []);
+    }, [canViewEvents, canViewReturnsQueue, canViewStreamers]);
 
     const fetchOnlineStreamersManual = async () => {
+        if (!canViewStreamers) {
+            setOnlineStreamers([]);
+            return;
+        }
         try {
             const response = await apiFetch('/api/streamers?online_only=true&gta_only=true');
             if (response.ok) {
@@ -126,6 +169,10 @@ export function MainHub() {
     };
 
     const fetchActiveEventsManual = async () => {
+        if (!canViewEvents) {
+            setActiveEvents([]);
+            return;
+        }
         try {
             const response = await apiFetch('/api/events/active');
             if (response.ok) {
@@ -230,6 +277,32 @@ export function MainHub() {
             }
         } catch (error) {
             console.error('Failed to update streamer:', error);
+        }
+    };
+
+    const handleDeleteStreamer = async (streamer: Streamer) => {
+        const confirmed = await confirm({
+            title: 'Удалить стримера?',
+            message: <>Стример <span className="text-white font-semibold">{streamer.streamer_name}</span> будет удален из общего списка.</>,
+            confirmLabel: 'Удалить',
+            tone: 'danger',
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await apiFetch(`/api/streamers/${streamer.streamer_id}`, {
+                method: 'DELETE',
+            });
+            if (response.ok) {
+                await fetchOnlineStreamersManual();
+                showToast(`Стример ${streamer.streamer_name} удален`);
+            } else {
+                showToast(`Не удалось удалить стримера ${streamer.streamer_name}`, 'error');
+            }
+        } catch (error) {
+            console.error('Failed to delete streamer:', error);
+            showToast(`Не удалось удалить стримера ${streamer.streamer_name}`, 'error');
         }
     };
 
@@ -366,14 +439,16 @@ export function MainHub() {
             desc: 'Управление стримерами и контентом',
             path: '/media',
             icon: Radio,
-            color: 'from-blue-500/20 to-blue-600/5 hover:border-blue-500/50'
+            color: 'from-blue-500/20 to-blue-600/5 hover:border-blue-500/50',
+            visible: canViewStreamers,
         },
         {
             title: 'Таблица PR Ассистентов',
             desc: 'Статистика работы сотрудников',
             path: '/assistants',
             icon: Users,
-            color: 'from-purple-500/20 to-purple-600/5 hover:border-purple-500/50'
+            color: 'from-purple-500/20 to-purple-600/5 hover:border-purple-500/50',
+            visible: canViewAssistants,
         },
         {
             title: 'Логи',
@@ -388,7 +463,25 @@ export function MainHub() {
             path: '/returns',
             icon: Clock,
             color: 'from-cyan-500/20 to-cyan-600/5 hover:border-cyan-500/50',
+            badgeCount: readyReturnsCount,
+            badgeTestId: 'menu-badge-returns',
             visible: canViewReturns,
+        },
+        {
+            title: 'Жалобы',
+            desc: 'Очередь жалоб на выдачу наказаний',
+            path: '/complaints',
+            icon: ShieldAlert,
+            color: 'from-violet-500/20 to-violet-600/5 hover:border-violet-500/50',
+            visible: canViewComplaints,
+        },
+        {
+            title: 'Снятие наказаний',
+            desc: 'Черновики и выдача снятий наказаний',
+            path: '/removals',
+            icon: Trash2,
+            color: 'from-rose-500/20 to-rose-600/5 hover:border-rose-500/50',
+            visible: canViewRemovals,
         },
     ].filter((item) => item.visible !== false);
 
@@ -421,8 +514,12 @@ export function MainHub() {
 
     // Combine events and streamers into activities
     const activities: ActivityItem[] = [
-        ...activeEvents.map((event) => ({ ...event, type: 'event' } as ActivityItem)),
-        ...onlineStreamers.map((streamer) => ({ ...streamer, type: 'streamer' } as ActivityItem))
+        ...(canViewEvents
+            ? activeEvents.map((event) => ({ ...event, type: 'event' } as ActivityItem))
+            : []),
+        ...(canViewStreamers
+            ? onlineStreamers.map((streamer) => ({ ...streamer, type: 'streamer' } as ActivityItem))
+            : []),
     ].sort((a, b) => {
         const aPinned = a.is_pinned ? 1 : 0;
         const bPinned = b.is_pinned ? 1 : 0;
@@ -462,7 +559,7 @@ export function MainHub() {
             {/* Activities Section */}
             <div className="select-none">
                 <h2
-                    className="text-2xl font-bold mb-6 flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                    className="mb-6 flex flex-wrap items-center gap-2 text-2xl font-bold cursor-pointer hover:opacity-80 transition-opacity"
                     onClick={() => setIsActivitiesOpen(!isActivitiesOpen)}
                 >
                     <span className="w-1 h-8 bg-emerald-500 rounded-full inline-block"></span>
@@ -473,7 +570,7 @@ export function MainHub() {
                     {!isGlobalClaimed && canRequestSpec && (
                         <button
                             onClick={(e) => { e.stopPropagation(); setIsSpecRequestOpen(true); }}
-                            className="ml-4 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs font-semibold hover:bg-amber-500/20 transition-colors text-amber-400 whitespace-nowrap"
+                            className="order-last flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-400 transition-colors hover:bg-amber-500/20 sm:order-none sm:ml-4 sm:w-auto"
                             title="Запросить спек"
                         >
                             <Plus className="w-3.5 h-3.5" />
@@ -542,8 +639,12 @@ export function MainHub() {
                                                                 {participants.map((participant: EventParticipant) => (
                                                                     <span
                                                                         key={participant.pr_id}
-                                                                        onClick={() => navigate(`/assistants/${participant.pr_id}`)}
-                                                                        className={`font-bold cursor-pointer transition-colors ${participant.status === 'reserved' ? 'text-gray-400 hover:text-gray-300' : 'text-blue-400 hover:text-blue-300'}`}
+                                                                        onClick={() => {
+                                                                            if (canViewAssistants) {
+                                                                                navigate(`/assistants/${participant.pr_id}`);
+                                                                            }
+                                                                        }}
+                                                                        className={`font-bold transition-colors ${canViewAssistants ? 'cursor-pointer ' : ''}${participant.status === 'reserved' ? 'text-gray-400 hover:text-gray-300' : 'text-blue-400 hover:text-blue-300'}`}
                                                                         title={participant.status === 'reserved' ? 'Зарезервирован' : 'Активен'}
                                                                     >
                                                                         @{participant.nickname || participant.pr_id}
@@ -570,22 +671,26 @@ export function MainHub() {
                                                                 Закрепиться
                                                             </button>
                                                         )}
-                                                        {canManageEvents && (
+                                                        {(canUpdateEvents || canManageEvents) && (
                                                             <>
-                                                                <button
-                                                                    onClick={(e) => { e.stopPropagation(); setSelectedEvent(event); }}
-                                                                    className="p-1.5 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
-                                                                    title="Настройки события"
-                                                                >
-                                                                    <Settings className="w-4 h-4" />
-                                                                </button>
-                                                                <button
-                                                                    onClick={(e) => { e.stopPropagation(); void handleEndEvent(event); }}
-                                                                    className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-400 transition-colors"
-                                                                    title="Завершить событие"
-                                                                >
-                                                                    <Trash2 className="w-4 h-4" />
-                                                                </button>
+                                                                {canUpdateEvents && (
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); setSelectedEvent(event); }}
+                                                                        className="p-1.5 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
+                                                                        title="Настройки события"
+                                                                    >
+                                                                        <Settings className="w-4 h-4" />
+                                                                    </button>
+                                                                )}
+                                                                {canManageEvents && (
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); void handleEndEvent(event); }}
+                                                                        className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-400 transition-colors"
+                                                                        title="Завершить событие"
+                                                                    >
+                                                                        <Trash2 className="w-4 h-4" />
+                                                                    </button>
+                                                                )}
                                                             </>
                                                         )}
                                                     </div>
@@ -659,9 +764,11 @@ export function MainHub() {
                                                                         key={a.pr_id}
                                                                         onClick={(e) => {
                                                                             e.stopPropagation();
-                                                                            navigate(`/assistants/${a.pr_id}`);
+                                                                            if (canViewAssistants) {
+                                                                                navigate(`/assistants/${a.pr_id}`);
+                                                                            }
                                                                         }}
-                                                                        className={`font-bold cursor-pointer transition-colors ${a.is_probation ? 'text-green-400 hover:text-green-300' : 'text-blue-400 hover:text-blue-300'
+                                                                        className={`font-bold transition-colors ${canViewAssistants ? 'cursor-pointer ' : ''}${a.is_probation ? 'text-green-400 hover:text-green-300' : 'text-blue-400 hover:text-blue-300'
                                                                             }`}
                                                                     >
                                                                         @{a.nickname}
@@ -698,13 +805,25 @@ export function MainHub() {
                                                                 )}
                                                             </>
                                                         )}
-                                                        {canManageStreamers && (
+                                                        {canUpdateStreamers && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); setSelectedStreamer(streamer); }}
                                                                 className="p-1.5 hover:bg-white/5 rounded-lg text-white/40 hover:text-white transition-colors"
                                                                 title="Временные настройки"
                                                             >
                                                                 <Settings className="w-4 h-4" />
+                                                            </button>
+                                                        )}
+                                                        {canDeleteStreamers && (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    void handleDeleteStreamer(streamer);
+                                                                }}
+                                                                className="p-1.5 hover:bg-red-500/10 rounded-lg text-white/40 hover:text-red-400 transition-colors"
+                                                                title="Удалить стримера"
+                                                            >
+                                                                <Trash2 className="w-4 h-4" />
                                                             </button>
                                                         )}
                                                     </div>
@@ -738,6 +857,14 @@ export function MainHub() {
                             onClick={() => navigate(cat.path)}
                             className={`relative group cursor-pointer overflow-hidden p-6 rounded-3xl border border-white/5 bg-gradient-to-br ${cat.color} transition-all duration-300 hover:scale-[1.02] hover:shadow-xl`}
                         >
+                            {typeof cat.badgeCount === 'number' && cat.badgeCount > 0 ? (
+                                <div
+                                    data-testid={cat.badgeTestId}
+                                    className="absolute right-4 top-4 z-20 min-w-7 rounded-full border border-cyan-400/30 bg-cyan-400/15 px-2 py-1 text-center text-xs font-bold text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.18)]"
+                                >
+                                    {cat.badgeCount > 99 ? '99+' : cat.badgeCount}
+                                </div>
+                            ) : null}
                             <div className="relative z-10 flex flex-col h-full">
                                 <div className="mb-4 p-3 bg-white/10 rounded-2xl w-fit">
                                     <cat.icon className="w-8 h-8 text-white" />
@@ -793,8 +920,9 @@ export function MainHub() {
 
             {/* Spec Request Modal */}
             {isSpecRequestOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-                    <div className="bg-[#1e1e1e] border border-white/10 rounded-2xl p-8 w-full max-w-md shadow-2xl">
+                <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
+                    <div className="flex min-h-full items-start justify-center p-3 sm:p-4 lg:items-center">
+                    <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#1e1e1e] p-5 shadow-2xl sm:p-8">
                         <h3 className="text-xl font-bold text-white mb-6">Запросить спек</h3>
                         <div className="space-y-4">
                             <div>
@@ -856,22 +984,27 @@ export function MainHub() {
                             </button>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
-            <StreamerSettingsModal
-                streamer={selectedStreamer}
-                isOpen={!!selectedStreamer}
-                onClose={() => setSelectedStreamer(null)}
-                onSave={handleUpdateStreamer}
-                mode="override"
-            />
-            <EventSettingsModal
-                event={selectedEvent}
-                isOpen={!!selectedEvent}
-                onClose={() => setSelectedEvent(null)}
-                onSave={handleUpdateEvent}
-            />
+            {canUpdateStreamers && (
+                <StreamerSettingsModal
+                    streamer={selectedStreamer}
+                    isOpen={!!selectedStreamer}
+                    onClose={() => setSelectedStreamer(null)}
+                    onSave={handleUpdateStreamer}
+                    mode="override"
+                />
+            )}
+            {canUpdateEvents && (
+                <EventSettingsModal
+                    event={selectedEvent}
+                    isOpen={!!selectedEvent}
+                    onClose={() => setSelectedEvent(null)}
+                    onSave={handleUpdateEvent}
+                />
+            )}
 
             <ConfirmDialog {...dialogProps} />
 

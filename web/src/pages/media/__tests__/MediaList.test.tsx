@@ -18,14 +18,17 @@ vi.mock('react-router-dom', async () => {
 
 import MediaList from '../MediaList';
 
-const makeUser = (role: UserContext['role']): UserContext => ({
+const makeUser = (
+    role: UserContext['role'],
+    permissions: Record<string, boolean> = {},
+): UserContext => ({
     id: '1',
     discord_id: '1001',
     username: 'tester',
     nickname: 'Tester',
     role,
     require_password_change: false,
-    permissions: {},
+    permissions,
 });
 
 const makeJsonResponse = (body: unknown, status = 200) =>
@@ -37,7 +40,7 @@ const makeJsonResponse = (body: unknown, status = 200) =>
 describe('MediaList', () => {
     beforeEach(() => {
         navigateMock.mockReset();
-        mockedUser = makeUser('employee');
+        mockedUser = makeUser('employee', { 'media.view': true });
     });
 
     it('renders empty data state', async () => {
@@ -92,5 +95,19 @@ describe('MediaList', () => {
         const profileBtn = screen.getByTitle('Открыть профиль медиа');
         await ui.click(profileBtn);
         expect(navigateMock).toHaveBeenCalledWith('/media/1');
+    });
+
+    it('shows access denied state without media.view', async () => {
+        mockedUser = makeUser('employee');
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<MediaList />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Недостаточно прав для просмотра медиа.')).toBeInTheDocument();
+        });
+
+        expect(fetchMock).not.toHaveBeenCalled();
     });
 });

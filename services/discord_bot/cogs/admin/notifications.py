@@ -26,8 +26,11 @@ EVENT_TYPES = {
     "category_from_gta": "🚫 Уход с GTA 5",
 }
 
-NOTIFICATIONS_SECTION_PERMS = ["guild.templates.view", "guild.templates.update"]
-NOTIFICATIONS_UPDATE_PERMS = ["guild.templates.update"]
+NOTIFICATIONS_SECTION_PERMS = [
+    "game_servers.templates.view",
+    "game_servers.templates.update",
+]
+NOTIFICATIONS_UPDATE_PERMS = ["game_servers.templates.update"]
 
 
 

@@ -89,3 +89,56 @@ async def test_get_admin_logs_with_filters_and_sort(build_api_app, fake_db) -> N
     payload = response.json()["data"]
     assert len(payload["items"]) == 2
     assert payload["items"][0]["actor_name"] == "Bob"
+
+
+async def test_get_assistant_action_filters_requires_permission(build_api_app) -> None:
+    current_user = {
+        "id": 2,
+        "username": "viewer",
+        "nickname": "Viewer",
+        "role": "employee",
+        "principal_type": "user",
+        "discord_id": 1002,
+        "require_password_change": False,
+        "permissions": {"logs.assistant_actions.view": False},
+    }
+
+    async with await _client(build_api_app, current_user=current_user) as client:
+        response = await client.get("/api/logs/assistant-actions/filters")
+
+    assert response.status_code == 403
+
+
+async def test_get_assistant_action_filters_returns_active_assistants(
+    build_api_app, fake_db
+) -> None:
+    fake_db.assistants_by_id[1001] = {
+        "pr_id": 1001,
+        "nickname": "Alice",
+        "role": "employee",
+        "dismissed_at": None,
+    }
+    fake_db.assistants_by_id[1002] = {
+        "pr_id": 1002,
+        "nickname": "Bob",
+        "role": "employee",
+        "dismissed_at": "2026-01-01T00:00:00",
+    }
+
+    current_user = {
+        "id": 10,
+        "username": "manager",
+        "nickname": "Manager",
+        "role": "manager",
+        "principal_type": "user",
+        "discord_id": 500,
+        "require_password_change": False,
+        "permissions": {"logs.assistant_actions.view": True},
+    }
+
+    async with await _client(build_api_app, current_user=current_user) as client:
+        response = await client.get("/api/logs/assistant-actions/filters")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["assistants"] == [{"pr_id": "1001", "nickname": "Alice"}]

@@ -40,10 +40,8 @@ def _seed_assistant(
         "active_point_penalty": 0.0,
         "active_percent_penalty": 0.0,
         "active_checks": 0.0,
-        "active_warning_units": 0,
         "active_strict_warnings": 0,
         "active_oral_warnings": 0,
-        "active_warnings_display": "0/2 0/2",
     }
 
 
@@ -150,7 +148,6 @@ async def test_admin_overview_normalizes_week_start_and_exposes_options(
     assert payload["week_start"] == "2026-03-16"
     assert payload["week_end"] == "2026-03-22"
     assert {item["value"] for item in payload["payout_types"]} == {"EXP", "Premium", "MC", "MONEY"}
-    assert "RU1" in payload["payout_servers"]
     assert "Отпуск" in payload["result_options"]
     assert payload["items"][0]["payout_issue_status"] == "pending"
     assert payload["items"][0]["payout_issued_at"] is None
@@ -175,7 +172,7 @@ async def test_admin_detail_save_round_trip_updates_selected_result_and_command(
                 ],
                 "selected_result": "Актив",
                 "payout_type": "MONEY",
-                "payout_server": "RU1",
+                "payout_server_id": 1,
                 "payout_static": "static",
             },
         )
@@ -188,6 +185,7 @@ async def test_admin_detail_save_round_trip_updates_selected_result_and_command(
     assert saved["selected_result"] == "Актив"
     assert saved["result_display"] == "Актив"
     assert saved["payout_issue_status"] == "pending"
+    assert saved["payout_server_id"] == 1
     assert saved["generated_payout_available"] is True
     assert (
         saved["generated_payout_command"]
@@ -213,7 +211,7 @@ async def test_payout_issue_route_marks_command_ready_row_as_issued_and_logs(
     fake_db.assistant_weekly_reviews[(1001, week_start.isoformat())] = {
         "selected_result": "Актив",
         "payout_type": "MONEY",
-        "payout_server": "RU1",
+        "payout_server_id": 1,
         "payout_static": "static",
         "payout_issue_status": "pending",
         "updated_at": datetime(2026, 3, 19, 10, 0, tzinfo=MSK),
@@ -247,7 +245,7 @@ async def test_payout_issue_route_rejects_row_without_ready_command(
     fake_db.assistant_weekly_reviews[(1001, week_start.isoformat())] = {
         "selected_result": "Актив",
         "payout_type": None,
-        "payout_server": None,
+        "payout_server_id": None,
         "payout_static": None,
         "payout_issue_status": "pending",
         "updated_at": datetime(2026, 3, 19, 10, 0, tzinfo=MSK),
@@ -275,7 +273,7 @@ async def test_payout_issue_route_can_clear_issued_status(
     fake_db.assistant_weekly_reviews[(1001, week_start.isoformat())] = {
         "selected_result": "Актив",
         "payout_type": "MONEY",
-        "payout_server": "RU1",
+        "payout_server_id": 1,
         "payout_static": "static",
         "payout_issue_status": "issued",
         "payout_issued_at": datetime(2026, 3, 19, 12, 30, tzinfo=MSK),
@@ -307,7 +305,7 @@ async def test_admin_save_auto_resets_issued_payout_and_logs_transition(
     fake_db.assistant_weekly_reviews[(1001, week_start.isoformat())] = {
         "selected_result": "Актив",
         "payout_type": "MONEY",
-        "payout_server": "RU1",
+        "payout_server_id": 1,
         "payout_static": "static",
         "payout_issue_status": "issued",
         "payout_issued_at": datetime(2026, 3, 19, 12, 30, tzinfo=MSK),
@@ -323,7 +321,7 @@ async def test_admin_save_auto_resets_issued_payout_and_logs_transition(
                 "day_overrides": [],
                 "selected_result": "Актив",
                 "payout_type": "MONEY",
-                "payout_server": "RU2",
+                "payout_server_id": 2,
                 "payout_static": "static",
             },
         )
@@ -363,7 +361,7 @@ async def test_admin_save_can_suppress_auto_absence_with_manual_empty_override(
                 ],
                 "selected_result": None,
                 "payout_type": None,
-                "payout_server": None,
+                "payout_server_id": None,
                 "payout_static": None,
             },
         )
@@ -395,3 +393,44 @@ async def test_admin_routes_require_manage_permission(build_api_app) -> None:
 
     assert response.status_code == 403
     assert "assistants.weekly.manage" in response.json()["detail"]
+
+
+async def test_weekly_complaints_count_uses_complaint_headers_not_punishment_rows(
+    build_api_app,
+    fake_db,
+) -> None:
+    week_start = date(2026, 3, 16)
+    fake_db.weekly_today = date(2026, 3, 19)
+    _seed_assistant(fake_db, 1001, nickname="Alice")
+    _seed_active_week(fake_db, 1001, week_start)
+    for offset in range(7):
+        work_date = (week_start + timedelta(days=offset)).isoformat()
+        fake_db.assistant_day_complaints.pop((1001, work_date), None)
+
+    complaint = await fake_db.create_complaint(
+        assistant_id=1001,
+        created_by_id=1001,
+        created_by_name="Alice",
+        server=14,
+        complaint_link="https://discord.com/channels/test/complaint",
+        media="https://cdn.example/media.png",
+        incident_at=datetime(2026, 3, 16, 10, 0, tzinfo=MSK),
+        status="issued",
+        reviewed_at=datetime(2026, 3, 16, 11, 0, tzinfo=MSK),
+        issued_at=datetime(2026, 3, 16, 12, 0, tzinfo=MSK),
+        punishments=[
+            {"punishment_type": "mute", "static": 27253, "duration": 60, "reason": "Spam"},
+            {"punishment_type": "ban", "static": 138254, "duration": 7, "reason": "Flood"},
+            {"punishment_type": "warn", "static": 50001, "reason": "Caps"},
+        ],
+    )
+    assert complaint is not None
+
+    async with await _client(build_api_app) as client:
+        response = await client.get("/api/assistant-weekly/current")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    monday = payload["items"][0]["days"][0]
+    assert monday["complaints_count"] == 1
+    assert payload["items"][0]["total_complaints"] == 1

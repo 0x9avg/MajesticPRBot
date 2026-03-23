@@ -5,8 +5,8 @@ from disnake import MessageInteraction
 from disnake.ext import commands
 from utils import format_spec_duration, send_pr_action_log
 
-EVENT_JOIN_PERMS = ["events.join.self"]
-EVENT_LEAVE_PERMS = ["events.leave.self"]
+EVENT_JOIN_PERMS = ["events.participation.self.join"]
+EVENT_LEAVE_PERMS = ["events.participation.self.leave"]
 
 
 class EventsHandlers(commands.Cog):

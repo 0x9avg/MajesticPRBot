@@ -13,23 +13,83 @@ import NotificationToast from '../../../components/feedback/NotificationToast';
 import { usePopupToast } from '../../../components/feedback/hooks';
 import { getApiErrorMessage, unwrapApiData } from '../../../types/api';
 import type {
-    WeeklyAdminListResponse,
-    WeeklyAssistantDetail,
-    WeeklyAssistantSummary,
     WeeklyDayStatus,
     WeeklyPayoutIssueStatus,
-    WeeklyPayoutServer,
     WeeklyPayoutType,
     WeeklySelectedResult,
     WeeklySuggestedResult,
 } from '../../../types/domain';
 import { formatMskToLocal, formatToMskIso, getMskTodayStr, parseMskDate } from '../../../utils/datetime';
 
-type WeeklyDraftRow = WeeklyAssistantDetail;
-type EditableWeeklyField = 'selected_result' | 'payout_type' | 'payout_server' | 'payout_static';
+interface GameServerCatalogItem {
+    id: number;
+    full_name: string;
+    short_name: string;
+    command_name: string;
+    sort_order: number;
+    is_active: boolean;
+}
+
+type WeeklyStatusSource = 'none' | 'auto' | 'manual';
+type EditableWeeklyField = 'selected_result' | 'payout_type' | 'payout_server_id' | 'payout_static';
 type WeeklyFilterMode = 'all' | 'status_marks' | 'no_result' | 'drafts' | 'ready_issue' | 'issued';
 type WeeklyDayControlValue = 'inherit' | 'clear' | WeeklyDayStatus;
 type WeeklyPayoutDisplayState = 'not_ready' | 'ready' | 'issued';
+type WeeklyPayoutOption = { value: WeeklyPayoutType; label: string };
+
+interface WeeklyAssistantDay {
+    work_date: string;
+    weekday_label?: string;
+    spec_hours_on_day: number;
+    mchat_count: number;
+    complaints_count: number;
+    manual_status: WeeklyDayStatus | null;
+    auto_status: WeeklyDayStatus | null;
+    resolved_status: WeeklyDayStatus | null;
+    status_source: WeeklyStatusSource;
+}
+
+interface WeeklyAssistantSummaryRow {
+    assistant_id: string;
+    nickname: string;
+    role: string;
+    week_start: string;
+    week_end: string;
+    days: WeeklyAssistantDay[];
+    total_spec_hours: number;
+    total_mchat: number;
+    total_complaints: number;
+    suggested_result: WeeklySuggestedResult | null;
+    selected_result: WeeklySelectedResult | null;
+    result_display: WeeklySelectedResult | WeeklySuggestedResult | null;
+    count_P: number;
+    count_U: number;
+    count_O: number;
+    payout_type: WeeklyPayoutType | null;
+    payout_server_id: number | null;
+    payout_static: string | null;
+    payout_issue_status: WeeklyPayoutIssueStatus;
+    payout_issued_at: string | null;
+    payout_issued_by_id: string | null;
+    generated_payout_command: string | null;
+    generated_payout_available: boolean;
+    generated_payout_reason: string | null;
+}
+
+interface WeeklyAssistantDetailRow extends WeeklyAssistantSummaryRow {
+    day_overrides: { work_date: string; manual_status: WeeklyDayStatus | null; is_manual_override: boolean }[];
+}
+
+type WeeklyDraftRow = WeeklyAssistantDetailRow;
+
+interface WeeklyAdminListResponse {
+    week_start: string;
+    week_end: string;
+    day_labels: { work_date: string; label: string }[];
+    items: WeeklyAssistantSummaryRow[];
+    payout_types: WeeklyPayoutOption[];
+    result_options: WeeklySelectedResult[];
+}
 
 const WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
@@ -50,7 +110,73 @@ const FALLBACK_PAYOUT_TYPES: Array<{ value: WeeklyPayoutType; label: string }> =
     { value: 'MONEY', label: 'MONEY' },
 ];
 
-const FALLBACK_PAYOUT_SERVERS: WeeklyPayoutServer[] = Array.from({ length: 18 }, (_value, index) => `RU${index + 1}`);
+const normalizeGameServers = (payload: unknown): GameServerCatalogItem[] => {
+    const data = unwrapApiData<unknown>(payload);
+    if (!Array.isArray(data)) return [];
+
+    return data
+        .map((item) => {
+            if (!item || typeof item !== 'object') return null;
+            const raw = item as Partial<GameServerCatalogItem>;
+            const id = Number(raw.id);
+            if (!Number.isFinite(id)) return null;
+            return {
+                id,
+                full_name: String(raw.full_name ?? ''),
+                short_name: String(raw.short_name ?? ''),
+                command_name: String(raw.command_name ?? ''),
+                sort_order: Number(raw.sort_order ?? id),
+                is_active: Boolean(raw.is_active),
+            };
+        })
+        .filter((item): item is GameServerCatalogItem => Boolean(item))
+        .sort((left, right) => (left.sort_order - right.sort_order) || (left.id - right.id));
+};
+
+const normalizeGameServerId = (value: string | number | null | undefined) => {
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    return Number.isInteger(numeric) ? numeric : null;
+};
+
+const formatGameServerLabel = (server: GameServerCatalogItem | undefined, variant: 'full' | 'short' | 'command') => {
+    if (!server) return 'Не задан';
+    switch (variant) {
+        case 'short':
+            return server.short_name || `#${server.id}`;
+        case 'command':
+            return server.command_name || `RU${server.id}`;
+        default:
+            return server.full_name || `Majestic #${server.id}`;
+    }
+};
+
+const buildGameServerOptions = (
+    servers: GameServerCatalogItem[],
+    options: {
+        variant: 'full' | 'short' | 'command';
+        includeInactive?: boolean;
+        includeEmptyOptionLabel?: string;
+        currentValue?: number | null;
+    },
+) => {
+    const filtered = servers.filter((server) => options.includeInactive || server.is_active);
+    const current = options.currentValue == null ? null : servers.find((server) => server.id === options.currentValue) ?? null;
+    const merged = current && !filtered.some((server) => server.id === current.id)
+        ? [...filtered, current]
+        : filtered;
+    const deduped = Array.from(new Map(merged.map((server) => [server.id, server])).values())
+        .sort((left, right) => (left.sort_order - right.sort_order) || (left.id - right.id));
+
+    const result: Array<{ value: string; label: string }> = [];
+    if (options.includeEmptyOptionLabel) {
+        result.push({ value: '', label: options.includeEmptyOptionLabel });
+    }
+    deduped.forEach((server) => {
+        result.push({ value: String(server.id), label: formatGameServerLabel(server, options.variant) });
+    });
+    return result;
+};
 
 const getRoleLabel = (role: string) => {
     switch (role) {
@@ -182,10 +308,6 @@ const formatHours = (value: number) => {
     return `${rounded.toFixed(1).replace(/\.0$/, '')}ч`;
 };
 
-const sortPayoutServers = (servers: WeeklyPayoutServer[]) => (
-    [...servers].sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }))
-);
-
 const getPayoutStatusMeta = (state: WeeklyPayoutDisplayState) => {
     switch (state) {
         case 'issued':
@@ -231,8 +353,67 @@ const getDayControlOptions = (day: WeeklyDraftRow['days'][number]) => {
     return options;
 };
 
-const cloneDraft = (assistant: WeeklyAssistantSummary | WeeklyAssistantDetail): WeeklyDraftRow => ({
+const normalizeWeeklyAssistant = (assistant: unknown): WeeklyAssistantDetailRow => {
+    const raw = (assistant && typeof assistant === 'object' ? assistant : {}) as Partial<WeeklyAssistantDetailRow> & {
+        days?: WeeklyAssistantDay[];
+        day_overrides?: WeeklyAssistantDetailRow['day_overrides'];
+    };
+    const resolvedServerId = normalizeGameServerId(raw.payout_server_id);
+    const daySource = Array.isArray(raw.days) ? raw.days : [];
+    const dayOverrides = Array.isArray(raw.day_overrides)
+        ? raw.day_overrides.map((day) => ({
+            work_date: day.work_date,
+            manual_status: day.manual_status ?? null,
+            is_manual_override: Boolean(day.is_manual_override),
+        }))
+        : daySource.map((day) => ({
+            work_date: day.work_date,
+            manual_status: day.manual_status ?? null,
+            is_manual_override: (day.status_source ?? 'none') === 'manual',
+        }));
+
+    return {
+        assistant_id: String(raw.assistant_id ?? ''),
+        nickname: String(raw.nickname ?? ''),
+        role: String(raw.role ?? ''),
+        week_start: String(raw.week_start ?? ''),
+        week_end: String(raw.week_end ?? ''),
+        days: daySource.map((day) => ({
+            work_date: String(day.work_date ?? ''),
+            weekday_label: day.weekday_label ?? undefined,
+            spec_hours_on_day: Number(day.spec_hours_on_day ?? 0),
+            mchat_count: Number(day.mchat_count ?? 0),
+            complaints_count: Number(day.complaints_count ?? 0),
+            manual_status: (day.manual_status ?? null) as WeeklyDayStatus | null,
+            auto_status: (day.auto_status ?? null) as WeeklyDayStatus | null,
+            resolved_status: (day.resolved_status ?? null) as WeeklyDayStatus | null,
+            status_source: (day.status_source ?? 'none') as WeeklyStatusSource,
+        })),
+        total_spec_hours: Number(raw.total_spec_hours ?? 0),
+        total_mchat: Number(raw.total_mchat ?? 0),
+        total_complaints: Number(raw.total_complaints ?? 0),
+        suggested_result: (raw.suggested_result ?? null) as WeeklySuggestedResult | null,
+        selected_result: (raw.selected_result ?? null) as WeeklySelectedResult | null,
+        result_display: (raw.result_display ?? raw.selected_result ?? raw.suggested_result ?? null) as WeeklySelectedResult | WeeklySuggestedResult | null,
+        count_P: Number(raw.count_P ?? 0),
+        count_U: Number(raw.count_U ?? 0),
+        count_O: Number(raw.count_O ?? 0),
+        payout_type: (raw.payout_type ?? null) as WeeklyPayoutType | null,
+        payout_server_id: resolvedServerId,
+        payout_static: raw.payout_static ?? null,
+        payout_issue_status: (raw.payout_issue_status ?? 'pending') as WeeklyPayoutIssueStatus,
+        payout_issued_at: raw.payout_issued_at ?? null,
+        payout_issued_by_id: raw.payout_issued_by_id ?? null,
+        generated_payout_command: raw.generated_payout_command ?? null,
+        generated_payout_available: Boolean(raw.generated_payout_available),
+        generated_payout_reason: raw.generated_payout_reason ?? null,
+        day_overrides: dayOverrides,
+    };
+};
+
+const cloneDraft = (assistant: WeeklyAssistantSummaryRow | WeeklyAssistantDetailRow): WeeklyDraftRow => ({
     ...assistant,
+    payout_server_id: assistant.payout_server_id ?? null,
     payout_issue_status: assistant.payout_issue_status ?? 'pending',
     payout_issued_at: assistant.payout_issued_at ?? null,
     payout_issued_by_id: assistant.payout_issued_by_id ?? null,
@@ -282,24 +463,24 @@ const areManualOverridesEqual = (left: WeeklyDraftRow, right: WeeklyDraftRow) =>
         && day.status_source === other?.status_source;
 });
 
-const isRowDirty = (base: WeeklyAssistantSummary | undefined, draft: WeeklyDraftRow) => {
+const isRowDirty = (base: WeeklyAssistantSummaryRow | undefined, draft: WeeklyDraftRow) => {
     if (!base) return false;
     return !areManualOverridesEqual(cloneDraft(base), draft)
         || (base.selected_result ?? null) !== (draft.selected_result ?? null)
         || (base.payout_type ?? null) !== (draft.payout_type ?? null)
-        || (base.payout_server ?? null) !== (draft.payout_server ?? null)
+        || (base.payout_server_id ?? null) !== (draft.payout_server_id ?? null)
         || (base.payout_static ?? null) !== (draft.payout_static ?? null);
 };
 
-const areCommandInputsDirty = (base: WeeklyAssistantSummary | undefined, draft: WeeklyDraftRow) => {
+const areCommandInputsDirty = (base: WeeklyAssistantSummaryRow | undefined, draft: WeeklyDraftRow) => {
     if (!base) return false;
     return (base.selected_result ?? null) !== (draft.selected_result ?? null)
         || (base.payout_type ?? null) !== (draft.payout_type ?? null)
-        || (base.payout_server ?? null) !== (draft.payout_server ?? null)
+        || (base.payout_server_id ?? null) !== (draft.payout_server_id ?? null)
         || (base.payout_static ?? null) !== (draft.payout_static ?? null);
 };
 
-const getCommandState = (base: WeeklyAssistantSummary | undefined, draft: WeeklyDraftRow) => {
+const getCommandState = (base: WeeklyAssistantSummaryRow | undefined, draft: WeeklyDraftRow) => {
     if (areCommandInputsDirty(base, draft)) {
         return {
             available: false,
@@ -317,7 +498,7 @@ const getCommandState = (base: WeeklyAssistantSummary | undefined, draft: Weekly
 
 const needsDecision = (row: WeeklyDraftRow) => !row.selected_result;
 
-const getPayoutDisplayState = (row: WeeklyDraftRow, base: WeeklyAssistantSummary | undefined): WeeklyPayoutDisplayState => {
+const getPayoutDisplayState = (row: WeeklyDraftRow, base: WeeklyAssistantSummaryRow | undefined): WeeklyPayoutDisplayState => {
     if (row.payout_issue_status === 'issued') {
         return 'issued';
     }
@@ -328,17 +509,17 @@ const getPayoutDisplayState = (row: WeeklyDraftRow, base: WeeklyAssistantSummary
     return 'not_ready';
 };
 
-const isReadyForIssue = (row: WeeklyDraftRow, base: WeeklyAssistantSummary | undefined) => (
+const isReadyForIssue = (row: WeeklyDraftRow, base: WeeklyAssistantSummaryRow | undefined) => (
     getPayoutDisplayState(row, base) === 'ready'
 );
 const isIssuedPayout = (row: WeeklyDraftRow) => row.payout_issue_status === 'issued';
 const hasWeeklyMarks = (row: WeeklyDraftRow) => row.count_P > 0 || row.count_U > 0 || row.count_O > 0;
-const isDraftReview = (row: WeeklyDraftRow, base: WeeklyAssistantSummary | undefined) => isRowDirty(base, row);
+const isDraftReview = (row: WeeklyDraftRow, base: WeeklyAssistantSummaryRow | undefined) => isRowDirty(base, row);
 
 const matchesFilterMode = (
     mode: WeeklyFilterMode,
     row: WeeklyDraftRow,
-    base: WeeklyAssistantSummary | undefined,
+    base: WeeklyAssistantSummaryRow | undefined,
 ) => {
     switch (mode) {
         case 'status_marks':
@@ -367,21 +548,37 @@ const AssistantWeeklyStatsManagement = () => {
     const [savingRows, setSavingRows] = React.useState<Record<string, boolean>>({});
     const [issuingRows, setIssuingRows] = React.useState<Record<string, boolean>>({});
     const [rowErrors, setRowErrors] = React.useState<Record<string, string | null>>({});
+    const [gameServers, setGameServers] = React.useState<GameServerCatalogItem[]>([]);
 
     const loadAdmin = React.useCallback(async (targetWeek = weekStart) => {
         setLoading(true);
         try {
-            const response = await apiFetch(`/api/assistant-weekly/admin?week_start=${targetWeek}`);
-            const data = await response.json().catch(() => ({} as unknown));
-            if (!response.ok) {
-                throw new Error(getApiErrorMessage(data, 'Не удалось загрузить недельную статистику'));
+            const [catalogResponse, weeklyResponse] = await Promise.all([
+                apiFetch('/api/game-servers'),
+                apiFetch(`/api/assistant-weekly/admin?week_start=${targetWeek}`),
+            ]);
+
+            const catalogData = await catalogResponse.json().catch(() => ({} as unknown));
+            if (!catalogResponse.ok) {
+                throw new Error(getApiErrorMessage(catalogData, 'Не удалось загрузить каталог серверов'));
+            }
+            const weeklyData = await weeklyResponse.json().catch(() => ({} as unknown));
+            if (!weeklyResponse.ok) {
+                throw new Error(getApiErrorMessage(weeklyData, 'Не удалось загрузить недельную статистику'));
             }
 
-            const payload = unwrapApiData<WeeklyAdminListResponse>(data);
-            setAdminWeek(payload);
+            const servers = normalizeGameServers(catalogData);
+            const payload = unwrapApiData<WeeklyAdminListResponse>(weeklyData);
+            const normalizedPayload = {
+                ...payload,
+                items: (payload.items ?? []).map((item) => normalizeWeeklyAssistant(item)),
+            };
+
+            setGameServers(servers);
+            setAdminWeek(normalizedPayload);
             setRowDrafts(
                 Object.fromEntries(
-                    payload.items.map((item) => [item.assistant_id, recomputeCounts(cloneDraft(item))]),
+                    normalizedPayload.items.map((item) => [item.assistant_id, recomputeCounts(cloneDraft(item))]),
                 ),
             );
             setSavingRows({});
@@ -408,11 +605,6 @@ const AssistantWeeklyStatsManagement = () => {
         }
         return buildWeekDays(weekStart);
     }, [adminWeek?.day_labels, weekStart]);
-
-    const payoutServers = React.useMemo(
-        () => sortPayoutServers(adminWeek?.payout_servers?.length ? adminWeek.payout_servers : FALLBACK_PAYOUT_SERVERS),
-        [adminWeek?.payout_servers],
-    );
 
     const baseRowsById = React.useMemo(
         () => Object.fromEntries((adminWeek?.items ?? []).map((item) => [item.assistant_id, item])),
@@ -565,7 +757,7 @@ const AssistantWeeklyStatsManagement = () => {
                     })),
                     selected_result: draft.selected_result ?? null,
                     payout_type: draft.payout_type ?? null,
-                    payout_server: draft.payout_server ?? null,
+                    payout_server_id: draft.payout_server_id ?? null,
                     payout_static: draft.payout_static ?? null,
                 }),
             });
@@ -574,7 +766,7 @@ const AssistantWeeklyStatsManagement = () => {
                 throw new Error(getApiErrorMessage(data, 'Не удалось сохранить недельную статистику'));
             }
 
-            const saved = recomputeCounts(cloneDraft(unwrapApiData<WeeklyAssistantDetail>(data)));
+            const saved = recomputeCounts(cloneDraft(normalizeWeeklyAssistant(unwrapApiData<unknown>(data))));
 
             setAdminWeek((current) => current ? {
                 ...current,
@@ -641,7 +833,7 @@ const AssistantWeeklyStatsManagement = () => {
                 throw new Error(getApiErrorMessage(data, 'Не удалось обновить статус выдачи'));
             }
 
-            const saved = recomputeCounts(cloneDraft(unwrapApiData<WeeklyAssistantDetail>(data)));
+            const saved = recomputeCounts(cloneDraft(normalizeWeeklyAssistant(unwrapApiData<unknown>(data))));
             setAdminWeek((current) => current ? {
                 ...current,
                 items: current.items.map((item) => (item.assistant_id === assistantId ? saved : item)),
@@ -936,13 +1128,16 @@ const AssistantWeeklyStatsManagement = () => {
                                                         </select>
                                                         <select
                                                             aria-label={`Payout server ${row.nickname}`}
-                                                            value={row.payout_server ?? ''}
-                                                            onChange={(event) => updateRowField(row.assistant_id, 'payout_server', (event.target.value || null) as WeeklyDraftRow['payout_server'])}
+                                                            value={row.payout_server_id != null ? String(row.payout_server_id) : ''}
+                                                            onChange={(event) => updateRowField(row.assistant_id, 'payout_server_id', normalizeGameServerId(event.target.value) as WeeklyDraftRow['payout_server_id'])}
                                                             className="w-full rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-xs text-white outline-none focus:border-cyan-500/40"
                                                         >
                                                             <option value="">Сервер</option>
-                                                            {payoutServers.map((server) => (
-                                                                <option key={server} value={server}>{server}</option>
+                                                            {buildGameServerOptions(gameServers, {
+                                                                variant: 'command',
+                                                                currentValue: row.payout_server_id,
+                                                            }).map((option) => (
+                                                                <option key={option.value} value={option.value}>{option.label}</option>
                                                             ))}
                                                         </select>
                                                     </div>

@@ -6,18 +6,21 @@ import ProtectedRoute from '../ProtectedRoute';
 
 const authState = vi.hoisted(() => ({
     token: null as string | null,
+    maintenanceMessage: null as string | null,
 }));
 
 // Mock the client module
 vi.mock('../../api/client', () => ({
     getAccessToken: vi.fn(() => authState.token),
+    getSiteMaintenanceMessage: vi.fn(() => authState.maintenanceMessage),
     tryRefresh: vi.fn(() => Promise.resolve(false)),
 }));
 
-import { getAccessToken, tryRefresh } from '../../api/client';
+import { getAccessToken, getSiteMaintenanceMessage, tryRefresh } from '../../api/client';
 
 const mockedTryRefresh = vi.mocked(tryRefresh);
 const mockedGetAccessToken = vi.mocked(getAccessToken);
+const mockedGetSiteMaintenanceMessage = vi.mocked(getSiteMaintenanceMessage);
 
 /**
  * Helper: build a fake JWT with the given payload (no real signature).
@@ -35,6 +38,7 @@ const renderWithRoutes = (initialPath: string, allowedRoles?: string[]) => {
             <Routes>
                 <Route path="/login" element={<div>Login Page</div>} />
                 <Route path="/hub" element={<div>Hub Page</div>} />
+                <Route path="/maintenance" element={<div>Maintenance Page</div>} />
                 <Route element={<ProtectedRoute allowedRoles={allowedRoles} />}>
                     <Route path="/admin" element={<div>Admin Page</div>} />
                 </Route>
@@ -47,8 +51,10 @@ describe('ProtectedRoute', () => {
     beforeEach(() => {
         localStorage.clear();
         authState.token = null;
+        authState.maintenanceMessage = null;
         mockedTryRefresh.mockReset().mockResolvedValue(false);
         mockedGetAccessToken.mockImplementation(() => authState.token);
+        mockedGetSiteMaintenanceMessage.mockImplementation(() => authState.maintenanceMessage);
     });
 
     it('redirects to login when token is missing and refresh fails', async () => {
@@ -117,6 +123,16 @@ describe('ProtectedRoute', () => {
             expect(screen.getByText('Login Page')).toBeInTheDocument();
         });
         expect(mockedTryRefresh).toHaveBeenCalledOnce();
+    });
+
+    it('redirects to maintenance when refresh fails because site maintenance is active', async () => {
+        authState.maintenanceMessage = 'Идут технические работы';
+        mockedTryRefresh.mockResolvedValue(false);
+
+        renderWithRoutes('/admin');
+        await waitFor(() => {
+            expect(screen.getByText('Maintenance Page')).toBeInTheDocument();
+        });
     });
 
     it('attempts refresh when no token exists but cookie might be present', async () => {

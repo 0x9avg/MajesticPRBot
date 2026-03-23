@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 from config import Config
@@ -57,7 +57,7 @@ async def list_streamers(
         False,
         description="Include active assignment slots for all streamers",
     ),
-    _principal: dict = Depends(require_permission("streamers.view")),
+    _principal: dict = Depends(require_permission("media.view")),
 ):
     """Get all streamers."""
     trace_id = get_trace_id(request)
@@ -101,7 +101,7 @@ async def get_streamer(
     request: Request,
     twitch_id: int,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("streamers.view")),
+    _principal: dict = Depends(require_permission("media.view")),
 ):
     """Get a specific streamer by Twitch ID."""
     trace_id = get_trace_id(request)
@@ -126,7 +126,7 @@ async def create_streamer(
     data: StreamerCreate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    principal: dict = Depends(require_permission("streamers.create")),
+    principal: dict = Depends(require_permission("media.create")),
 ):
     """
     Add a new streamer.
@@ -294,7 +294,7 @@ async def update_streamer(
     data: StreamerUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(require_permission("streamers.update")),
+    user: dict = Depends(require_permission("media.update")),
 ):
     """Update streamer properties."""
     trace_id = get_trace_id(request)
@@ -435,7 +435,7 @@ async def remove_streamer(
     twitch_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("streamers.delete")),
+    _principal: dict = Depends(require_permission("media.delete")),
 ):
     """Delete a streamer."""
     trace_id = get_trace_id(request)
@@ -479,7 +479,7 @@ async def update_streamer_status(
     data: StreamerStatusUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("streamers.status.update")),
+    _principal: dict = Depends(require_permission("media.status.update")),
 ):
     """
     Update streamer online status.
@@ -562,7 +562,7 @@ async def sync_streamers_status(
     request: Request,
     updates: List[dict],
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("streamers.status.update")),
+    _principal: dict = Depends(require_permission("media.status.update")),
 ):
     """
     Bulk update streamer statuses.

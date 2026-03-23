@@ -30,3 +30,11 @@ class UserCreate(BaseModel):
                 if field in data and data[field] and isinstance(data[field], datetime):
                     data[field] = make_aware(data[field])
         return data
+
+
+class UserRoleUpdate(BaseModel):
+    role: str
+
+
+class UserDeactivateRequest(BaseModel):
+    reason: str | None = None

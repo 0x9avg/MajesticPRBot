@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from database import Database, _week_start_msk
+from db import Database, _week_start_msk
 
 
 def _database() -> Database:
@@ -117,13 +117,19 @@ def test_build_weekly_payout_preview_uses_backend_amount_rules() -> None:
             ("default", "MONEY", "Актив"): "200000",
             ("junior", "MONEY", "Актив"): "150000",
         },
+        "game_servers_by_id": {
+            1: {
+                "id": 1,
+                "command_name": "RU1",
+            },
+        },
     }
 
     preview = db._build_weekly_payout_preview(
         assistant_role="employee",
         selected_result="Актив",
         payout_type="MONEY",
-        payout_server="RU1",
+        payout_server_id=1,
         payout_static="static",
         payout_config=payout_config,
     )

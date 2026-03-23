@@ -78,6 +78,11 @@ describe('MainLayout', () => {
             expect(screen.getByText('Outlet Content')).toBeInTheDocument();
         });
 
+        expect(fetchMock).not.toHaveBeenCalledWith(
+            '/api/assistants/1001',
+            expect.anything(),
+        );
+
         const ui = userEvent.setup();
         await ui.click(screen.getByTitle('Выйти'));
 
@@ -115,5 +120,36 @@ describe('MainLayout', () => {
 
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toBeNull();
+    });
+
+    it('redirects to maintenance on 503 SITE_MAINTENANCE without logging out', async () => {
+        setAccessToken('maintenance-token');
+        localStorage.setItem('refresh_token', 'refresh-token');
+        localStorage.setItem('user', '{"username":"tester"}');
+
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({
+                detail: {
+                    code: 'SITE_MAINTENANCE',
+                    message: 'На сайте идут технические работы',
+                },
+            }), {
+                status: 503,
+                headers: { 'Content-Type': 'application/json' },
+            })
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<MainLayout />);
+
+        await waitFor(() => {
+            expect(navigateMock).toHaveBeenCalledWith('/maintenance', {
+                replace: true,
+                state: { message: 'На сайте идут технические работы' },
+            });
+        });
+
+        expect(localStorage.getItem('refresh_token')).toBe('refresh-token');
+        expect(localStorage.getItem('user')).toBe('{"username":"tester"}');
     });
 });

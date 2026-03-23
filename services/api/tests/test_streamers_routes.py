@@ -14,7 +14,7 @@ def _service_principal_create_streamers() -> dict:
     return {
         "principal_type": "service",
         "service_name": "discord_service",
-        "permissions": {"streamers.create": True},
+        "permissions": {"media.create": True},
     }
 
 
@@ -28,7 +28,7 @@ def _status_sync_user() -> dict:
         "discord_id": 7077,
         "require_password_change": False,
         "permissions": {
-            "streamers.status.update": True,
+            "media.status.update": True,
         },
     }
 

@@ -18,10 +18,8 @@ export interface Assistant {
     active_point_penalty?: number;
     active_percent_penalty?: number;
     active_checks?: number;
-    active_warning_units?: number;
     active_strict_warnings?: number;
     active_oral_warnings?: number;
-    active_warnings_display?: string;
 }
 
 export interface AssistantLog {
@@ -55,6 +53,46 @@ export interface Streamer {
     game_id?: string | null;
     game_name?: string | null;
     assignments?: StreamerAssignment[];
+}
+
+export interface AssistantSessionTargetStreamer {
+    streamer_id: string;
+    streamer_name: string;
+    is_online: boolean;
+    priority: number;
+}
+
+export interface AssistantSessionTargetEvent {
+    id: string;
+    name: string;
+    is_active: boolean;
+    priority: number;
+}
+
+export interface AssistantSessionTargetsResponse {
+    streamers: AssistantSessionTargetStreamer[];
+    events: AssistantSessionTargetEvent[];
+}
+
+export type PermissionImplications = Record<string, string[]>;
+
+export interface AssistantSessionRecord {
+    id: number;
+    pr_id: number | string;
+    target_type?: string | null;
+    target_id?: number | string | null;
+    target_name?: string | null;
+    started_at: string;
+    ended_at?: string | null;
+    duration_seconds?: number | null;
+    end_reason?: string | null;
+    is_probation?: boolean;
+    priority_auto?: number | null;
+    priority_override?: number | null;
+    rate_auto?: number | null;
+    credited_points?: number | null;
+    deleted_at?: string | null;
+    delete_reason?: string | null;
 }
 
 export interface SanctionDayStatus {
@@ -122,10 +160,6 @@ export interface SanctionSummary {
     percent: number;
     oral: number;
     strict: number;
-    warnings_units: number;
-    strict_warnings: number;
-    oral_warnings: number;
-    warnings_display: string;
 }
 
 export interface WorkoffItem {
@@ -233,12 +267,31 @@ export interface MonthlyCheckRule {
     penalty_amount: number;
 }
 
+export interface GameServerDto {
+    id: number;
+    full_name: string;
+    short_name: string;
+    command_name: string;
+    sort_order: number;
+    is_active: boolean;
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+
+export interface GameServerWriteItem {
+    id: number;
+    full_name: string;
+    short_name: string;
+    command_name: string;
+    sort_order: number;
+    is_active: boolean;
+}
+
 export type WeeklyDayStatus = 'P' | 'U' | 'O';
 export type WeeklySuggestedResult = 'Ультра-Актив' | 'Актив' | 'Инактив/Актив' | 'Инактив';
 export type WeeklySelectedResult = WeeklySuggestedResult | 'Актив/Отпуск' | 'Инактив/Отпуск' | 'Отпуск';
 export type WeeklyPayoutType = 'EXP' | 'Premium' | 'MC' | 'MONEY';
 export type WeeklyPayoutIssueStatus = 'pending' | 'issued';
-export type WeeklyPayoutServer = string;
 export type WeeklyStatusSource = 'manual' | 'auto' | 'none';
 export type WeeklyPayoutReason =
     | 'selected_result_not_payout_eligible'
@@ -275,7 +328,7 @@ export interface WeeklyApiDay {
 
 export interface WeeklyApiPayout {
     type: WeeklyPayoutType | null;
-    server: WeeklyPayoutServer | null;
+    server_id: number | null;
     static: string | null;
     command_name?: string | null;
     amount?: string | null;
@@ -322,7 +375,6 @@ export interface WeeklyApiAssistantItem {
 
 export interface WeeklyApiPayoutOptions {
     types: Array<{ value: WeeklyPayoutType; command_name: string }>;
-    servers: WeeklyPayoutServer[];
     selected_results: WeeklySelectedResult[];
     manual_statuses: WeeklyDayStatus[];
 }
@@ -356,7 +408,7 @@ export interface WeeklyAssistantSummary {
     count_U: number;
     count_O: number;
     payout_type: WeeklyPayoutType | null;
-    payout_server: WeeklyPayoutServer | null;
+    payout_server_id: number | null;
     payout_static: string | null;
     payout_issue_status: WeeklyPayoutIssueStatus;
     payout_issued_at: string | null;
@@ -386,7 +438,6 @@ export interface WeeklyAdminListResponse {
     day_labels: { work_date: string; label: string }[];
     items: WeeklyAssistantSummary[];
     payout_types: { value: WeeklyPayoutType; label: string }[];
-    payout_servers: WeeklyPayoutServer[];
     result_options: WeeklySelectedResult[];
 }
 
@@ -414,7 +465,7 @@ export interface WeeklyAssistantSaveRequest {
     day_overrides: { work_date: string; manual_status: WeeklyDayStatus | null; is_manual_override: boolean }[];
     selected_result: WeeklySelectedResult | null;
     payout_type: WeeklyPayoutType | null;
-    payout_server: WeeklyPayoutServer | null;
+    payout_server_id: number | null;
     payout_static: string | null;
 }
 
@@ -524,3 +575,122 @@ export interface PunishmentReturnUpdateInput {
     remove_reason?: PunishmentReturnReason;
     discord_message_url?: string | null;
 }
+
+export type ComplaintStatus = 'draft' | 'pending' | 'issued' | 'completed';
+export type ComplaintPunishmentType = 'mute' | 'ajail' | 'warn' | 'ban' | 'hardban' | 'gunban';
+
+export interface ComplaintPunishmentInput {
+    punishment_type: ComplaintPunishmentType;
+    static: number;
+    duration?: number | null;
+    reason: string;
+}
+
+export interface ComplaintPunishmentItem extends ComplaintPunishmentInput {
+    id: string;
+    complaint_id: string;
+    command?: string | null;
+    message?: string | null;
+    punishment_label?: string | null;
+    duration_label?: string | null;
+}
+
+export interface ComplaintSummary {
+    id: string;
+    assistant_id: string;
+    assistant_name: string;
+    created_by_id?: string | null;
+    created_by_name?: string | null;
+    reviewed_by_id?: string | null;
+    reviewed_by_name?: string | null;
+    issued_by_id?: string | null;
+    issued_by_name?: string | null;
+    server: number;
+    media?: string | null;
+    complaint_link?: string | null;
+    incident_at?: string | null;
+    created_at?: string | null;
+    reviewed_at?: string | null;
+    issued_at?: string | null;
+    status_date?: string | null;
+    status: ComplaintStatus;
+    status_label: string;
+    punishments_count: number;
+    aggregate_command?: string | null;
+    aggregate_message?: string | null;
+    can_edit: boolean;
+    can_delete: boolean;
+    can_submit: boolean;
+    can_issue: boolean;
+}
+
+export interface ComplaintListItem extends ComplaintSummary {
+    punishments: ComplaintPunishmentItem[];
+}
+
+export interface ComplaintDetail {
+    complaint: ComplaintSummary;
+    punishments: ComplaintPunishmentItem[];
+    aggregate_command?: string | null;
+    aggregate_message?: string | null;
+}
+
+export interface ComplaintCreateInput {
+    server: number;
+    media: string;
+    complaint_link?: string | null;
+    incident_at: string;
+    target_status: 'draft' | 'pending';
+    punishments: ComplaintPunishmentInput[];
+}
+
+export interface ComplaintUpdateInput {
+    server?: number;
+    media?: string | null;
+    complaint_link?: string | null;
+    incident_at?: string | null;
+    target_status?: 'draft' | 'pending';
+    punishments?: ComplaintPunishmentInput[];
+}
+
+export type PunishmentRemovalStatus = 'draft' | 'pending' | 'issued' | 'completed';
+export type PunishmentRemovalType = 'unjail' | 'unmute';
+export type PunishmentRemovalReason = 'На видео' | 'На стрим';
+
+export interface PunishmentRemovalRecord {
+    id: string;
+    assistant_id: string;
+    assistant_name: string;
+    created_by_id?: string | null;
+    created_by_name?: string | null;
+    reviewed_by_id?: string | null;
+    reviewed_by_name?: string | null;
+    issued_by_id?: string | null;
+    issued_by_name?: string | null;
+    status: PunishmentRemovalStatus;
+    status_label: string;
+    punishment_type: PunishmentRemovalType;
+    static: number;
+    server: number;
+    reason: string;
+    message_link?: string | null;
+    command: string;
+    created_at?: string | null;
+    reviewed_at?: string | null;
+    issued_at?: string | null;
+    can_edit: boolean;
+    can_delete: boolean;
+    can_submit: boolean;
+    can_issue: boolean;
+}
+
+export interface PunishmentRemovalCreateInput {
+    punishment_type: PunishmentRemovalType;
+    static: number;
+    server: number;
+    reason: PunishmentRemovalReason;
+    message_link?: string | null;
+    target_status?: 'draft' | 'pending';
+}
+
+export interface PunishmentRemovalUpdateInput extends PunishmentRemovalCreateInput {}

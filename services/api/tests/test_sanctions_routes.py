@@ -29,11 +29,50 @@ def _seed_assistant(fake_db, pr_id: int, nickname: str = "Assistant") -> None:
         "active_point_penalty": 0.0,
         "active_percent_penalty": 0.0,
         "active_checks": 0.0,
-        "active_warning_units": 0,
         "active_strict_warnings": 0,
         "active_oral_warnings": 0,
-        "active_warnings_display": "0/2 0/2",
     }
+
+
+async def test_sanctions_summary_exposes_only_canonical_warning_fields(
+    build_api_app,
+    fake_db,
+) -> None:
+    _seed_assistant(fake_db, 1001, "Tester")
+    fake_db.assistant_sanctions[1] = {
+        "sanction_id": "1",
+        "assistant_id": "1001",
+        "kind": "strict",
+        "amount_total": 1,
+        "relieved_amount": 0,
+        "active_amount": 1,
+        "issued_at": "2026-03-10T09:00:00",
+        "source_type": "manual",
+        "workoff_items": [],
+    }
+    fake_db.assistant_sanctions[2] = {
+        "sanction_id": "2",
+        "assistant_id": "1001",
+        "kind": "oral",
+        "amount_total": 1,
+        "relieved_amount": 0,
+        "active_amount": 1,
+        "issued_at": "2026-03-11T09:00:00",
+        "source_type": "manual",
+        "workoff_items": [],
+    }
+
+    async with await _client(build_api_app) as client:
+        response = await client.get("/api/assistants/1001/sanctions/summary")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["strict"] == 1.0
+    assert payload["oral"] == 1.0
+    assert "warnings_units" not in payload
+    assert "strict_warnings" not in payload
+    assert "oral_warnings" not in payload
+    assert "warnings_display" not in payload
 
 
 async def _client(

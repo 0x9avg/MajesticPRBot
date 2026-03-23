@@ -33,10 +33,8 @@ def _seed_assistant(
         "active_point_penalty": 0.0,
         "active_percent_penalty": 0.0,
         "active_checks": 0.0,
-        "active_warning_units": 0,
         "active_strict_warnings": 0,
         "active_oral_warnings": 0,
-        "active_warnings_display": "0/2 0/2",
     }
 
 
@@ -56,7 +54,7 @@ def _employee_current_user(discord_id: int = 1001) -> dict:
         "require_password_change": False,
         "permissions": {
             "assistants.view": True,
-            "logs.pr_actions.view": True,
+            "logs.assistant_actions.view": True,
         },
     }
 
@@ -74,6 +72,10 @@ async def test_get_all_assistants_returns_list(build_api_app, fake_db) -> None:
     assert payload["data"][0]["gross_points"] == 10.0
     assert payload["data"][0]["net_points"] == 10.0
     assert payload["data"][0]["active_checks"] == 0.0
+    assert payload["data"][0]["active_strict_warnings"] == 0
+    assert payload["data"][0]["active_oral_warnings"] == 0
+    assert "active_warning_units" not in payload["data"][0]
+    assert "active_warnings_display" not in payload["data"][0]
     assert "session_count" not in payload["data"][0]
     assert "total_points" not in payload["data"][0]
     assert "display_points" not in payload["data"][0]
@@ -86,7 +88,7 @@ async def test_get_assistant_not_found(build_api_app) -> None:
     assert response.status_code == 404
 
 
-async def test_create_assistant_invalid_role(build_api_app) -> None:
+async def test_create_assistant_endpoint_removed(build_api_app) -> None:
     async with await _client(build_api_app) as assistants_client:
         response = await assistants_client.post(
             "/api/assistants",
@@ -97,11 +99,10 @@ async def test_create_assistant_invalid_role(build_api_app) -> None:
                 "experience_days": 0,
             },
         )
-    assert response.status_code == 400
-    assert "Невалидная роль" in response.json()["detail"]
+    assert response.status_code == 405
 
 
-async def test_create_assistant_success(build_api_app, fake_db) -> None:
+async def test_create_assistant_endpoint_removed_for_valid_payload(build_api_app, fake_db) -> None:
     async with await _client(build_api_app) as assistants_client:
         response = await assistants_client.post(
             "/api/assistants",
@@ -112,8 +113,8 @@ async def test_create_assistant_success(build_api_app, fake_db) -> None:
                 "experience_days": 3,
             },
         )
-    assert response.status_code == 200
-    assert fake_db.assistants_by_id[1201]["nickname"] == "Bob"
+    assert response.status_code == 405
+    assert 1201 not in fake_db.assistants_by_id
 
 
 async def test_update_assignment_validation_and_success(build_api_app, fake_db) -> None:
@@ -142,16 +143,16 @@ async def test_update_assignment_validation_and_success(build_api_app, fake_db) 
     assert fake_db.assistants_by_id[1300]["assigned_to_name"] == "StreamerX"
 
 
-async def test_delete_assistant(build_api_app, fake_db) -> None:
+async def test_delete_assistant_endpoint_removed(build_api_app, fake_db) -> None:
     _seed_assistant(fake_db, 1400, "DeleteMe")
 
     async with await _client(build_api_app) as assistants_client:
         ok = await assistants_client.delete("/api/assistants/1400")
         missing = await assistants_client.delete("/api/assistants/1400")
 
-    assert ok.status_code == 200
-    assert 1400 not in fake_db.assistants_by_id
-    assert missing.status_code == 404
+    assert ok.status_code == 405
+    assert 1400 in fake_db.assistants_by_id
+    assert missing.status_code == 405
 
 
 async def test_get_logs_for_assistant(build_api_app, fake_db) -> None:
@@ -259,6 +260,72 @@ async def test_get_assistant_sessions_admin_only_endpoint(
     assert len(data) == 1
     assert data[0]["id"] == "9001"
     assert data[0]["target_name"] == "StreamerOne"
+
+
+async def test_get_session_targets_requires_manage_permission_and_sorts_items(
+    build_api_app,
+    fake_db,
+) -> None:
+    fake_db.streamers_by_id[2] = {
+        "streamer_id": 2,
+        "streamer_name": "beta",
+        "is_online": False,
+        "priority": 1,
+        "pr_slots": 1,
+        "allow_juniors": True,
+    }
+    fake_db.streamers_by_id[1] = {
+        "streamer_id": 1,
+        "streamer_name": "alpha",
+        "is_online": True,
+        "priority": 2,
+        "pr_slots": 1,
+        "allow_juniors": True,
+    }
+    fake_db.events_by_id[20] = {
+        "id": 20,
+        "name": "Later Event",
+        "description": "",
+        "required_pr_count": 1,
+        "pr_slots": 1,
+        "priority": 0,
+        "is_pinned": False,
+        "is_active": False,
+        "created_at": datetime.now(MSK),
+        "notification_sent": True,
+    }
+    fake_db.events_by_id[10] = {
+        "id": 10,
+        "name": "Active Event",
+        "description": "",
+        "required_pr_count": 1,
+        "pr_slots": 1,
+        "priority": 2,
+        "is_pinned": False,
+        "is_active": True,
+        "created_at": datetime.now(MSK),
+        "notification_sent": True,
+    }
+
+    app = build_api_app(
+        assistants_router,
+        current_user={
+            **_employee_current_user(),
+            "permissions": {"assistants.view": True},
+        },
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.get("/api/assistants/session-targets")
+
+    assert denied.status_code == 403
+
+    async with await _client(build_api_app) as assistants_client:
+        response = await assistants_client.get("/api/assistants/session-targets")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert [item["streamer_id"] for item in payload["streamers"]] == ["1", "2"]
+    assert [item["id"] for item in payload["events"]] == ["10", "20"]
 
 
 async def test_get_capabilities_for_unknown_and_known_assistant(

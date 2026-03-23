@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 # Moscow timezone (UTC+3)
 MSK = timezone(timedelta(hours=3))
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 from typing import Optional
@@ -220,7 +220,7 @@ async def get_active_events(
 async def get_events_to_start(
     request: Request,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("events.manage")),
+    _principal: dict = Depends(require_permission("events.runtime.manage")),
 ):
     """Get events that need start notification."""
     trace_id = get_trace_id(request)
@@ -249,7 +249,7 @@ async def create_spec_request(
     data: SpecRequestCreate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(require_permission("events.spec.request")),
+    user: dict = Depends(require_permission("events.spec_requests.create")),
 ):
     """Create a spec request event (pending approval) and auto-join."""
     trace_id = get_trace_id(request)
@@ -286,7 +286,7 @@ async def create_spec_request(
 async def get_pending_spec_requests(
     request: Request,
     db: "Database" = Depends(get_db),
-    user: dict = Depends(require_permission("events.spec.manage")),
+    user: dict = Depends(require_permission("events.spec_requests.review")),
 ):
     """Get pending spec requests for admin review."""
     trace_id = get_trace_id(request)
@@ -314,7 +314,7 @@ async def update_pending_spec_request(
     data: SpecRequestUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(require_permission("events.spec.manage")),
+    user: dict = Depends(require_permission("events.spec_requests.review")),
 ):
     """Update a pending spec request without approving it."""
     trace_id = get_trace_id(request)
@@ -361,7 +361,7 @@ async def approve_spec_request(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(require_permission("events.spec.manage")),
+    user: dict = Depends(require_permission("events.spec_requests.review")),
 ):
     """Approve a pending spec request."""
     trace_id = get_trace_id(request)
@@ -397,7 +397,7 @@ async def reject_spec_request(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    user: dict = Depends(require_permission("events.spec.manage")),
+    user: dict = Depends(require_permission("events.spec_requests.review")),
 ):
     """Reject a pending spec request."""
     trace_id = get_trace_id(request)
@@ -532,7 +532,7 @@ async def join_event(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    principal: dict = Depends(require_permission("events.join.self")),
+    principal: dict = Depends(require_permission("events.participation.self.join")),
 ):
     """Join an event as the current authenticated user."""
     if principal.get("principal_type") != "user":
@@ -551,7 +551,7 @@ async def join_event_for_pr(
     pr_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("events.manage")),
+    _principal: dict = Depends(require_permission("events.runtime.manage")),
 ):
     """Service/admin join flow for a target PR ID."""
     return await _join_event_for_pr(request, event_id, pr_id, db, broker)
@@ -563,7 +563,7 @@ async def leave_event(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    principal: dict = Depends(require_permission("events.leave.self")),
+    principal: dict = Depends(require_permission("events.participation.self.leave")),
 ):
     """Leave an event as the current authenticated user."""
     if principal.get("principal_type") != "user":
@@ -582,7 +582,7 @@ async def leave_event_for_pr(
     pr_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("events.leave.any")),
+    _principal: dict = Depends(require_permission("events.participation.any.leave")),
 ):
     """Service/admin leave flow for a target PR ID."""
     return await _leave_event_for_pr(request, event_id, pr_id, db, broker)
@@ -594,7 +594,7 @@ async def start_event(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("events.manage")),
+    _principal: dict = Depends(require_permission("events.runtime.manage")),
 ):
     """Start an event and migrate its reserved participants to active sessions."""
     trace_id = get_trace_id(request)
@@ -626,7 +626,7 @@ async def end_event(
     event_id: int,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("events.manage")),
+    _principal: dict = Depends(require_permission("events.runtime.manage")),
 ):
     """End an event."""
     trace_id = get_trace_id(request)
@@ -718,7 +718,7 @@ async def mark_notification_sent(
     request: Request,
     event_id: int,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("events.manage")),
+    _principal: dict = Depends(require_permission("events.runtime.manage")),
 ):
     """Mark event notification as sent."""
     trace_id = get_trace_id(request)

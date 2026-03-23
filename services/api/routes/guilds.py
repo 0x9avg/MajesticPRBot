@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 from config import Config
@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse
 from middleware import get_trace_id
 from schemas.envelope import success_envelope
 from schemas.guild import (
+    GameServerDto,
+    GameServersReplaceRequest,
     GuildRatesResponse,
     GuildRatesUpdate,
     GuildSettingsOnlyResponse,
@@ -49,7 +51,7 @@ def get_broker(request: Request):
 async def get_guild_all(
     request: Request,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("guild.view")),
+    _principal: dict = Depends(require_permission("game_servers.view")),
 ):
     """Get all guild settings (aggregated view)."""
     trace_id = get_trace_id(request)
@@ -70,6 +72,34 @@ async def get_guild_all(
     )
 
 
+@router.put("/game-servers")
+async def replace_guild_game_servers(
+    request: Request,
+    data: GameServersReplaceRequest,
+    db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("game_servers.settings.update")),
+):
+    trace_id = get_trace_id(request)
+    try:
+        servers = await db.replace_game_servers(
+            [item.model_dump(mode="json", exclude_none=True) for item in data.items]
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    return JSONResponse(
+        content=success_envelope(
+            data=[
+                GameServerDto.model_validate(server).model_dump(mode="json")
+                for server in servers
+            ],
+            message="Game servers updated",
+            code="GAME_SERVERS_UPDATED",
+            trace_id=trace_id,
+        )
+    )
+
+
 # =============================================================================
 # /settings - Core wiring (channel/role/message IDs)
 # =============================================================================
@@ -79,7 +109,7 @@ async def get_guild_all(
 async def get_guild_settings(
     request: Request,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("guild.settings.view")),
+    _principal: dict = Depends(require_permission("game_servers.settings.view")),
 ):
     """Get core wiring settings (channel/role/message IDs)."""
     trace_id = get_trace_id(request)
@@ -106,7 +136,7 @@ async def update_guild_settings(
     data: GuildSettingsUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("guild.settings.update")),
+    _principal: dict = Depends(require_permission("game_servers.settings.update")),
 ):
     """Update core wiring settings."""
     trace_id = get_trace_id(request)
@@ -153,7 +183,7 @@ async def update_guild_settings(
 async def get_guild_templates(
     request: Request,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("guild.templates.view")),
+    _principal: dict = Depends(require_permission("game_servers.templates.view")),
 ):
     """Get notification templates."""
     trace_id = get_trace_id(request)
@@ -211,7 +241,7 @@ async def update_guild_templates(
     data: GuildTemplatesUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("guild.templates.update")),
+    _principal: dict = Depends(require_permission("game_servers.templates.update")),
 ):
     """Update notification templates."""
     trace_id = get_trace_id(request)
@@ -283,7 +313,7 @@ async def get_template_by_type(
     request: Request,
     event_type: str,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("guild.templates.view")),
+    _principal: dict = Depends(require_permission("game_servers.templates.view")),
 ):
     """Get a specific notification template by event type."""
     trace_id = get_trace_id(request)
@@ -310,7 +340,7 @@ async def get_template_by_type(
 async def get_guild_rates(
     request: Request,
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("guild.rates.view")),
+    _principal: dict = Depends(require_permission("game_servers.rates.view")),
 ):
     """Get point rates per priority."""
     trace_id = get_trace_id(request)
@@ -337,7 +367,7 @@ async def update_guild_rates(
     data: GuildRatesUpdate,
     db: "Database" = Depends(get_db),
     broker: "BrokerService" = Depends(get_broker),
-    _principal: dict = Depends(require_permission("guild.rates.update")),
+    _principal: dict = Depends(require_permission("game_servers.rates.update")),
 ):
     """Update point rates per priority."""
     trace_id = get_trace_id(request)

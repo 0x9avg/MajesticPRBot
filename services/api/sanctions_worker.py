@@ -12,7 +12,7 @@ import aio_pika
 from aio_pika import ExchangeType, IncomingMessage
 
 from config import Config
-from database import Database
+from db import Database
 
 
 MSK = timezone(timedelta(hours=3))

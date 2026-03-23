@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 from dependencies import get_current_service, require_permission
@@ -96,7 +96,7 @@ async def get_services_overview(
 async def trigger_twitch_sync(
     request: Request,
     broker: "BrokerService" = Depends(get_broker),
-    principal: dict = Depends(require_permission("streamers.status.update")),
+    principal: dict = Depends(require_permission("media.status.update")),
 ):
     trace_id = get_trace_id(request)
 

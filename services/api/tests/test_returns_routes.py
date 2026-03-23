@@ -24,9 +24,9 @@ def _employee_user(discord_id: int, nickname: str) -> dict:
         "discord_id": discord_id,
         "require_password_change": False,
         "permissions": {
-            "returns.view": True,
+            "returns.queue.view": True,
             "returns.create": True,
-            "returns.execute": True,
+            "returns.process": True,
             "returns.history.view": True,
             "returns.manage.self": True,
         },

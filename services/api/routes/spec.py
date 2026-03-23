@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 from config import Config
@@ -393,7 +393,7 @@ async def get_pr_sessions(
     pr_id: int,
     db: "Database" = Depends(get_db),
     limit: int = 50,
-    principal: dict = Depends(require_permission("spec.view_self_sessions")),
+    principal: dict = Depends(require_permission("spec.sessions.self.view")),
 ):
     """Get recent spec sessions for a PR assistant."""
     if principal.get("principal_type") == "user":
@@ -419,7 +419,7 @@ async def get_current_streamer_for_pr(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("spec.view_self_sessions")),
+    principal: dict = Depends(require_permission("spec.sessions.self.view")),
 ):
     """Get the session currently assigned to a PR assistant."""
     if principal.get("principal_type") == "user":
@@ -475,7 +475,7 @@ async def get_current_streamer_for_pr(
 async def get_claimable_streamers(
     request: Request,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("spec.view_claimable")),
+    principal: dict = Depends(require_permission("spec.claimable.view")),
 ):
     """Get claimable streamers for authenticated user."""
     if principal.get("principal_type") == "service":
@@ -489,7 +489,7 @@ async def get_claimable_streamers_for_pr(
     request: Request,
     pr_id: int,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("spec.view_claimable")),
+    principal: dict = Depends(require_permission("spec.claimable.view")),
 ):
     """Service/admin claimable list for a target PR."""
     if principal.get("principal_type") != "service" and not _has_permission(principal, "spec.unclaim.any"):

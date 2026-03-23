@@ -27,16 +27,24 @@ const makeUser = (role: UserContext['role'], permissions: Partial<Record<Permiss
     role,
     require_password_change: false,
     permissions: {
-        'returns.view': true,
+        'returns.queue.view': true,
         'returns.history.view': true,
+        'complaints.queue.view': true,
+        'complaints.history.view': true,
+        'removals.queue.view': true,
+        'removals.history.view': true,
         ...(role === 'manager' || role === 'developer'
             ? {
+                'admin.panel.view': true,
                 'admin.users.create': true,
                 'assistants.weekly.manage': true,
+                'assistants.view': true,
+                'events.view': true,
                 'events.create': true,
-                'streamers.create': true,
-                'streamers.update': true,
-                'streamers.delete': true,
+                'media.view': true,
+                'media.create': true,
+                'media.update': true,
+                'media.delete': true,
             }
             : {}),
         ...(role === 'developer'
@@ -48,7 +56,23 @@ const makeUser = (role: UserContext['role'], permissions: Partial<Record<Permiss
     },
 });
 
-const createFetchMock = () => {
+const createFetchMock = ({
+    streamers = [
+        {
+            streamer_id: 'streamer-1',
+            streamer_name: 'Alpha',
+            priority: 2,
+            pr_slots: 2,
+            assignments: [{ pr_id: '2002', nickname: 'Helper' }],
+        },
+    ],
+    events = [],
+    returnsQueue = [],
+}: {
+    streamers?: unknown[];
+    events?: unknown[];
+    returnsQueue?: unknown[];
+} = {}) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
 
@@ -71,15 +95,7 @@ const createFetchMock = () => {
                 JSON.stringify({
                     status: 'success',
                     data: {
-                        streamers: [
-                            {
-                                streamer_id: 'streamer-1',
-                                streamer_name: 'Alpha',
-                                priority: 2,
-                                pr_slots: 2,
-                                assignments: [{ pr_id: '2002', nickname: 'Helper' }],
-                            },
-                        ],
+                        streamers,
                     },
                 }),
                 { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -90,7 +106,17 @@ const createFetchMock = () => {
             return new Response(
                 JSON.stringify({
                     status: 'success',
-                    data: [],
+                    data: events,
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+        }
+
+        if (url.includes('/api/returns/queue')) {
+            return new Response(
+                JSON.stringify({
+                    status: 'success',
+                    data: returnsQueue,
                 }),
                 { status: 200, headers: { 'Content-Type': 'application/json' } }
             );
@@ -134,13 +160,17 @@ describe('MainHub', () => {
 
         mockedUser = makeUser('developer');
         rerender(<MainHub />);
-        expect(screen.getByText('Bot Dashboard')).toBeInTheDocument();
+        await waitFor(() => {
+            expect(screen.getByText('Bot Dashboard')).toBeInTheDocument();
+        });
 
         mockedUser = makeUser('employee');
         rerender(<MainHub />);
 
-        expect(screen.queryByText('Админ-панель')).not.toBeInTheDocument();
-        expect(screen.queryByText('Bot Dashboard')).not.toBeInTheDocument();
+        await waitFor(() => {
+            expect(screen.queryByText('Админ-панель')).not.toBeInTheDocument();
+            expect(screen.queryByText('Bot Dashboard')).not.toBeInTheDocument();
+        });
     });
 
     it('navigates when menu cards are clicked', async () => {
@@ -157,6 +187,12 @@ describe('MainHub', () => {
 
         await ui.click(screen.getByText('Возвраты'));
         expect(navigateMock).toHaveBeenCalledWith('/returns');
+
+        await ui.click(screen.getByText('Жалобы'));
+        expect(navigateMock).toHaveBeenCalledWith('/complaints');
+
+        await ui.click(screen.getByText('Снятие наказаний'));
+        expect(navigateMock).toHaveBeenCalledWith('/removals');
     });
 
     it('shows weekly management card in Управление and navigates to the full-screen page', async () => {
@@ -174,5 +210,98 @@ describe('MainHub', () => {
 
         await ui.click(screen.getByText('Недельная статистика'));
         expect(navigateMock).toHaveBeenCalledWith('/assistants/weekly/manage');
+    });
+
+    it('hides media menu card without media.view permission', async () => {
+        createFetchMock();
+        mockedUser = makeUser('employee', {
+            'media.view': false,
+            'assistants.view': true,
+        });
+
+        render(<MainHub />);
+
+        await waitFor(() => {
+            expect(screen.queryByText('Медиа')).not.toBeInTheDocument();
+        });
+    });
+
+    it('renders event and streamer controls per exact permissions', async () => {
+        createFetchMock({
+            events: [
+                {
+                    id: 55,
+                    name: 'Event Alpha',
+                    description: 'Test event',
+                    priority: 2,
+                    is_pinned: false,
+                    event_kind: 'event',
+                    participants: [],
+                },
+            ],
+            streamers: [
+                {
+                    streamer_id: 'streamer-7',
+                    streamer_name: 'Bravo',
+                    priority: 2,
+                    pr_slots: 2,
+                    assignments: [],
+                },
+            ],
+        });
+        mockedUser = makeUser('employee', {
+            'media.view': true,
+            'media.update': false,
+            'media.delete': true,
+            'events.view': true,
+            'events.update': true,
+            'events.runtime.manage': false,
+        });
+
+        render(<MainHub />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Event Alpha')).toBeInTheDocument();
+            expect(screen.getByText('Bravo')).toBeInTheDocument();
+        });
+
+        expect(screen.getByTitle('Настройки события')).toBeInTheDocument();
+        expect(screen.queryByTitle('Завершить событие')).not.toBeInTheDocument();
+        expect(screen.queryByTitle('Временные настройки')).not.toBeInTheDocument();
+        expect(screen.getByTitle('Удалить стримера')).toBeInTheDocument();
+    });
+
+    it('shows ready returns badge when queue has claimable items', async () => {
+        createFetchMock({
+            returnsQueue: [
+                { id: '1', can_claim: true },
+                { id: '2', can_claim: false },
+                { id: '3', can_claim: true },
+            ],
+        });
+
+        render(<MainHub />);
+
+        await waitFor(() => {
+            expect(screen.getByTestId('menu-badge-returns')).toHaveTextContent('2');
+        });
+    });
+
+    it('does not render raw 0 when queue has no claimable returns', async () => {
+        createFetchMock({
+            returnsQueue: [
+                { id: '1', can_claim: false },
+                { id: '2', can_claim: false },
+            ],
+        });
+
+        render(<MainHub />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Возвраты')).toBeInTheDocument();
+        });
+
+        expect(screen.queryByTestId('menu-badge-returns')).not.toBeInTheDocument();
+        expect(screen.queryByText(/^0$/)).not.toBeInTheDocument();
     });
 });

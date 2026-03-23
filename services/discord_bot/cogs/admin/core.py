@@ -38,7 +38,7 @@ class AdminMainView(disnake.ui.View):
         def has_all(required: list[str]) -> bool:
             return all(bool(permissions_map.get(key, False)) for key in required)
 
-        if has_any(["guild.templates.view", "guild.templates.update"]):
+        if has_any(["game_servers.templates.view", "game_servers.templates.update"]):
             self.add_item(
                 disnake.ui.Button(
                     label="Уведомления",
@@ -49,7 +49,7 @@ class AdminMainView(disnake.ui.View):
                 )
             )
 
-        if has_any(["streamers.create", "streamers.update", "streamers.delete"]):
+        if has_any(["media.create", "media.update", "media.delete"]):
             self.add_item(
                 disnake.ui.Button(
                     label="Стримеры",
@@ -60,7 +60,7 @@ class AdminMainView(disnake.ui.View):
                 )
             )
 
-        if has_any(["events.create", "events.manage"]):
+        if has_any(["events.create", "events.runtime.manage"]):
             self.add_item(
                 disnake.ui.Button(
                     label="События",
@@ -71,8 +71,12 @@ class AdminMainView(disnake.ui.View):
                 )
             )
 
-        if has_all(["guild.view"]) and has_any(
-            ["guild.settings.update", "guild.templates.update", "guild.rates.update"]
+        if has_all(["game_servers.view"]) and has_any(
+            [
+                "game_servers.settings.update",
+                "game_servers.templates.update",
+                "game_servers.rates.update",
+            ]
         ):
             self.add_item(
                 disnake.ui.Button(
@@ -84,7 +88,13 @@ class AdminMainView(disnake.ui.View):
                 )
             )
 
-        if has_any(["monitoring.view", "streamers.status.update", "guild.settings.update"]):
+        if has_any(
+            [
+                "monitoring.view",
+                "media.status.update",
+                "game_servers.settings.update",
+            ]
+        ):
             self.add_item(
                 disnake.ui.Button(
                     label="Сервис",

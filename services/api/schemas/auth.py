@@ -30,3 +30,4 @@ class UserResponse(BaseModel):
     role: str
     require_password_change: bool
     permissions: dict[str, bool] = {}
+    manageable_roles: list[str] = []

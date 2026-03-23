@@ -38,7 +38,8 @@ const assistant = {
     net_points: 9.5,
     active_point_penalty: 0,
     active_percent_penalty: 0,
-    active_warnings_display: '0/2 0/2',
+    active_strict_warnings: 0,
+    active_oral_warnings: 0,
 };
 
 const settings = {

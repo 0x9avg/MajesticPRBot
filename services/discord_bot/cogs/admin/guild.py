@@ -89,14 +89,14 @@ ID_SETUP_POINTS = "guild_setup_points"
 ID_TOGGLE_GTA_FILTER = "guild_toggle_gta_filter"
 ID_BTN_HOME = "admin_home"
 
-GUILD_SECTION_VIEW_PERMS = ["guild.view"]
+GUILD_SECTION_VIEW_PERMS = ["game_servers.view"]
 GUILD_SECTION_UPDATE_PERMS = [
-    "guild.settings.update",
-    "guild.templates.update",
-    "guild.rates.update",
+    "game_servers.settings.update",
+    "game_servers.templates.update",
+    "game_servers.rates.update",
 ]
-GUILD_SETTINGS_UPDATE_PERMS = ["guild.settings.update"]
-GUILD_RATES_UPDATE_PERMS = ["guild.rates.update"]
+GUILD_SETTINGS_UPDATE_PERMS = ["game_servers.settings.update"]
+GUILD_RATES_UPDATE_PERMS = ["game_servers.rates.update"]
 
 
 # =============================================================================

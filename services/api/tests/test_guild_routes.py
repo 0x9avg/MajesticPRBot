@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from routes.game_servers import router as game_servers_router
 from routes.guilds import router as guild_router
 
 pytestmark = pytest.mark.anyio
 
 
-async def _client(build_api_app, include_broker: bool = True):
-    app = build_api_app(guild_router, include_broker=include_broker)
+async def _client(build_api_app, *extra_routers, include_broker: bool = True):
+    app = build_api_app(guild_router, *extra_routers, include_broker=include_broker)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -96,3 +97,53 @@ async def test_update_endpoints_work_without_broker(build_api_app) -> None:
     assert settings.status_code == 200
     assert templates.status_code == 200
     assert rates.status_code == 200
+
+
+async def test_get_and_replace_guild_game_servers(build_api_app, fake_db) -> None:
+    async with await _client(build_api_app, game_servers_router) as client:
+        initial = await client.get("/api/game-servers")
+
+    assert initial.status_code == 200
+    items = initial.json()["data"]
+    assert len(items) == 18
+    assert items[0]["command_name"] == "RU1"
+
+    updated_snapshot = [dict(row) for row in items]
+    updated_snapshot[0]["full_name"] = "Majestic #1 Updated"
+    updated_snapshot[0]["short_name"] = "#1U"
+    updated_snapshot[0]["command_name"] = "RU1U"
+    updated_snapshot[0]["sort_order"] = 99
+    updated_snapshot[0]["is_active"] = False
+    updated_snapshot.append(
+        {
+            "full_name": "Majestic #19",
+            "short_name": "#19",
+            "command_name": "RU19",
+            "sort_order": 19,
+            "is_active": True,
+        }
+    )
+
+    async with await _client(build_api_app, game_servers_router) as client:
+        updated = await client.put("/api/guild/game-servers", json={"items": updated_snapshot})
+
+    assert updated.status_code == 200
+    payload = updated.json()["data"]
+    updated_row = next(row for row in payload if row["id"] == 1)
+    assert updated_row["full_name"] == "Majestic #1 Updated"
+    assert updated_row["is_active"] is False
+    assert any(row["id"] == 19 for row in payload)
+    assert fake_db.game_servers_by_id[19]["command_name"] == "RU19"
+
+
+async def test_replace_guild_game_servers_rejects_missing_existing_rows(build_api_app) -> None:
+    async with await _client(build_api_app, game_servers_router) as client:
+        initial = await client.get("/api/game-servers")
+
+    snapshot = initial.json()["data"][1:]
+
+    async with await _client(build_api_app, game_servers_router) as client:
+        response = await client.put("/api/guild/game-servers", json={"items": snapshot})
+
+    assert response.status_code == 400
+    assert "snapshot must include all existing rows" in response.json()["detail"]

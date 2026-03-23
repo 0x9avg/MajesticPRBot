@@ -1,10 +1,12 @@
 import React from 'react';
-import { UserPlus, Radio, CalendarPlus, Settings, Activity, Wrench, Clock, Shield } from 'lucide-react';
+import { UserPlus, Radio, CalendarPlus, Activity, Wrench, Clock, Shield, Server, Settings2, ShieldAlert } from 'lucide-react';
 import { useOutletContext } from 'react-router-dom';
 import UserRegistration from './components/UserRegistration';
 import MediaRegistration from './components/MediaRegistration';
 import CreateEvent from './components/CreateEvent';
 import SiteManagement from './components/SiteManagement';
+import RbacManagement from './components/RbacManagement';
+import SiteMaintenanceManagement from './components/SiteMaintenanceManagement';
 import SystemInfo from './components/SystemInfo';
 import AssistantsManagement from './components/AssistantsManagement';
 import PendingRequests from './components/PendingRequests';
@@ -23,7 +25,9 @@ export function AdminPanel() {
         requests: Clock,
         assistants: Wrench,
         sanctions: Shield,
-        guild: Settings,
+        game_servers: Server,
+        rbac: Settings2,
+        site_maintenance: ShieldAlert,
         system: Activity,
     };
 
@@ -95,9 +99,11 @@ export function AdminPanel() {
                     {activeTab === 'media' && <MediaRegistration />}
                     {activeTab === 'events' && <CreateEvent />}
                     {activeTab === 'requests' && <PendingRequests />}
-                    {activeTab === 'assistants' && <AssistantsManagement />}
+                    {activeTab === 'assistants' && <AssistantsManagement user={user} />}
                     {activeTab === 'sanctions' && <SanctionsQueueManagement />}
-                    {activeTab === 'guild' && <SiteManagement />}
+                    {activeTab === 'game_servers' && <SiteManagement />}
+                    {activeTab === 'rbac' && <RbacManagement />}
+                    {activeTab === 'site_maintenance' && <SiteMaintenanceManagement />}
                     {activeTab === 'system' && <SystemInfo />}
                 </div>
             </div>

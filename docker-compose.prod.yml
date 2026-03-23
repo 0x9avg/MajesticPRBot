@@ -139,7 +139,7 @@ services:
     env_file:
       - deploy/env/mysql.env
     ports:
-      - "3307:3306"
+      - "3306:3306"
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -153,7 +153,6 @@ services:
       retries: 10
       start_period: 30s
     networks:
-      - public
       - backend
     security_opt:
       - no-new-privileges:true

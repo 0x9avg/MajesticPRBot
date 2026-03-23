@@ -209,3 +209,45 @@ async def test_get_claimable_streamers_by_role_permissions(
     assert 3011 in junior_ids
     assert 3012 not in junior_ids
     assert junior_view.json()["data"]["can_spec_probation"] is True
+
+
+async def test_service_principal_can_view_pr_assignment_and_claimable_targets(
+    build_api_app,
+    fake_db,
+) -> None:
+    _seed_streamer(fake_db, 3020, "delta", True)
+    fake_db.assistants_by_id[6003] = {
+        "pr_id": 6003,
+        "nickname": "ServiceTarget",
+        "role": "employee",
+        "experience_days": 10,
+        "status": "free",
+        "total_spec_seconds": 0,
+        "session_count": 0,
+        "added_at": datetime.now(MSK),
+    }
+    fake_db.pr_current_streamer[6003] = {
+        "streamer_id": 3020,
+        "streamer_name": "delta",
+        "assigned_at": datetime.now(MSK),
+    }
+
+    service_principal = {
+        "principal_type": "service",
+        "service_name": "discord_service",
+        "permissions": {
+            "spec.sessions.self.view": True,
+            "spec.claimable.view": True,
+        },
+    }
+
+    app = build_api_app(spec_router, current_user=service_principal)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assigned = await client.get("/api/spec/by-pr/6003")
+        claimable = await client.get("/api/spec/claimable/6003")
+
+    assert assigned.status_code == 200
+    assert assigned.json()["data"]["assigned"] is True
+    assert claimable.status_code == 200
+    claimable_ids = {item["streamer_id"] for item in claimable.json()["data"]["streamers"]}
+    assert 3020 in claimable_ids

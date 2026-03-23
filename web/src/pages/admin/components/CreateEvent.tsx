@@ -5,7 +5,7 @@ import { CustomDatePicker, CustomTimePicker } from '../../../components/CustomIn
 import NotificationToast from '../../../components/feedback/NotificationToast';
 import { usePopupToast } from '../../../components/feedback/hooks';
 import { getApiErrorMessage } from '../../../types/api';
-import { getMskNow, getMskTodayStr } from '../../../utils/datetime';
+import { formatToMskIso, getMskTodayStr, parseMskDate } from '../../../utils/datetime';
 import { apiFetch } from '../../../api/client';
 
 const CreateEvent = () => {
@@ -15,11 +15,7 @@ const CreateEvent = () => {
     const [eventName, setEventName] = useState('');
     const [description, setDescription] = useState('');
     const [date, setDate] = useState(getMskTodayStr());
-    const [time, setTime] = useState(() => {
-        const now = getMskNow();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    });
+    const [time, setTime] = useState(() => formatToMskIso(new Date()).slice(11, 16));
     const [loading, setLoading] = useState(false);
 
     const handleCreateEvent = async () => {
@@ -35,10 +31,13 @@ const CreateEvent = () => {
             let startTime = null;
             if (date && time) {
                 startTime = `${date}T${time}:00`;
-                // Validate not in the past
-                const startDate = new Date(startTime + '+03:00');
-                const mskNow = getMskNow();
-                if (startDate.getTime() < mskNow.getTime() - 60000) { // 1 min buffer
+                const startDate = parseMskDate(startTime);
+                if (!startDate) {
+                    showToast('Некорректная дата или время начала', 'error');
+                    setLoading(false);
+                    return;
+                }
+                if (startDate.getTime() < Date.now() - 60000) { // 1 min buffer
                     showToast('Дата и время начала не могут быть в прошлом', 'error');
                     setLoading(false);
                     return;

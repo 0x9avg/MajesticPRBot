@@ -3,9 +3,10 @@ Guild schemas for API requests and responses.
 """
 
 import json
+from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from schemas.common import Snowflake
 
@@ -17,6 +18,71 @@ def _parse_json_list(v: Any) -> Optional[list]:
     if isinstance(v, str):
         return json.loads(v)
     return v
+
+
+class GameServerDto(BaseModel):
+    id: int
+    full_name: str
+    short_name: str
+    command_name: str
+    sort_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class GameServerWriteItem(BaseModel):
+    id: int | None = Field(default=None, ge=1)
+    full_name: str = Field(..., min_length=1, max_length=255)
+    short_name: str = Field(..., min_length=1, max_length=32)
+    command_name: str = Field(..., min_length=1, max_length=32)
+    sort_order: int = 0
+    is_active: bool = True
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("full_name", "short_name", "command_name", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+        return value
+
+
+class GameServersReplaceRequest(BaseModel):
+    items: list[GameServerWriteItem]
+
+
+class RolePermissionsSnapshotItem(BaseModel):
+    role: str = Field(..., min_length=1, max_length=50)
+    permissions: dict[str, bool] = Field(default_factory=dict)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RolePermissionsReplaceRequest(BaseModel):
+    items: list[RolePermissionsSnapshotItem]
+
+    @model_validator(mode="after")
+    def validate_unique_roles(self) -> "RolePermissionsReplaceRequest":
+        roles = [item.role for item in self.items]
+        if len(roles) != len(set(roles)):
+            raise ValueError("Duplicate roles are not allowed")
+        return self
+
+
+class SiteMaintenanceUpdate(BaseModel):
+    site_maintenance_enabled: bool
+
+
+class SiteSettingsResponse(BaseModel):
+    site_maintenance_enabled: bool
+    permission_catalog: list[str]
+    role_permissions: list[RolePermissionsSnapshotItem]
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class GuildSettingsUpdate(BaseModel):

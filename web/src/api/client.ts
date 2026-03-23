@@ -20,7 +20,25 @@ interface ApiError {
     detail?: string | { code?: string; message?: string };
 }
 
+interface ApiErrorInfo {
+    code?: string;
+    message?: string;
+}
+
 type LogoutCallback = () => void;
+
+interface RefreshResult {
+    token: string | null;
+    maintenanceResponse: Response | null;
+}
+
+export const SITE_MAINTENANCE_EVENT = 'pr:site-maintenance';
+
+export interface SiteMaintenanceEventDetail {
+    message: string;
+    response: Response;
+    source: 'fetch' | 'refresh';
+}
 
 // ---------------------------------------------------------------------------
 // In-memory token store
@@ -28,6 +46,7 @@ type LogoutCallback = () => void;
 
 let _accessToken: string | null = null;
 let _logoutCallback: LogoutCallback | null = null;
+let _siteMaintenanceMessage: string | null = null;
 
 export function setAccessToken(token: string | null): void {
     _accessToken = token;
@@ -46,10 +65,19 @@ export function onLogout(cb: LogoutCallback): void {
     _logoutCallback = cb;
 }
 
+export function getSiteMaintenanceMessage(): string | null {
+    return _siteMaintenanceMessage;
+}
+
+export function clearSiteMaintenanceState(): void {
+    _siteMaintenanceMessage = null;
+}
+
 function triggerLogout(): void {
     _accessToken = null;
     localStorage.removeItem('refresh_token');
     localStorage.removeItem('user');
+    clearSiteMaintenanceState();
     _logoutCallback?.();
 }
 
@@ -77,9 +105,33 @@ function tokenExpiresInSeconds(token: string | null): number {
 // Single-flight refresh mutex
 // ---------------------------------------------------------------------------
 
-let _refreshPromise: Promise<string | null> | null = null;
+let _refreshPromise: Promise<RefreshResult> | null = null;
 
-async function refreshAccessToken(): Promise<string | null> {
+function emitSiteMaintenanceEvent(detail: SiteMaintenanceEventDetail): void {
+    _siteMaintenanceMessage = detail.message;
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') {
+        return;
+    }
+
+    window.dispatchEvent(new CustomEvent<SiteMaintenanceEventDetail>(SITE_MAINTENANCE_EVENT, {
+        detail,
+    }));
+}
+
+export function onSiteMaintenance(cb: (detail: SiteMaintenanceEventDetail) => void): () => void {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+        return () => {};
+    }
+
+    const listener = (event: Event) => {
+        cb((event as CustomEvent<SiteMaintenanceEventDetail>).detail);
+    };
+
+    window.addEventListener(SITE_MAINTENANCE_EVENT, listener);
+    return () => window.removeEventListener(SITE_MAINTENANCE_EVENT, listener);
+}
+
+async function refreshAccessToken(): Promise<RefreshResult> {
     // If a refresh is already in-flight, piggyback on that promise
     if (_refreshPromise) {
         return _refreshPromise;
@@ -92,18 +144,29 @@ async function refreshAccessToken(): Promise<string | null> {
                 credentials: 'include',  // send HttpOnly cookie
             });
 
+            const maintenanceMessage = await readSiteMaintenanceMessage(res);
+            if (maintenanceMessage) {
+                emitSiteMaintenanceEvent({
+                    message: maintenanceMessage,
+                    response: res,
+                    source: 'refresh',
+                });
+                return { token: null, maintenanceResponse: res };
+            }
+
             if (!res.ok) {
-                return null;
+                return { token: null, maintenanceResponse: null };
             }
 
             const data = (await res.json()) as { access_token?: string };
             if (data.access_token) {
+                clearSiteMaintenanceState();
                 setAccessToken(data.access_token);
-                return data.access_token;
+                return { token: data.access_token, maintenanceResponse: null };
             }
-            return null;
+            return { token: null, maintenanceResponse: null };
         } catch {
-            return null;
+            return { token: null, maintenanceResponse: null };
         } finally {
             _refreshPromise = null;
         }
@@ -114,8 +177,8 @@ async function refreshAccessToken(): Promise<string | null> {
 
 /** Export for ProtectedRoute: attempt refresh and return whether it succeeded. */
 export async function tryRefresh(): Promise<boolean> {
-    const token = await refreshAccessToken();
-    return token !== null;
+    const result = await refreshAccessToken();
+    return result.token !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,12 +196,60 @@ function getErrorCode(body: unknown): string | undefined {
     return b.code;
 }
 
+function getErrorMessage(body: unknown): string | undefined {
+    if (!body || typeof body !== 'object') return undefined;
+    const b = body as ApiError;
+
+    if (typeof b.detail === 'object' && b.detail !== null) {
+        return (b.detail as { message?: string }).message || b.message;
+    }
+
+    if (typeof b.detail === 'string') {
+        return b.detail;
+    }
+
+    return b.message;
+}
+
+export async function readApiErrorInfo(response: Response): Promise<ApiErrorInfo> {
+    const cloned = response.clone();
+    let errorBody: unknown = null;
+
+    try {
+        errorBody = await cloned.json();
+    } catch {
+        return {};
+    }
+
+    return {
+        code: getErrorCode(errorBody),
+        message: getErrorMessage(errorBody),
+    };
+}
+
+export async function readSiteMaintenanceMessage(
+    response: Response,
+    fallback = 'На сайте ведутся технические работы. Попробуйте позже.',
+): Promise<string | null> {
+    if (response.status !== 503) {
+        return null;
+    }
+
+    const errorInfo = await readApiErrorInfo(response);
+    if (errorInfo.code !== 'SITE_MAINTENANCE') {
+        return null;
+    }
+
+    return errorInfo.message || fallback;
+}
+
 /**
  * Fetch wrapper that:
  * 1. Proactively refreshes if token expires within 60s
  * 2. Attaches the in-memory access token
  * 3. On 401 TOKEN_EXPIRED / TOKEN_INVALID / SESSION_REVOKED → refreshes and retries once
  * 4. On REFRESH_REUSE_DETECTED or refresh failure → hard logout
+ * 5. On 503 SITE_MAINTENANCE from refresh → surface 503 without hard logout
  */
 export async function apiFetch(
     url: string,
@@ -147,7 +258,10 @@ export async function apiFetch(
     if (_accessToken) {
         const remaining = tokenExpiresInSeconds(_accessToken);
         if (remaining < 30) {
-            await refreshAccessToken();
+            const refreshResult = await refreshAccessToken();
+            if (refreshResult.maintenanceResponse) {
+                return refreshResult.maintenanceResponse;
+            }
         }
     }
 
@@ -164,6 +278,16 @@ export async function apiFetch(
     };
 
     let response = await doFetch(_accessToken);
+
+    const maintenanceMessage = await readSiteMaintenanceMessage(response);
+    if (maintenanceMessage) {
+        emitSiteMaintenanceEvent({
+            message: maintenanceMessage,
+            response,
+            source: 'fetch',
+        });
+        return response;
+    }
 
     if (response.status === 401) {
         // Clone the response so we can inspect the body without consuming it
@@ -188,10 +312,13 @@ export async function apiFetch(
             // All these cases can be resolved by a fresh refresh token rotation.
             // SESSION_REVOKED typically means the old session was replaced during
             // a previous rotation — the refresh cookie still holds the latest token.
-            const newToken = await refreshAccessToken();
-            if (newToken) {
+            const refreshResult = await refreshAccessToken();
+            if (refreshResult.token) {
                 // Retry the original request once with the new access token
-                response = await doFetch(newToken);
+                response = await doFetch(refreshResult.token);
+            } else if (refreshResult.maintenanceResponse) {
+                response = refreshResult.maintenanceResponse;
+                return response;
             } else {
                 // Refresh failed — hard logout
                 triggerLogout();
@@ -200,6 +327,16 @@ export async function apiFetch(
             // Unknown 401 code — hard logout
             triggerLogout();
         }
+    }
+
+    const nextMaintenanceMessage = await readSiteMaintenanceMessage(response);
+    if (nextMaintenanceMessage) {
+        emitSiteMaintenanceEvent({
+            message: nextMaintenanceMessage,
+            response,
+            source: 'fetch',
+        });
+        return response;
     }
 
     return response;

@@ -4,6 +4,7 @@ import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { render, screen } from '@testing-library/react';
 import PermissionRoute from '../PermissionRoute';
 import type { UserContext } from '../../../types/auth';
+import { ADMIN_SECTION_PERMISSIONS } from '../../../rbac/catalog';
 
 function renderWithContext(
     user: UserContext | null,
@@ -20,7 +21,7 @@ function renderWithContext(
                     <Route
                         path="/admin"
                         element={
-                            <PermissionRoute requireAny={['events.create']}>
+                            <PermissionRoute requireAny={['admin.panel.view']}>
                                 <div>Admin Page</div>
                             </PermissionRoute>
                         }
@@ -50,7 +51,7 @@ describe('PermissionRoute', () => {
                 nickname: 'Manager',
                 role: 'manager',
                 require_password_change: false,
-                permissions: { 'events.create': true },
+                permissions: { 'admin.panel.view': true },
             },
             true,
             '/admin',
@@ -68,7 +69,7 @@ describe('PermissionRoute', () => {
                 nickname: 'Employee',
                 role: 'employee',
                 require_password_change: false,
-                permissions: { 'events.create': false },
+                permissions: { 'admin.panel.view': false },
             },
             true,
             '/admin',
@@ -87,11 +88,47 @@ describe('PermissionRoute', () => {
                 nickname: 'Stale',
                 role: 'developer',
                 require_password_change: false,
-                permissions: { 'events.create': true },
+                permissions: { 'admin.panel.view': true },
             })
         );
 
         renderWithContext(null, true, '/admin');
         expect(screen.getByText('Hub Page')).toBeInTheDocument();
+    });
+
+    it('does not treat assistants.view as sufficient for admin route access', () => {
+        const Layout = () => <Outlet context={{
+            user: {
+                id: '1',
+                discord_id: '1001',
+                username: 'viewer',
+                nickname: 'Viewer',
+                role: 'employee',
+                require_password_change: false,
+                permissions: { 'assistants.view': true },
+            } satisfies UserContext,
+            authResolved: true,
+        }} />;
+
+        render(
+            <MemoryRouter initialEntries={['/admin']}>
+                <Routes>
+                    <Route path="/hub" element={<div>Hub Page</div>} />
+                    <Route element={<Layout />}>
+                        <Route
+                            path="/admin"
+                            element={
+                                <PermissionRoute requireAny={ADMIN_SECTION_PERMISSIONS}>
+                                    <div>Admin Page</div>
+                                </PermissionRoute>
+                            }
+                        />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        expect(screen.getByText('Hub Page')).toBeInTheDocument();
+        expect(screen.queryByText('Admin Page')).not.toBeInTheDocument();
     });
 });

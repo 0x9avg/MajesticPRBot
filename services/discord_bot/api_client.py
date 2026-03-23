@@ -296,18 +296,10 @@ class APIClient:
             return {str(k): bool(v) for k, v in result.items()}
         return {}
 
-    async def get_assistant_stats(self, user_id: int) -> Optional[Dict]:
-        """Get assistant stats (uses assistant details endpoint)."""
-        return await self._request("GET", f"/assistants/{user_id}")
-
     async def get_dashboard_stats(self) -> Optional[Dict]:
         """Get dashboard stats."""
         result = await self._request("GET", "/stats/dashboard")
         return result if isinstance(result, dict) else None
-
-    async def get_dashboard_status(self) -> Optional[Dict]:
-        """Backward-compatible alias for dashboard stats."""
-        return await self.get_dashboard_stats()
 
     async def get_monitoring_status(self) -> Optional[Dict]:
         """Get monitoring view model for Discord display."""

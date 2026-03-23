@@ -7,7 +7,7 @@ from math import ceil
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
 
 from dependencies import get_current_principal, require_permission
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -103,7 +103,7 @@ def _serialize_return_record(record: dict[str, Any], principal: dict) -> dict[st
     current_actor_name = _current_actor_name(principal)
     can_manage_any = _has_permission(principal, "returns.manage.any")
     can_manage_self = _has_permission(principal, "returns.manage.self")
-    can_execute = _has_permission(principal, "returns.execute")
+    can_execute = _has_permission(principal, "returns.process")
 
     status = str(record.get("status") or "")
     is_author = int(record.get("removed_by_id") or 0) == current_actor_id
@@ -160,6 +160,22 @@ def _ensure_manage_permission(principal: dict) -> None:
         )
 
 
+async def _validate_game_server(
+    db: "Database",
+    server_id: int,
+    *,
+    allow_inactive: bool = False,
+    current_server_id: int | None = None,
+) -> dict[str, Any]:
+    server = await db.get_game_server(int(server_id), include_inactive=True)
+    if not server:
+        raise HTTPException(status_code=422, detail="Сервер не найден")
+    if not bool(server.get("is_active")) and not allow_inactive:
+        if current_server_id is None or int(current_server_id) != int(server_id):
+            raise HTTPException(status_code=422, detail="Сервер неактивен")
+    return server
+
+
 async def _get_existing_return_or_404(db: "Database", return_id: int) -> dict[str, Any]:
     record = await db.get_punishment_return(return_id)
     if not record:
@@ -175,6 +191,7 @@ async def create_punishment_return(
     principal: dict = Depends(require_permission("returns.create")),
 ):
     trace_id = get_trace_id(request)
+    await _validate_game_server(db, payload.server, allow_inactive=False)
     record = await db.create_punishment_return(
         punishment_type=payload.punishment_type.value,
         static=payload.static,
@@ -202,7 +219,7 @@ async def create_punishment_return(
 async def get_returns_queue(
     request: Request,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("returns.view")),
+    principal: dict = Depends(require_permission("returns.queue.view")),
 ):
     trace_id = get_trace_id(request)
     records = await db.list_punishment_returns_queue()
@@ -221,7 +238,7 @@ async def get_returns_history(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     static: Optional[int] = Query(None, ge=1),
-    server: Optional[int] = Query(None, ge=1, le=17),
+    server: Optional[int] = Query(None, ge=1),
     punishment_type: Optional[PunishmentType] = Query(None),
     removed_by: Optional[str] = Query(None),
     completed_by: Optional[str] = Query(None),
@@ -236,6 +253,7 @@ async def get_returns_history(
     if static is not None:
         filters["static"] = static
     if server is not None:
+        await _validate_game_server(db, server, allow_inactive=True)
         filters["server"] = server
     if punishment_type is not None:
         filters["punishment_type"] = punishment_type.value
@@ -281,7 +299,7 @@ async def claim_return(
     request: Request,
     return_id: int,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("returns.execute")),
+    principal: dict = Depends(require_permission("returns.process")),
 ):
     trace_id = get_trace_id(request)
     existing = await _get_existing_return_or_404(db, return_id)
@@ -334,7 +352,7 @@ async def complete_return(
     request: Request,
     return_id: int,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("returns.execute")),
+    principal: dict = Depends(require_permission("returns.process")),
 ):
     trace_id = get_trace_id(request)
     existing = await _get_existing_return_or_404(db, return_id)
@@ -387,7 +405,7 @@ async def release_return(
     request: Request,
     return_id: int,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("returns.execute")),
+    principal: dict = Depends(require_permission("returns.process")),
 ):
     trace_id = get_trace_id(request)
     existing = await _get_existing_return_or_404(db, return_id)
@@ -457,6 +475,14 @@ async def update_return(
             )
         if int(existing.get("removed_by_id") or 0) != current_actor_id:
             raise HTTPException(status_code=403, detail="Можно редактировать только свои возвраты")
+
+    if "server" in payload.model_fields_set and payload.server is not None:
+        await _validate_game_server(
+            db,
+            payload.server,
+            allow_inactive=False,
+            current_server_id=int(existing.get("server") or 0),
+        )
 
     updated = await db.update_punishment_return(
         return_id,

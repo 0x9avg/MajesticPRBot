@@ -18,13 +18,19 @@ export default function MediaProfile() {
         const fetchStreamer = async () => {
             try {
                 const response = await apiFetch(`/api/streamers/${id}`);
-                if (!response.ok) {
+                if (response.status === 403) {
+                    throw new Error('Недостаточно прав для просмотра медиа-профиля.');
+                }
+                if (response.status === 404) {
                     throw new Error('Стример не найден');
+                }
+                if (!response.ok) {
+                    throw new Error('Ошибка загрузки медиа-профиля.');
                 }
                 const json = await response.json() as unknown;
                 setStreamer(unwrapApiData<Streamer>(json));
             } catch (err: unknown) {
-                setError(err instanceof Error ? err.message : 'Стример не найден');
+                setError(err instanceof Error ? err.message : 'Ошибка загрузки медиа-профиля.');
             } finally {
                 setLoading(false);
             }

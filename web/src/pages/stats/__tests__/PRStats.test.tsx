@@ -6,6 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import PRStats from '../PRStats';
 import { setAccessToken } from '../../../api/client';
+import type { UserContext } from '../../../types/auth';
+
+let mockedUser: UserContext | null = null;
+
+vi.mock('react-router-dom', async () => {
+    const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+    return {
+        ...actual,
+        useOutletContext: () => ({ user: mockedUser }),
+    };
+});
 
 const createLocalStorageMock = () => {
     const storage: Record<string, string> = {};
@@ -40,7 +51,6 @@ const assistantsPayload = {
             active_percent_penalty: 0,
             active_strict_warnings: 0,
             active_oral_warnings: 1,
-            active_warnings_display: '0/2 1/2',
         },
     ],
 };
@@ -129,7 +139,7 @@ const weeklyPayload = {
                 count_U: 0,
                 count_O: 0,
                 payout_type: null,
-                payout_server: null,
+                payout_server_id: null,
                 payout_static: null,
                 generated_payout_command: null,
                 generated_payout_available: false,
@@ -161,6 +171,17 @@ describe('PRStats weekly tab', () => {
     beforeEach(() => {
         vi.stubGlobal('localStorage', createLocalStorageMock());
         setAccessToken(null);
+        mockedUser = {
+            id: '1',
+            discord_id: '1001',
+            username: 'tester',
+            nickname: 'Tester',
+            role: 'employee',
+            require_password_change: false,
+            permissions: {
+                'assistants.view': true,
+            },
+        };
     });
 
     afterEach(() => {

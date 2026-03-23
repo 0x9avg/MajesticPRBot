@@ -17,7 +17,8 @@ from datetime import datetime, timedelta
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import Config, Database
+from config import Config
+from db import Database
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

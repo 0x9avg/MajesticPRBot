@@ -19,7 +19,7 @@ def _developer_user() -> dict:
         "require_password_change": False,
         "permissions": {
             "monitoring.view": True,
-            "streamers.status.update": True,
+            "media.status.update": True,
         },
     }
 
@@ -30,7 +30,7 @@ async def test_report_service_heartbeat_stores_service_status(build_api_app) -> 
         current_service={
             "principal_type": "service",
             "service_name": "twitch_service",
-            "permissions": {"streamers.status.update": True},
+            "permissions": {"media.status.update": True},
         },
     )
 

@@ -6,21 +6,14 @@ import { CustomSelect } from '../../../components/CustomInputs';
 import NotificationToast from '../../../components/feedback/NotificationToast';
 import { usePopupToast } from '../../../components/feedback/hooks';
 import { useOutletContext } from 'react-router-dom';
-import type { KnownRole, OutletUserContext } from '../../../types/auth';
+import type { KnownRole, OutletUserContext, UserContext } from '../../../types/auth';
 import { getApiErrorMessage } from '../../../types/api';
 import { apiFetch } from '../../../api/client';
 
 void React;
 
 type Role = KnownRole;
-
-const ROLE_RANK: Record<Role, number> = {
-    junior_employee: 0,
-    employee: 1,
-    senior_employee: 2,
-    manager: 3,
-    developer: 4,
-};
+type UserWithManageableRoles = UserContext & { manageable_roles?: Role[] };
 
 const ROLE_LABELS: Record<Role, string> = {
     junior_employee: 'Младший ассистент',
@@ -28,21 +21,6 @@ const ROLE_LABELS: Record<Role, string> = {
     senior_employee: 'Старший ассистент',
     manager: 'Глава ассистентов',
     developer: 'Разработчик',
-};
-
-const ALL_ROLES = Object.keys(ROLE_RANK) as Role[];
-
-const getAllowedRoles = (userRole?: Role, canRegisterUsers?: boolean): Role[] => {
-    if (!canRegisterUsers || !userRole || ROLE_RANK[userRole] === undefined) {
-        return [];
-    }
-
-    if (userRole === 'developer') {
-        return ALL_ROLES;
-    }
-
-    const creatorRank = ROLE_RANK[userRole];
-    return ALL_ROLES.filter((role) => ROLE_RANK[role] < creatorRank);
 };
 
 const UserRegistration = () => {
@@ -60,9 +38,9 @@ const UserRegistration = () => {
     const [createdUser, setCreatedUser] = useState<{ username: string, password: string } | null>(null);
     const [copied, setCopied] = useState(false);
 
-    const currentUserRole = user?.role as KnownRole | undefined;
     const canRegisterUsers = user?.permissions?.['admin.users.create'] === true;
-    const allowedRoles = getAllowedRoles(currentUserRole, canRegisterUsers);
+    const manageableRoles = ((user as UserWithManageableRoles | null)?.manageable_roles ?? []).filter(Boolean) as Role[];
+    const allowedRoles = canRegisterUsers ? manageableRoles : [];
     const roleOptions = allowedRoles.map((role) => ({
         value: role,
         label: ROLE_LABELS[role]

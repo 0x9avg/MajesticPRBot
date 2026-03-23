@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {Config.app_name} (env={Config.env})...")
 
     # Initialize database
-    from database import Database
+    from db import Database
 
     app.state.database = Database(
         db_host=Config.db_host,

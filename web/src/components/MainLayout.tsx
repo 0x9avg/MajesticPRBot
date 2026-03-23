@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import type { Assistant } from '../types/domain';
 import type { UserContext } from '../types/auth';
 import { unwrapApiData } from '../types/api';
-import { apiFetch, setAccessToken, onLogout } from '../api/client';
+import { apiFetch, clearSiteMaintenanceState, setAccessToken, onLogout, readSiteMaintenanceMessage } from '../api/client';
 
 void React;
 
@@ -24,6 +24,7 @@ export default function MainLayout() {
             setAccessToken(null);
             localStorage.removeItem('refresh_token');
             localStorage.removeItem('user');
+            clearSiteMaintenanceState();
             setUser(null);
             setAuthResolved(true);
             navigate('/login', { replace: true });
@@ -36,6 +37,15 @@ export default function MainLayout() {
             try {
                 // 1. Get Base User Info (uses apiFetch for silent refresh)
                 const authRes = await apiFetch('/api/auth/me');
+                const nextMaintenanceMessage = await readSiteMaintenanceMessage(authRes);
+
+                if (nextMaintenanceMessage) {
+                    navigate('/maintenance', {
+                        replace: true,
+                        state: { message: nextMaintenanceMessage },
+                    });
+                    return;
+                }
 
                 if (authRes.status === 401) {
                     clearAuthAndRedirect();
@@ -44,6 +54,7 @@ export default function MainLayout() {
 
                 if (!authRes.ok) return;
                 const authUser = await authRes.json() as UserContext;
+                clearSiteMaintenanceState();
 
                 // Default to auth info
                 let finalUserData: UserContext = {
@@ -52,40 +63,42 @@ export default function MainLayout() {
                 };
 
                 // 2. Try fetching full assistant data (matches UserProfile logic)
-                try {
-                    // Try by ID first
-                    const assistantRes = await apiFetch(`/api/assistants/${authUser.discord_id}`);
-                    if (assistantRes.ok) {
-                        const json = await assistantRes.json() as unknown;
-                        const assistantData = unwrapApiData<Partial<Assistant>>(json);
-                        if (assistantData) {
-                            finalUserData = {
-                                ...finalUserData,
-                                nickname: assistantData.nickname || finalUserData.nickname,
-                                role: assistantData.role || finalUserData.role,
-                            };
-                        }
-                    } else {
-                        // Fallback: Try finding by nickname
-                        const allRes = await apiFetch('/api/assistants');
-                        if (allRes.ok) {
-                            const allJson = await allRes.json() as unknown;
-                            const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
-                            const normalized = Array.isArray(allData) ? allData : allData.assistants;
-                            const found = normalized.find((assistant) =>
-                                assistant.nickname.toLowerCase() === authUser.nickname.toLowerCase()
-                            );
-                            if (found) {
+                if (finalUserData.permissions?.['assistants.view'] === true) {
+                    try {
+                        // Try by ID first
+                        const assistantRes = await apiFetch(`/api/assistants/${authUser.discord_id}`);
+                        if (assistantRes.ok) {
+                            const json = await assistantRes.json() as unknown;
+                            const assistantData = unwrapApiData<Partial<Assistant>>(json);
+                            if (assistantData) {
                                 finalUserData = {
                                     ...finalUserData,
-                                    nickname: found.nickname || finalUserData.nickname,
-                                    role: found.role || finalUserData.role,
+                                    nickname: assistantData.nickname || finalUserData.nickname,
+                                    role: assistantData.role || finalUserData.role,
                                 };
                             }
+                        } else {
+                            // Fallback: Try finding by nickname
+                            const allRes = await apiFetch('/api/assistants');
+                            if (allRes.ok) {
+                                const allJson = await allRes.json() as unknown;
+                                const allData = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(allJson);
+                                const normalized = Array.isArray(allData) ? allData : allData.assistants;
+                                const found = normalized.find((assistant) =>
+                                    assistant.nickname.toLowerCase() === authUser.nickname.toLowerCase()
+                                );
+                                if (found) {
+                                    finalUserData = {
+                                        ...finalUserData,
+                                        nickname: found.nickname || finalUserData.nickname,
+                                        role: found.role || finalUserData.role,
+                                    };
+                                }
+                            }
                         }
+                    } catch (e) {
+                        console.warn("Failed to fetch extended assistant data", e);
                     }
-                } catch (e) {
-                    console.warn("Failed to fetch extended assistant data", e);
                 }
 
                 // Update state
@@ -111,6 +124,7 @@ export default function MainLayout() {
             setAccessToken(null);
             localStorage.removeItem('refresh_token');
             localStorage.removeItem('user');
+            clearSiteMaintenanceState();
             setUser(null);
             setAuthResolved(true);
             navigate('/login', { replace: true });

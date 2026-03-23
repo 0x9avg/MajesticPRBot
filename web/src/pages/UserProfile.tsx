@@ -5,6 +5,7 @@ import type { Assistant, AssistantLog } from '../types/domain';
 import { unwrapApiData } from '../types/api';
 import { formatMskToLocal } from '../utils/datetime';
 import { formatDocumentTitle } from '../utils/documentTitle';
+import { formatAssistantWarnings } from '../utils/warnings';
 import { apiFetch } from '../api/client';
 
 export default function UserProfile() {
@@ -17,8 +18,14 @@ export default function UserProfile() {
 
     const fetchAssistantData = async (targetId: string | number) => {
         const assistantRes = await apiFetch(`/api/assistants/${targetId}`);
-        if (!assistantRes.ok) {
+        if (assistantRes.status === 403) {
+            throw new Error('Недостаточно прав для просмотра PR-профиля.');
+        }
+        if (assistantRes.status === 404) {
             return null;
+        }
+        if (!assistantRes.ok) {
+            throw new Error('Ошибка загрузки данных профиля.');
         }
         const json = await assistantRes.json() as unknown;
         return unwrapApiData<Assistant>(json);
@@ -37,6 +44,9 @@ export default function UserProfile() {
     useEffect(() => {
         const fetchData = async () => {
             try {
+                setError(null);
+                setUser(null);
+                setLogs([]);
                 // Target ID must be present in the new route design (/assistants/:id)
                 const targetId = id;
                 if (!targetId) {
@@ -46,25 +56,34 @@ export default function UserProfile() {
                 }
 
                 let assistantData: Assistant | null = null;
+                let nextError: string | null = null;
 
                 try {
                     assistantData = await fetchAssistantData(targetId);
                 } catch (e) {
-                    console.warn("Failed to fetch assistant data", e);
+                    if (e instanceof Error) {
+                        nextError = e.message;
+                    } else {
+                        nextError = 'Ошибка загрузки данных профиля.';
+                    }
                 }
 
-                if (assistantData) {
+                if (assistantData && !nextError) {
                     setUser(assistantData);
                     // 2. Fetch Logs
                     const assistantLogs = await fetchAssistantLogs(assistantData.pr_id);
                     setLogs(assistantLogs);
-                } else {
-                    setError('PR-профиль не найден. Возможно, ваш Discord ID не привязан к базе ассистентов.');
+                } else if (!assistantData && !nextError) {
+                    nextError = 'PR-профиль не найден.';
+                }
+
+                if (nextError) {
+                    setError(nextError);
                 }
 
             } catch (e: unknown) {
                 console.error(e);
-                setError('Ошибка загрузки данных профиля');
+                setError('Ошибка загрузки данных профиля.');
             } finally {
                 setLoading(false);
             }
@@ -105,7 +124,10 @@ export default function UserProfile() {
         );
     }
 
-    const warningsDisplay = user.active_warnings_display ?? '0/2 0/2';
+    const warningsDisplay = formatAssistantWarnings(
+        user.active_strict_warnings,
+        user.active_oral_warnings,
+    );
     const grossPoints = user.gross_points ?? 0;
     const netPoints = user.net_points ?? grossPoints;
     const activePointPenalty = user.active_point_penalty ?? 0;

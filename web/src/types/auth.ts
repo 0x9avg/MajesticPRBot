@@ -19,6 +19,7 @@ export interface UserContext {
     role: Role;
     require_password_change: boolean;
     permissions: Permissions;
+    manageable_roles?: string[];
 }
 
 export interface OutletUserContext {

@@ -96,6 +96,35 @@ describe('Login', () => {
         expect(navigateMock).not.toHaveBeenCalled();
     });
 
+    it('navigates to maintenance when login itself returns 503 SITE_MAINTENANCE', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    detail: {
+                        code: 'SITE_MAINTENANCE',
+                        message: 'На сайте идут технические работы',
+                    },
+                }),
+                { status: 503, headers: { 'Content-Type': 'application/json' } }
+            )
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const ui = userEvent.setup();
+        render(<Login />);
+
+        await ui.type(screen.getByPlaceholderText('Введите логин...'), 'tester');
+        await ui.type(screen.getByPlaceholderText('••••••••'), 'secret');
+        await ui.click(screen.getByRole('button', { name: 'Войти в систему' }));
+
+        await waitFor(() => {
+            expect(navigateMock).toHaveBeenCalledWith('/maintenance', {
+                replace: true,
+                state: { message: 'На сайте идут технические работы' },
+            });
+        });
+    });
+
     it('clears auth and shows session message when /auth/me returns 401', async () => {
         setAccessToken(buildAccessToken());
         localStorage.setItem('refresh_token', 'old-refresh');
@@ -132,5 +161,45 @@ describe('Login', () => {
         expect(localStorage.getItem('refresh_token')).toBeNull();
         expect(localStorage.getItem('user')).toBeNull();
         expect(navigateMock).not.toHaveBeenCalled();
+    });
+
+    it('navigates to maintenance when /auth/me responds with 503 SITE_MAINTENANCE after successful login', async () => {
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce(
+                new Response(
+                    JSON.stringify({ access_token: buildAccessToken(), refresh_token: 'refresh-3' }),
+                    { status: 200, headers: { 'Content-Type': 'application/json' } }
+                )
+            )
+            .mockResolvedValueOnce(
+                new Response(
+                    JSON.stringify({
+                        detail: {
+                            code: 'SITE_MAINTENANCE',
+                            message: 'На сайте идут технические работы',
+                        },
+                    }),
+                    { status: 503, headers: { 'Content-Type': 'application/json' } }
+                )
+            );
+
+        vi.stubGlobal('fetch', fetchMock);
+
+        const ui = userEvent.setup();
+        render(<Login />);
+
+        await ui.type(screen.getByPlaceholderText('Введите логин...'), 'tester');
+        await ui.type(screen.getByPlaceholderText('••••••••'), 'secret');
+        await ui.click(screen.getByRole('button', { name: 'Войти в систему' }));
+
+        await waitFor(() => {
+            expect(navigateMock).toHaveBeenCalledWith('/maintenance', {
+                replace: true,
+                state: { message: 'На сайте идут технические работы' },
+            });
+        });
+
+        expect(screen.queryByText('Сессия недействительна. Выполните вход снова.')).not.toBeInTheDocument();
     });
 });

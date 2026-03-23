@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from database import Database
+from db import Database
+from services.rbac import build_dense_service_permission_map, get_default_role_permissions
 
 
 def test_database_exposes_get_assistant_logs_coroutine() -> None:
@@ -13,6 +15,202 @@ def test_database_exposes_get_assistant_logs_coroutine() -> None:
 
     assert method is not None
     assert inspect.iscoroutinefunction(method)
+
+
+def test_database_exposes_batch_workoff_reader_helper() -> None:
+    method = getattr(Database, "_get_batch_workoff_items_locked", None)
+
+    assert method is not None
+    assert inspect.iscoroutinefunction(method)
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_enqueue_outbox_messages_with_cursor",
+        "_ensure_monthly_policy_row",
+        "_get_day_manual_status_locked",
+        "_get_day_spec_metrics_locked",
+        "_get_points_config",
+        "_get_probation_rate",
+    ),
+)
+def test_database_exposes_cross_mixin_helper_coroutines(helper_name: str) -> None:
+    method = getattr(Database, helper_name, None)
+
+    assert method is not None
+    assert inspect.iscoroutinefunction(method)
+
+
+def test_database_normalize_manual_status_uses_canonical_weekly_rules() -> None:
+    assert Database._normalize_manual_status(None) is None
+    assert Database._normalize_manual_status(" none ") is None
+    assert Database._normalize_manual_status("u") == "U"
+    assert Database._normalize_manual_status("invalid") is None
+
+
+def test_default_role_permissions_match_canonical_admin_bundles() -> None:
+    permissions = get_default_role_permissions()
+
+    junior = permissions["junior_employee"]
+    assert junior["dashboard.view"] is True
+    assert junior["assistants.view"] is True
+    assert junior["assistants.logs.view"] is True
+    assert junior["logs.assistant_actions.view"] is True
+    assert junior["returns.process"] is True
+    assert junior["complaints.issue"] is True
+    assert junior["removals.issue"] is True
+    assert junior["spec.claim.probation"] is True
+    assert junior["admin.panel.view"] is False
+
+    employee = permissions["employee"]
+    assert employee["assistants.view"] is True
+    assert employee["assistants.logs.view"] is True
+    assert employee["logs.assistant_actions.view"] is True
+    assert employee["returns.process"] is True
+    assert employee["complaints.issue"] is True
+    assert employee["removals.issue"] is True
+    assert employee["spec.claim.probation"] is False
+    assert employee["admin.panel.view"] is False
+
+    senior = permissions["senior_employee"]
+    assert senior["admin.panel.view"] is True
+    assert senior["events.create"] is True
+    assert senior["assistants.view"] is True
+    assert senior["assistants.logs.view"] is True
+    assert senior["logs.assistant_actions.view"] is True
+    assert senior["returns.process"] is True
+    assert senior["complaints.issue"] is True
+    assert senior["removals.issue"] is True
+    assert senior["admin.users.create"] is False
+    assert senior["rbac.view"] is False
+    assert senior["site.maintenance.view"] is False
+
+    manager = permissions["manager"]
+    assert manager["admin.panel.view"] is True
+    assert manager["admin.users.create"] is True
+    assert manager["admin.users.role.update"] is True
+    assert manager["admin.users.deactivate"] is True
+    assert manager["assistants.sessions.manage"] is True
+    assert manager["rbac.view"] is False
+    assert manager["site.maintenance.view"] is False
+    assert manager["maintenance.bypass"] is True
+    assert manager["monitoring.view"] is False
+    assert manager["media.status.update"] is False
+    assert manager["notifications.render"] is False
+
+    developer = permissions["developer"]
+    assert developer["admin.panel.view"] is True
+    assert developer["rbac.view"] is True
+    assert developer["rbac.update"] is True
+    assert developer["site.maintenance.view"] is True
+    assert developer["site.maintenance.update"] is True
+    assert developer["maintenance.bypass"] is True
+    assert developer["monitoring.view"] is True
+    assert developer["media.status.update"] is True
+    assert developer["notifications.render"] is True
+
+
+def test_default_service_permissions_match_built_in_service_scopes() -> None:
+    discord_scope = Database._get_default_service_permissions("discord_service")
+    assert {
+        permission for permission, enabled in discord_scope.items() if enabled
+    } == {
+        "dashboard.view",
+        "media.create",
+        "media.update",
+        "media.delete",
+        "media.status.update",
+        "spec.sessions.self.view",
+        "spec.claim.main",
+        "spec.claim.probation",
+        "spec.unclaim.any",
+        "assistants.view",
+        "assistants.sessions.manage",
+        "events.create",
+        "events.runtime.manage",
+        "events.participation.any.leave",
+        "game_servers.view",
+        "game_servers.settings.update",
+        "game_servers.templates.update",
+        "game_servers.rates.update",
+        "monitoring.view",
+        "notifications.render",
+    }
+
+    twitch_scope = Database._get_default_service_permissions("twitch_service")
+    assert {
+        permission for permission, enabled in twitch_scope.items() if enabled
+    } == {
+        "media.create",
+        "media.status.update",
+        "spec.unclaim.any",
+    }
+
+
+def test_dense_service_permissions_do_not_leak_admin_panel_view() -> None:
+    permissions = build_dense_service_permission_map(
+        {
+            "assistants.sessions.manage": True,
+            "monitoring.view": True,
+            "game_servers.settings.update": True,
+        }
+    )
+
+    assert permissions["assistants.sessions.view"] is True
+    assert permissions["assistants.view"] is True
+    assert permissions["game_servers.settings.view"] is True
+    assert permissions["game_servers.view"] is True
+    assert permissions["admin.panel.view"] is False
+
+
+@pytest.mark.anyio
+async def test_init_default_service_principals_reconciles_builtin_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = _DummyCursor()
+    conn = _DummyConn(cursor)
+    db = Database(
+        db_host="localhost",
+        db_port=3306,
+        db_user="root",
+        db_password="root",
+        db_name="test",
+        logger=_DummyLogger(),
+    )
+    db.pool = _DummyPool(conn)
+
+    monkeypatch.setattr(
+        db,
+        "_configured_service_tokens",
+        lambda: [("discord_service", "discord-service-token")],
+    )
+
+    async def _column_exists(*_args, **_kwargs) -> bool:
+        return True
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(db, "_column_exists", _column_exists)
+    monkeypatch.setattr(db, "_migrate_service_principals_hash_only", _noop)
+
+    await db._init_default_service_principals(conn)
+
+    insert_sql, params = next(
+        (sql, params)
+        for sql, params in cursor.executed
+        if "INSERT INTO service_principals" in sql
+    )
+    assert insert_sql
+    assert params is not None
+
+    reconciled = json.loads(params[2])
+    assert reconciled["dashboard.view"] is True
+    assert reconciled["media.status.update"] is True
+    assert reconciled["assistants.logs.view"] is False
+    assert reconciled["events.spec_requests.review"] is False
+    assert reconciled["admin.panel.view"] is False
 
 
 def test_plan_service_principal_token_hash_dedup_prefers_configured_keeper() -> None:
@@ -71,7 +269,9 @@ class _DummyCursor:
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple | None]] = []
         self.lastrowid = 0
+        self.rowcount = 0
         self._fetchone_result = None
+        self._fetchall_result = None
 
     async def __aenter__(self):
         return self
@@ -85,6 +285,9 @@ class _DummyCursor:
     async def fetchone(self):
         return self._fetchone_result
 
+    async def fetchall(self):
+        return self._fetchall_result
+
 
 class _DummyConn:
     def __init__(self, cursor: _DummyCursor) -> None:
@@ -97,7 +300,7 @@ class _DummyConn:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def cursor(self) -> _DummyCursor:
+    def cursor(self, *_args, **_kwargs) -> _DummyCursor:
         return self._cursor
 
     async def commit(self) -> None:
@@ -168,7 +371,7 @@ async def test_get_service_principal_by_token_uses_hash_only_lookup() -> None:
     expected_hash = Database._hash_service_token(token)
     cursor._fetchone_result = {
         "name": "discord_service",
-        "permissions": {"streamers.view": True},
+        "permissions": {"media.view": True},
         "is_active": 1,
     }
 
@@ -177,10 +380,42 @@ async def test_get_service_principal_by_token_uses_hash_only_lookup() -> None:
     assert principal is not None
     assert principal["principal_type"] == "service"
     assert principal["service_name"] == "discord_service"
-    assert principal["permissions"]["streamers.view"] is True
+    assert principal["permissions"]["media.view"] is True
     assert cursor.executed
     _, params = cursor.executed[0]
     assert params == (expected_hash,)
+
+
+@pytest.mark.anyio
+async def test_list_pending_outbox_messages_parses_payload_with_dict_cursor() -> None:
+    cursor = _DummyCursor()
+    conn = _DummyConn(cursor)
+    db = Database(
+        db_host="localhost",
+        db_port=3306,
+        db_user="root",
+        db_password="root",
+        db_name="test",
+        logger=_DummyLogger(),
+    )
+    db.pool = _DummyPool(conn)
+    cursor._fetchall_result = [
+        {
+            "id": 1,
+            "routing_key": "test.key",
+            "payload": '{"value": 1}',
+            "attempts": 0,
+            "created_at": "2026-03-22T00:00:00",
+        }
+    ]
+
+    messages = await db.list_pending_outbox_messages(limit=5)
+
+    assert len(messages) == 1
+    assert messages[0]["payload"] == {"value": 1}
+    assert cursor.executed
+    _, params = cursor.executed[0]
+    assert params == (5,)
 
 
 @pytest.mark.anyio
@@ -210,10 +445,10 @@ async def test_create_manual_spec_session_uses_admin_closed_end_reason() -> None
     async def _recalculate_assistant_sanction_derivations(**_kwargs):
         return None
 
-    db.get_points_config = _get_points_config
+    db._get_points_config = _get_points_config
     db._get_probation_rate = _get_probation_rate
     db._recalc_session_points_delta = _recalc_session_points_delta
-    db.recalculate_assistant_sanction_derivations = (
+    db._recalculate_assistant_sanction_derivations = (
         _recalculate_assistant_sanction_derivations
     )
 
@@ -268,3 +503,55 @@ async def test_create_event_stages_outbox_message_before_commit() -> None:
     insert_sqls = [sql for sql, _params in cursor.executed]
     assert any("INSERT INTO events" in sql for sql in insert_sqls)
     assert any("INSERT INTO broker_outbox" in sql for sql in insert_sqls)
+
+
+@pytest.mark.anyio
+async def test_update_punishment_return_returns_existing_record_on_noop_update() -> None:
+    cursor = _DummyCursor()
+    cursor.rowcount = 0
+    conn = _DummyConn(cursor)
+    db = Database(
+        db_host="localhost",
+        db_port=3306,
+        db_user="root",
+        db_password="root",
+        db_name="test",
+        logger=_DummyLogger(),
+    )
+    db.pool = _DummyPool(conn)
+
+    expected = {
+        "id": 15,
+        "punishment_type": "mute",
+        "static": 27253,
+        "server": 14,
+        "duration": 60,
+        "remove_reason": "На видео",
+        "discord_message_url": None,
+        "removed_by_id": 1001,
+        "removed_by_name": "Creator",
+        "removed_at": datetime.now(timezone.utc),
+        "claimed_by_id": None,
+        "claimed_by_name": None,
+        "claimed_at": None,
+        "completed_by_id": None,
+        "completed_by_name": None,
+        "completed_at": None,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    async def _get_punishment_return(return_id: int):
+        if int(return_id) == 15:
+            return expected
+        return None
+
+    db.get_punishment_return = _get_punishment_return  # type: ignore[method-assign]
+
+    result = await db.update_punishment_return(15, {"duration": 60})
+
+    assert result == expected
+    assert conn.committed is True
+    assert cursor.executed
+    assert "UPDATE punishment_returns" in cursor.executed[0][0]

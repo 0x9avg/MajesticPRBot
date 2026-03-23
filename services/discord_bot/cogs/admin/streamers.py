@@ -15,11 +15,11 @@ from disnake import MessageInteraction
 from disnake.ext import commands
 from utils import handle_interaction_error, safe_defer
 
-STREAMERS_SECTION_PERMS = ["streamers.create", "streamers.update", "streamers.delete"]
-STREAMERS_ADD_PERMS = ["streamers.create"]
-STREAMERS_EDIT_PERMS = ["streamers.update"]
-STREAMERS_DELETE_PERMS = ["streamers.delete"]
-STREAMERS_LIST_PERMS = ["streamers.view"]
+STREAMERS_SECTION_PERMS = ["media.create", "media.update", "media.delete"]
+STREAMERS_ADD_PERMS = ["media.create"]
+STREAMERS_EDIT_PERMS = ["media.update"]
+STREAMERS_DELETE_PERMS = ["media.delete"]
+STREAMERS_LIST_PERMS = ["media.view"]
 
 # =============================================================================
 # Streamers Embed

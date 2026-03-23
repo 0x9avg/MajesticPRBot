@@ -16,6 +16,20 @@ type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' 
 const ACTION_TRANSLATIONS: Record<string, string> = {
     'user.create': 'Создан пользователь',
     'user.update': 'Обновлен пользователь',
+    'media.create': 'Добавлен стример',
+    'media.update': 'Обновлен стример',
+    'media.delete': 'Удален стример',
+    'events.create': 'Создано событие',
+    'events.update': 'Обновлено событие',
+    'assistant.points.update': 'Изменение баллов (Perm)',
+    'assistants.sanctions.manage': 'Обновление санкций',
+    'assistants.warnings.manage': 'Обновление предупреждений',
+    'admin.users.create': 'Создан ассистент',
+    'admin.users.role.update': 'Обновлен ассистент',
+    'returns.process': 'Обновлен возврат',
+    'returns.queue.view': 'Удален возврат',
+    'rbac.update': 'Обновление прав',
+    'site.maintenance.update': 'Обновление прав',
     'streamer.add': 'Добавлен стример',
     'streamer.update': 'Обновлен стример',
     'streamer.remove': 'Удален стример',
@@ -33,6 +47,7 @@ const ACTION_TRANSLATIONS: Record<string, string> = {
     'system.maintenance.enable': 'Включение тех. работ',
     'system.maintenance.disable': 'Выключение тех. работ',
     'rbac.matrix.update': 'Обновление прав',
+    'site.permissions.update': 'Обновление прав',
 };
 
 interface PRActionLogItem {
@@ -130,7 +145,8 @@ export function SpectateLogs() {
     const [prLogsTotal, setPrLogsTotal] = React.useState(0);
 
     // Assistants list for filter
-    const [assistantsList, setAssistantsList] = React.useState<AssistantOption[]>([]);
+    const [assistantFilters, setAssistantFilters] = React.useState<AssistantOption[]>([]);
+    const assistantFiltersLoadedRef = React.useRef(false);
 
     // PR Logs Filters
     const [prFilters, setPrFilters] = React.useState({
@@ -174,27 +190,31 @@ export function SpectateLogs() {
 
     // ==================== PR Action Logs Logic ====================
 
-    // Load assistants list for filter dropdown
     React.useEffect(() => {
+        if (activeTab !== 'assistants' || assistantFiltersLoadedRef.current) {
+            return;
+        }
+
         const loadAssistants = async () => {
             try {
-                const res = await apiFetch('/api/assistants');
+                const res = await apiFetch('/api/logs/assistant-actions/filters');
+                const json = await res.json().catch(() => ({} as unknown));
                 if (res.ok) {
-                    const json = await res.json() as unknown;
-                    const data = unwrapApiData<AssistantOption[]>(json);
-                    if (Array.isArray(data)) {
-                        setAssistantsList(data.map(a => ({
-                            pr_id: String(a.pr_id),
-                            nickname: a.nickname || String(a.pr_id)
-                        })));
-                    }
+                    const data = unwrapApiData<{ assistants?: AssistantOption[] }>(json);
+                    const list = Array.isArray(data?.assistants) ? data.assistants : [];
+                    setAssistantFilters(list.map((assistant) => ({
+                        pr_id: String(assistant.pr_id),
+                        nickname: assistant.nickname || String(assistant.pr_id),
+                    })));
                 }
             } catch (e) {
                 console.error('Failed to load assistants list:', e);
+            } finally {
+                assistantFiltersLoadedRef.current = true;
             }
         };
         void loadAssistants();
-    }, []);
+    }, [activeTab]);
 
     const fetchPrLogs = React.useCallback(async (page: number) => {
         setPrLogsLoading(true);
@@ -281,7 +301,7 @@ export function SpectateLogs() {
     // Filter options
     const assistantOptions = [
         { value: '', label: 'Все ассистенты' },
-        ...assistantsList.map(a => ({ value: a.pr_id, label: a.nickname }))
+        ...assistantFilters.map((assistant) => ({ value: assistant.pr_id, label: assistant.nickname }))
     ];
 
     const priorityOptions = [
@@ -403,6 +423,7 @@ export function SpectateLogs() {
         { value: 'system.maintenance.enable', label: 'system.maintenance.enable' },
         { value: 'system.maintenance.disable', label: 'system.maintenance.disable' },
         { value: 'rbac.matrix.update', label: 'rbac.matrix.update' },
+        { value: 'site.permissions.update', label: 'site.permissions.update' },
     ];
 
     const kindOptions = [
@@ -890,7 +911,7 @@ export function SpectateLogs() {
                                                                         onClick={(e) => { e.stopPropagation(); navigate(`/assistants/${log.target_id}`); }}
                                                                         className="font-bold text-white/90 hover:text-blue-400 hover:underline transition-colors cursor-pointer text-left"
                                                                     >
-                                                                        {assistantsList.find(a => a.pr_id === log.target_id)?.nickname || log.target_name || log.target_id}
+                                                                        {assistantFilters.find((assistant) => assistant.pr_id === log.target_id)?.nickname || log.target_name || log.target_id}
                                                                     </button>
                                                                 ) : (
                                                                     <span className="font-bold text-white/90">

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
 
 import math
 from typing import Any, Dict, List, Optional
@@ -87,6 +87,31 @@ async def get_admin_logs(
     )
 
 
+@router.get("/assistant-actions/filters")
+async def get_assistant_action_filters(
+    request: Request,
+    db: "Database" = Depends(get_db),
+    _principal: dict = Depends(require_permission("logs.assistant_actions.view")),
+):
+    trace_id = get_trace_id(request)
+    assistants = await db.list_assistant_identities()
+    payload = [
+        {
+            "pr_id": str(item.get("pr_id")),
+            "nickname": item.get("nickname"),
+        }
+        for item in assistants
+        if item.get("pr_id") is not None
+    ]
+    return JSONResponse(
+        content=success_envelope(
+            data={"assistants": payload},
+            message="Assistant action filters loaded",
+            trace_id=trace_id,
+        )
+    )
+
+
 @router.get("/pr-actions")
 async def get_pr_action_logs(
     request: Request,
@@ -99,7 +124,7 @@ async def get_pr_action_logs(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     db: "Database" = Depends(get_db),
-    _principal: dict = Depends(require_permission("logs.pr_actions.view")),
+    _principal: dict = Depends(require_permission("logs.assistant_actions.view")),
 ):
     """
     Get PR action logs (claims/unclaims) with pagination and filtering.

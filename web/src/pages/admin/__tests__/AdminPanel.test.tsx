@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { UserContext } from '../../../types/auth';
@@ -17,7 +18,9 @@ vi.mock('react-router-dom', async () => {
 vi.mock('../components/UserRegistration', () => ({ default: () => <div>UserRegistration</div> }));
 vi.mock('../components/MediaRegistration', () => ({ default: () => <div>MediaRegistration</div> }));
 vi.mock('../components/CreateEvent', () => ({ default: () => <div>CreateEvent</div> }));
-vi.mock('../components/SiteManagement', () => ({ default: () => <div>SiteManagement</div> }));
+vi.mock('../components/SiteManagement', () => ({ default: () => <div>GameServersManagement</div> }));
+vi.mock('../components/RbacManagement', () => ({ default: () => <div>RbacManagement</div> }));
+vi.mock('../components/SiteMaintenanceManagement', () => ({ default: () => <div>SiteMaintenanceManagement</div> }));
 vi.mock('../components/SystemInfo', () => ({ default: () => <div>SystemInfo</div> }));
 vi.mock('../components/AssistantsManagement', () => ({ default: () => <div>AssistantsManagement</div> }));
 vi.mock('../components/PendingRequests', () => ({ default: () => <div>PendingRequests</div> }));
@@ -36,7 +39,8 @@ describe('AdminPanel', () => {
             role: 'manager',
             require_password_change: false,
             permissions: {
-                'assistants.sessions.manage': true,
+                'admin.panel.view': true,
+                'assistants.view': true,
             },
         };
 
@@ -45,5 +49,38 @@ describe('AdminPanel', () => {
         expect(screen.getByRole('button', { name: 'Ассистенты' })).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Недельная статистика' })).not.toBeInTheDocument();
         expect(screen.getByText('AssistantsManagement')).toBeInTheDocument();
+    });
+
+    it('renders split admin tabs for RBAC and maintenance surfaces', async () => {
+        mockedUser = {
+            id: '7',
+            discord_id: '7001',
+            username: 'developer',
+            nickname: 'Developer',
+            role: 'developer',
+            require_password_change: false,
+            permissions: {
+                'admin.panel.view': true,
+                'game_servers.settings.view': true,
+                'rbac.view': true,
+                'site.maintenance.view': true,
+            },
+        };
+
+        const ui = userEvent.setup();
+        render(<AdminPanel />);
+
+        expect(screen.getByRole('button', { name: 'Игровые сервера' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'RBAC' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Тех. работы' })).toBeInTheDocument();
+        expect(screen.getByText('GameServersManagement')).toBeInTheDocument();
+
+        await ui.click(screen.getByRole('button', { name: 'RBAC' }));
+
+        expect(screen.getByText('RbacManagement')).toBeInTheDocument();
+
+        await ui.click(screen.getByRole('button', { name: 'Тех. работы' }));
+
+        expect(screen.getByText('SiteMaintenanceManagement')).toBeInTheDocument();
     });
 });

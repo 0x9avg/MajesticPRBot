@@ -1,123 +1,133 @@
 # PRMajesticBot
 
-Интеграционный бот Discord и Twitch для мониторинга стримеров и управления PR-активностью (Majestic RP).
+PRMajesticBot — микросервисная система для PR-команды Majestic RP. В проект входят web-панель, центральный API, Discord и Twitch боты, санкционный worker и инфраструктурный event-driven контур на MySQL и RabbitMQ.
 
-## 🎯 Возможности
+## Что это за система
 
-- **Мониторинг стримов**: Отслеживание статуса (Online/Offline), смены категории (GTA 5 <-> Other) и заголовков.
-- **Управление персоналом (PR)**:
-  - Система ролей (Junior, Senior, Manager).
-  - Учет рабочего времени (Spec Sessions).
-  - Автоматический расчет баллов и статистика.
-- **Ивенты**: Создание и управление событиями с отслеживанием участия.
-- **Умные уведомления**: Гибкая настройка каналов для анонсов и отчетов.
-- **Веб-панель**: Полноценный Dashboard для управления системой без команд Discord.
+Проект закрывает несколько рабочих областей одной платформой:
 
-## 📋 Требования
+- мониторинг и ведение Twitch-стримеров;
+- spec-сессии и event workflows;
+- web-auth и RBAC;
+- workflows по возвратам, жалобам и снятиям;
+- weekly review и санкционный контур.
 
-- **Python 3.12+**: Бэкенд-сервисы (API, Bots).
-- **Node.js 20+**: Фронтенд (React 19).
-- **MySQL 8.0+ / MariaDB 10.5+**: Основная база данных.
-- **RabbitMQ**: Брокер сообщений для событий.
+Главный архитектурный принцип: источник правды находится в API и MySQL. Боты и web не владеют доменным состоянием, а работают через API и broker events.
 
-## 🚀 Установка и Запуск
+## Состав системы
 
-> [!WARNING]
-> Проект использует микросервисную архитектуру. Все компоненты должны быть запущены одновременно.
-> Автоматический лаунчер `start_project.bat` временно не поддерживается/требует доработки. Рекомендуется ручной запуск.
+| Компонент | Назначение |
+| --- | --- |
+| `web` | React-панель управления |
+| `api` | Центральный FastAPI backend, auth, бизнес-логика, schema bootstrap |
+| `sanctions_worker` | Отдельный worker для queued/nightly санкций |
+| `discord_bot` | Discord UI, команды, панели, уведомления |
+| `twitch_bot` | Twitch EventSub, streamer verification, live-state sync |
+| `mysql` | Основная база данных |
+| `rabbitmq` | Broker для интеграционных событий и фоновых команд |
 
-### 1. Подготовка
-Клонируйте репозиторий и настройте переменные окружения для каждого сервиса, скопировав `example.env` в `.env`:
+## Как читать документацию
+
+Документация теперь устроена так: корневой `README.md` это единственная точка входа, а в `docs/` лежат только тематические документы без дублирующего индекса.
+
+Если вы впервые открыли проект:
+
+1. Прочитайте [docs/architecture.md](docs/architecture.md), чтобы понять состав системы.
+2. Затем откройте [docs/local-development.md](docs/local-development.md), если вам нужен локальный запуск.
+3. После этого переходите к [docs/domain-flows.md](docs/domain-flows.md), чтобы понять реальные прикладные сценарии.
+4. Для интеграции с API используйте [docs/api-reference.md](docs/api-reference.md).
+5. Для production deploy и эксплуатации используйте [docs/production-deployment.md](docs/production-deployment.md) и [docs/operations.md](docs/operations.md).
+
+## Карта документации
+
+| Файл | Что в нем должно быть |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | Границы сервисов, ownership состояния, каналы взаимодействия, ключевые паттерны |
+| [docs/local-development.md](docs/local-development.md) | Локальное окружение, `.env`, ручной запуск, dev workflow, тесты |
+| [docs/production-deployment.md](docs/production-deployment.md) | Текущий production stack по `docker-compose.prod.yml`, порты, сети, volumes, bootstrap |
+| [docs/domain-flows.md](docs/domain-flows.md) | Прикладные потоки по доменам: streamers, spec, events, auth, workflows, sanctions |
+| [docs/api-reference.md](docs/api-reference.md) | HTTP endpoint catalog, auth-модели, response shapes |
+| [docs/operations.md](docs/operations.md) | Health, readiness, heartbeats, tracing, логи и troubleshooting |
+
+## Быстрый локальный старт
+
+1. Создайте env-файлы для Docker-контура:
+
+```bash
+cp deploy/env/api.env.example deploy/env/api.env
+cp deploy/env/discord_bot.env.example deploy/env/discord_bot.env
+cp deploy/env/twitch_bot.env.example deploy/env/twitch_bot.env
+cp deploy/env/mysql.env.example deploy/env/mysql.env
+cp deploy/env/rabbitmq.env.example deploy/env/rabbitmq.env
+cp deploy/env/web.env.example deploy/env/web.env
+```
+
+2. Создайте сервисные `.env` для ручного запуска:
+
 - `services/api/.env`
 - `services/discord_bot/.env`
 - `services/twitch_bot/.env`
 
-Критичный auth-контракт для сервисов:
-- В API должен быть задан `SERVICE_TOKENS` строго в формате `discord_service:<token>,twitch_service:<token>`.
-- `services/discord_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `discord_service:<token>`.
-- `services/twitch_bot/.env:SERVICE_TOKEN` должен совпадать с токеном из `twitch_service:<token>`.
+3. Поднимите инфраструктуру:
 
-Fail-fast настройки запуска:
-- API требует явные `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JWT_SECRET_KEY`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`, `SERVICE_TOKENS`.
-- Discord Bot требует явные `DISCORD_TOKEN`, `GUILD_ID`, `API_BASE_URL`, `SERVICE_TOKEN`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`.
-- Twitch Bot требует явные `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `TWITCH_BOT_ID`, `API_BASE_URL`, `SERVICE_TOKEN`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`.
-
-### 2. Запуск Сервисов (Ручной режим)
-
-Вам потребуется открыть 4 терминала.
-
-**Терминал 1: API Service** (Ядро системы)
 ```bash
-cd services/api
-# Создание venv (рекомендуется)
-python -m venv venv
-source venv/bin/activate  # на Windows: venv\Scripts\activate
-# Установка зависимостей
-pip install -r requirements.txt
-# Запуск
-python main.py
+docker compose -f docker-compose.prod.yml up -d mysql rabbitmq
 ```
 
-**Терминал 2: Discord Bot**
+4. Запустите прикладные сервисы локально. Для полного контура нужны 5 процессов:
+
+- `api`
+- `sanctions_worker`
+- `discord_bot`
+- `twitch_bot`
+- `web`
+
+Подробные команды и минимальные dev-сценарии описаны в [docs/local-development.md](docs/local-development.md).
+
+## Быстрый production старт
+
 ```bash
-cd services/discord_bot
-# Используйте тот же venv или создайте новый
-source ../api/venv/bin/activate 
-pip install -r requirements.txt
-python main.py
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-**Терминал 3: Twitch Bot**
+Перед этим обязательно подготовьте `deploy/env/*.env`. Точное описание stack behavior, сетей, портов, bootstrap и caveats находится в [docs/production-deployment.md](docs/production-deployment.md).
+
+## Критичные связи конфигурации
+
+- В API переменная `SERVICE_TOKENS` должна быть задана строго в формате `discord_service:<token>,twitch_service:<token>`.
+- `discord_bot` должен использовать тот же token, который указан как `discord_service`.
+- `twitch_bot` должен использовать тот же token, который указан как `twitch_service`.
+- `WEB_PANEL_URL` в API и `SITE_ADDRESS` в web/Caddy должны описывать один и тот же публичный адрес панели.
+
+## Health и логи
+
+Базовые runtime точки:
+
+- API liveness: `GET /api/health`
+- API readiness: `GET /api/health/ready`
+- Runtime overview: `GET /api/services/overview`
+
+Быстрые команды:
+
 ```bash
-cd services/twitch_bot
-source ../api/venv/bin/activate
-pip install -r requirements.txt
-python main.py
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs -f api
+docker compose -f docker-compose.prod.yml logs -f sanctions_worker
+docker compose -f docker-compose.prod.yml logs -f discord_bot
+docker compose -f docker-compose.prod.yml logs -f twitch_bot
+docker compose -f docker-compose.prod.yml logs -f web
 ```
 
-**Терминал 4: Frontend (Web Panel)**
-```bash
-cd web
-npm install
-npm run dev
-```
+Локально логи пишутся в каталог `logs/`. В контейнерах сервисы пишут в `/opt/prmajestic/logs`.
 
-## 🔢 Версионирование
+## Что важно знать заранее
 
-- Единый источник версии проекта: корневой файл `VERSION`.
-- API читает эту версию и отдает ее в `/api/health` и `/api/health/ready`.
-- Веб-панель показывает ту же версию в админке через сборку Vite.
-- Для нового релиза достаточно изменить значение в `VERSION`.
+- Схема БД создаётся и обновляется кодом API на старте.
+- Отдельного Alembic-контура в проекте нет.
+- `sanctions_worker` это самостоятельный runtime-процесс, а не background task внутри API.
+- RabbitMQ нужен для полноценного event-driven контура, even если часть HTTP-функций может отвечать в деградированном manual-run режиме.
+- Единый источник версии проекта — файл `VERSION`.
 
-## 🏗️ Структура
+## Лицензия
 
-Подробное описание архитектуры см. в [ARCHITECTURE.md](ARCHITECTURE.md).
-
-```
-PRMajesticBot/
-├── services/
-│   ├── api/            # FastAPI, Database, Auth
-│   ├── discord_bot/    # Disnake, UI, Interaction
-│   └── twitch_bot/     # TwitchIO, EventSub
-├── web/                # React 19, Vite, Tailwind v4
-└── ...
-```
-
-## 📌 API Контракт (кратко)
-
-- `POST /api/auth/login` выдает access token с `sid` (ID сессии).
-- `POST /api/auth/logout` отзывает сессии пользователя; старые access token после этого невалидны.
-- Клиенты получают общие данные для дашборда (количество стримеров и спеков) через `GET /api/stats/dashboard`.
-- Система поддерживает логику **Pending Spec Requests**: 
-  - Создание запроса: `POST /api/events/spec-request`. 
-  - Получение: `GET /api/events/pending`.
-  - Модерация: `POST /api/events/{id}/approve` или `POST /api/events/{id}/reject`.
-
-## 🔧 Устранение неполадок
-
-- **Ошибка подключения к БД**: Проверьте `DB_HOST`, `DB_USER` и `DB_PASSWORD` в `services/api/.env`. API автоматически создаст таблицы при первом успешном подключении.
-- **RabbitMQ**: Если брокер недоступен, сервисы будут работать в ограниченном режиме (без уведомлений в реальном времени), но API и БД продолжат функционировать.
-- **Frontend**: Если не работает логин, убедитесь, что API запущен на порту, указанном в конфигурации фронтенда (обычно 8000).
-
-## 📝 Лицензия
 Private / Proprietary.

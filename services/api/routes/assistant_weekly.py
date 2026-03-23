@@ -18,7 +18,7 @@ from schemas.assistant_weekly import (
 from schemas.envelope import success_envelope
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
 
 
 router = APIRouter(tags=["Assistant Weekly"])
@@ -85,6 +85,9 @@ def _serialize_summary(
     totals = dict(item.get("totals") or {})
     counts = dict(item.get("counts") or {})
     payout = dict(item.get("payout") or {})
+    payout_server_id = item.get("payout_server_id")
+    if payout_server_id is None:
+        payout_server_id = payout.get("server_id")
 
     days: list[dict[str, Any]] = []
     if include_days:
@@ -123,7 +126,7 @@ def _serialize_summary(
         "count_U": int(counts.get("U") or 0),
         "count_O": int(counts.get("O") or 0),
         "payout_type": item.get("payout_type") or payout.get("type"),
-        "payout_server": item.get("payout_server") or payout.get("server"),
+        "payout_server_id": payout_server_id,
         "payout_static": item.get("payout_static") or payout.get("static"),
         "payout_issue_status": item.get("payout_issue_status") or "pending",
         "payout_issued_at": item.get("payout_issued_at"),
@@ -184,7 +187,6 @@ def _serialize_admin_list_payload(payload: dict[str, Any]) -> dict[str, Any]:
             for option in payout_options.get("types") or []
             if option.get("value")
         ],
-        "payout_servers": list(payout_options.get("servers") or []),
         "result_options": list(payout_options.get("selected_results") or []),
     }
 
@@ -294,7 +296,7 @@ async def save_weekly_assistant_admin_detail(
             ],
             selected_result=data.selected_result,
             payout_type=data.payout_type,
-            payout_server=data.payout_server,
+            payout_server_id=data.payout_server_id,
             payout_static=data.payout_static,
         )
     except ValueError as error:
@@ -343,7 +345,7 @@ async def save_weekly_assistant_admin_detail(
                     "week_start": payload.get("week_start"),
                     "selected_result": data.selected_result,
                     "payout_type": data.payout_type,
-                    "payout_server": data.payout_server,
+                    "payout_server_id": data.payout_server_id,
                     "payout_static": data.payout_static,
                     "day_overrides": [
                         {

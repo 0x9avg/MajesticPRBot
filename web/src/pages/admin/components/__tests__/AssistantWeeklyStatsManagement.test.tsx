@@ -125,7 +125,7 @@ const assistantOne = {
     count_U: 0,
     count_O: 0,
     payout_type: null,
-    payout_server: null,
+    payout_server_id: null,
     payout_static: null,
     payout_issue_status: 'pending',
     payout_issued_at: null,
@@ -152,7 +152,7 @@ const assistantTwo = {
     count_U: 1,
     count_O: 0,
     payout_type: 'MC',
-    payout_server: 'RU2',
+    payout_server_id: 2,
     payout_static: 'static',
     payout_issue_status: 'pending',
     payout_issued_at: null,
@@ -179,15 +179,23 @@ const assistantThree = {
     count_U: 0,
     count_O: 0,
     payout_type: 'Premium',
-    payout_server: 'RU7',
+    payout_server_id: 19,
     payout_static: 'static',
     payout_issue_status: 'issued',
     payout_issued_at: '2026-03-19T14:45:00',
     payout_issued_by_id: '7',
-    generated_payout_command: 'RU7:setvip static 7 pr-assist_byStynee',
+    generated_payout_command: 'RU19:setvip static 7 pr-assist_byStynee',
     generated_payout_available: true,
     generated_payout_reason: null,
 };
+
+const gameServers = [
+    { id: 1, full_name: 'Majestic #1', short_name: '#1', command_name: 'RU1', sort_order: 1, is_active: true },
+    { id: 2, full_name: 'Majestic #2', short_name: '#2', command_name: 'RU2', sort_order: 2, is_active: true },
+    { id: 3, full_name: 'Majestic #3', short_name: '#3', command_name: 'RU3', sort_order: 3, is_active: true },
+    { id: 10, full_name: 'Majestic #10', short_name: '#10', command_name: 'RU10', sort_order: 10, is_active: true },
+    { id: 19, full_name: 'Majestic #19', short_name: '#19', command_name: 'RU19', sort_order: 19, is_active: false },
+];
 
 const adminPayload = {
     week_start: weekStart,
@@ -200,7 +208,6 @@ const adminPayload = {
         { value: 'MC', label: 'MC' },
         { value: 'MONEY', label: 'MONEY' },
     ],
-    payout_servers: ['RU10', 'RU2', 'RU1', 'RU3'],
     result_options: ['Ультра-Актив', 'Актив', 'Актив/Отпуск', 'Инактив', 'Инактив/Отпуск', 'Отпуск', 'Инактив/Актив'],
 };
 
@@ -215,6 +222,10 @@ const createFetchMock = () =>
         const url = String(input);
         const method = (init?.method ?? 'GET').toUpperCase();
 
+        if (url === '/api/game-servers' && method === 'GET') {
+            return ok(gameServers);
+        }
+
         if (url === `/api/assistant-weekly/admin?week_start=${weekStart}`) {
             return ok(adminPayload);
         }
@@ -225,7 +236,7 @@ const createFetchMock = () =>
                 days: makeDays('P'),
                 selected_result: 'Актив',
                 payout_type: 'EXP',
-                payout_server: 'RU1',
+                payout_server_id: 1,
                 payout_static: 'static',
                 payout_issue_status: 'pending',
                 payout_issued_at: null,
@@ -257,7 +268,7 @@ const createFetchMock = () =>
         if (url === `/api/assistant-weekly/admin/103?week_start=${weekStart}` && method === 'PUT') {
             return ok({
                 ...assistantThree,
-                payout_server: 'RU3',
+                payout_server_id: 3,
                 payout_issue_status: 'pending',
                 payout_issued_at: null,
                 payout_issued_by_id: null,
@@ -270,6 +281,8 @@ const createFetchMock = () =>
 
 describe('AssistantWeeklyStatsManagement', () => {
     beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-03-18T12:00:00Z'));
         vi.stubGlobal('localStorage', createLocalStorageMock());
         writeTextMock = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', {
@@ -283,6 +296,7 @@ describe('AssistantWeeklyStatsManagement', () => {
 
     afterEach(() => {
         setAccessToken(null);
+        vi.useRealTimers();
         vi.restoreAllMocks();
         vi.unstubAllGlobals();
     });
@@ -307,6 +321,11 @@ describe('AssistantWeeklyStatsManagement', () => {
             expect(Array.from(payoutServerSelect.options).map((option) => option.text)).toEqual(['Сервер', 'RU1', 'RU2', 'RU3', 'RU10']);
         });
 
+        await waitFor(() => {
+            const payoutServerSelect = screen.getByLabelText('Payout server Closer') as HTMLSelectElement;
+            expect(Array.from(payoutServerSelect.options).map((option) => option.text)).toContain('RU19');
+        });
+
         const testerTuesdayStatus = screen.getByLabelText('Статус дня Tester Вт') as HTMLSelectElement;
         expect(testerTuesdayStatus.value).toBe('inherit');
         expect(Array.from(testerTuesdayStatus.options).map((option) => option.text)).toContain('Авто: П');
@@ -317,6 +336,38 @@ describe('AssistantWeeklyStatsManagement', () => {
             expect(screen.queryByText('Tester')).not.toBeInTheDocument();
             expect(screen.getByText('Helper')).toBeInTheDocument();
         });
+    });
+
+    it('does not restore payout server from legacy payout_server string', async () => {
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            const method = (init?.method ?? 'GET').toUpperCase();
+
+            if (url === '/api/game-servers' && method === 'GET') {
+                return ok(gameServers);
+            }
+
+            if (url === `/api/assistant-weekly/admin?week_start=${weekStart}`) {
+                return ok({
+                    ...adminPayload,
+                    items: [
+                        {
+                            ...assistantOne,
+                            payout_server_id: null,
+                            payout_server: 'RU10',
+                        },
+                    ],
+                });
+            }
+
+            return new Response('{}', { status: 404 });
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<AssistantWeeklyStatsManagement />);
+
+        const payoutServerSelect = await screen.findByLabelText('Payout server Tester') as HTMLSelectElement;
+        expect(payoutServerSelect.value).toBe('');
     });
 
     it('hides empty status badges and applies weekly review filters', async () => {
@@ -385,7 +436,7 @@ describe('AssistantWeeklyStatsManagement', () => {
         await ui.selectOptions(screen.getByLabelText('Статус дня Tester Пн'), 'P');
         await ui.selectOptions(screen.getByLabelText('Selected result Tester'), 'Актив');
         await ui.selectOptions(screen.getByLabelText('Payout type Tester'), 'EXP');
-        await ui.selectOptions(screen.getByLabelText('Payout server Tester'), 'RU1');
+        await ui.selectOptions(screen.getByLabelText('Payout server Tester'), '1');
         await ui.clear(screen.getByLabelText('Payout static Tester'));
         await ui.type(screen.getByLabelText('Payout static Tester'), 'static');
 
@@ -408,14 +459,14 @@ describe('AssistantWeeklyStatsManagement', () => {
         const body = JSON.parse(String((putCall?.[1] as RequestInit | undefined)?.body ?? '{}')) as {
             selected_result: string;
             payout_type: string;
-            payout_server: string;
+            payout_server_id: number | null;
             payout_static: string;
             day_overrides: Array<{ work_date: string; manual_status: string | null; is_manual_override: boolean }>;
         };
 
         expect(body.selected_result).toBe('Актив');
         expect(body.payout_type).toBe('EXP');
-        expect(body.payout_server).toBe('RU1');
+        expect(body.payout_server_id).toBe(1);
         expect(body.payout_static).toBe('static');
         expect(body.day_overrides[0]).toEqual({ work_date: '2026-03-16', manual_status: 'P', is_manual_override: true });
 
@@ -481,7 +532,7 @@ describe('AssistantWeeklyStatsManagement', () => {
             expect(screen.getByRole('button', { name: 'Снять выдачу Closer' })).toBeInTheDocument();
         });
 
-        await ui.selectOptions(screen.getByLabelText('Payout server Closer'), 'RU3');
+        await ui.selectOptions(screen.getByLabelText('Payout server Closer'), '3');
 
         expect(screen.getByText('После сохранения отметка выдачи будет снята')).toBeInTheDocument();
 
@@ -497,6 +548,10 @@ describe('AssistantWeeklyStatsManagement', () => {
         const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
             const url = String(input);
             const method = (init?.method ?? 'GET').toUpperCase();
+
+            if (url === '/api/game-servers' && method === 'GET') {
+                return ok(gameServers);
+            }
 
             if (url === `/api/assistant-weekly/admin?week_start=${weekStart}`) {
                 return ok(adminPayload);

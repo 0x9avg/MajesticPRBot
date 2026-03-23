@@ -1,8 +1,3 @@
-export const RETURN_SERVER_OPTIONS = Array.from({ length: 17 }, (_, index) => ({
-    value: String(index + 1),
-    label: `Majestic #${index + 1}`,
-}));
-
 export const RETURN_REASON_OPTIONS = [
     { value: 'На стрим', label: 'На стрим' },
     { value: 'На видео', label: 'На видео' },
@@ -13,11 +8,8 @@ export const RETURN_PUNISHMENT_OPTIONS = [
     { value: 'mute', label: 'Mute / Unmute' },
 ] as const;
 
-export function formatReturnServerLabel(server: number | string | null | undefined): string {
-    const parsed = Number(server);
-    if (!Number.isFinite(parsed) || parsed < 1) return 'Majestic';
-    return `Majestic #${parsed}`;
-}
+export type ReturnPunishmentType = typeof RETURN_PUNISHMENT_OPTIONS[number]['value'];
+export type ReturnRemoveReason = typeof RETURN_REASON_OPTIONS[number]['value'];
 
 export function formatPunishmentLabel(value: 'jail' | 'mute'): string {
     return value === 'jail' ? 'Jail' : 'Mute';
@@ -25,4 +17,27 @@ export function formatPunishmentLabel(value: 'jail' | 'mute'): string {
 
 export function formatCommandPairLabel(value: 'jail' | 'mute'): string {
     return value === 'jail' ? 'unjail -> ajail' : 'unmute -> mute';
+}
+
+export function buildRemoveCommand(
+    punishmentType: ReturnPunishmentType,
+    staticValue: string | number,
+    removeReason: ReturnRemoveReason,
+    actorName: string,
+): string {
+    const command = punishmentType === 'jail' ? '/unjail' : '/unmute';
+    const resolvedStatic = String(staticValue || '0');
+    return `${command} ${resolvedStatic} ${removeReason} by ${actorName}`;
+}
+
+export function buildReturnCommand(
+    punishmentType: ReturnPunishmentType,
+    staticValue: string | number,
+    durationValue: string | number,
+    actorName: string,
+): string {
+    const command = punishmentType === 'jail' ? '/ajail' : '/mute';
+    const resolvedStatic = String(staticValue || '0');
+    const resolvedDuration = Number(durationValue || 0) * 2;
+    return `${command} ${resolvedStatic} ${resolvedDuration} Возврат наказания by ${actorName}`;
 }

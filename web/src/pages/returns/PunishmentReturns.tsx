@@ -2,6 +2,7 @@ import React from 'react';
 import { ChevronLeft, ChevronRight, Copy, ExternalLink, Filter, History, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { CustomDatePicker, CustomSelect } from '../../components/CustomInputs';
+import { useGameServers } from '../../hooks/useGameServers';
 import ConfirmDialog from '../../components/feedback/ConfirmDialog';
 import NotificationToast from '../../components/feedback/NotificationToast';
 import { useConfirmDialog, usePopupToast } from '../../components/feedback/hooks';
@@ -15,22 +16,25 @@ import type {
 import { unwrapApiData, getApiErrorMessage } from '../../types/api';
 import { apiFetch } from '../../api/client';
 import { formatMskToLocal } from '../../utils/datetime';
+import { buildGameServerOptions, formatGameServerLabel, getDefaultActiveGameServerId } from '../../utils/gameServers';
 import {
+    buildRemoveCommand,
+    buildReturnCommand,
     formatCommandPairLabel,
     formatPunishmentLabel,
-    formatReturnServerLabel,
+    type ReturnPunishmentType,
+    type ReturnRemoveReason,
     RETURN_PUNISHMENT_OPTIONS,
     RETURN_REASON_OPTIONS,
-    RETURN_SERVER_OPTIONS,
 } from './constants';
 
 type ReturnsTab = 'queue' | 'history';
 type ReturnFormState = {
-    punishment_type: 'jail' | 'mute';
+    punishment_type: ReturnPunishmentType;
     static: string;
     server: string;
     duration: string;
-    remove_reason: 'На стрим' | 'На видео';
+    remove_reason: ReturnRemoveReason;
     discord_message_url: string;
 };
 
@@ -51,14 +55,14 @@ type HistoryFiltersState = {
     punishment_type: string;
 };
 
-const emptyFormState: ReturnFormState = {
+const createEmptyFormState = (serverId = ''): ReturnFormState => ({
     punishment_type: 'jail',
     static: '',
-    server: '1',
+    server: serverId,
     duration: '',
     remove_reason: 'На стрим',
     discord_message_url: '',
-};
+});
 
 const emptyHistoryFilters: HistoryFiltersState = {
     static: '',
@@ -69,29 +73,6 @@ const emptyHistoryFilters: HistoryFiltersState = {
     date_to: '',
     punishment_type: '',
 };
-
-function buildRemoveCommand(
-    punishmentType: 'jail' | 'mute',
-    staticValue: string,
-    removeReason: 'На стрим' | 'На видео',
-    actorName: string,
-): string {
-    const command = punishmentType === 'jail' ? '/unjail' : '/unmute';
-    const resolvedStatic = staticValue || '0';
-    return `${command} ${resolvedStatic} ${removeReason} by ${actorName}`;
-}
-
-function buildReturnCommand(
-    punishmentType: 'jail' | 'mute',
-    staticValue: string,
-    durationValue: string,
-    actorName: string,
-): string {
-    const command = punishmentType === 'jail' ? '/ajail' : '/mute';
-    const resolvedStatic = staticValue || '0';
-    const resolvedDuration = Number(durationValue || 0) * 2;
-    return `${command} ${resolvedStatic} ${resolvedDuration} Возврат наказания by ${actorName}`;
-}
 
 function getPageNumbers(totalPages: number, currentPage: number) {
     const pages: Array<number | '...'> = [];
@@ -118,6 +99,7 @@ interface ReturnFormModalProps {
     actorName: string;
     form: ReturnFormState;
     loading: boolean;
+    serverOptions: Array<{ value: string; label: string }>;
     existingRecord?: PunishmentReturnQueueItem | PunishmentReturnHistoryItem | null;
     onClose: () => void;
     onChange: (updates: Partial<ReturnFormState>) => void;
@@ -132,6 +114,7 @@ function ReturnFormModal({
     actorName,
     form,
     loading,
+    serverOptions,
     existingRecord,
     onClose,
     onChange,
@@ -145,19 +128,22 @@ function ReturnFormModal({
         ? formatMskToLocal(existingRecord.removed_at)
         : formatMskToLocal(new Date().toISOString());
     const showReturnCommandPreview = Boolean(existingRecord);
-    const removeCommand = buildRemoveCommand(form.punishment_type, form.static, form.remove_reason, removeCommandActor);
+    const removeCommand = existingRecord?.remove_command
+        || buildRemoveCommand(form.punishment_type, form.static, form.remove_reason, removeCommandActor);
     const returnCommandActor =
         existingRecord?.completed_by_name ||
         existingRecord?.claimed_by_name ||
         actorName;
-    const returnCommand = buildReturnCommand(form.punishment_type, form.static, form.duration, returnCommandActor);
+    const returnCommand = existingRecord?.return_command
+        || buildReturnCommand(form.punishment_type, form.static, form.duration, returnCommandActor);
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-[fadeIn_0.2s_ease-out]">
-            <div className="w-full max-w-4xl bg-[#1e1e1e] border border-white/10 rounded-3xl shadow-2xl overflow-hidden">
-                <div className="flex items-center justify-between px-6 py-5 border-b border-white/5">
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
+            <div className="flex min-h-full items-start justify-center p-3 sm:p-4 lg:items-center">
+                <div className="flex w-full max-w-4xl max-h-[calc(100vh-1.5rem)] sm:max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#1e1e1e] shadow-2xl">
+                <div className="flex items-start justify-between gap-4 px-4 py-4 border-b border-white/5 sm:px-6 sm:py-5">
                     <div>
-                        <h3 className="text-2xl font-bold text-white">{title}</h3>
+                        <h3 className="text-xl font-bold text-white sm:text-2xl">{title}</h3>
                         <p className="text-sm text-white/40 mt-1">Проверь поля и сохраните запись в общий список возвратов.</p>
                     </div>
                     <button
@@ -168,8 +154,9 @@ function ReturnFormModal({
                     </button>
                 </div>
 
-                <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-0">
-                    <div className="p-6 border-r border-white/5 space-y-5">
+                <div className="min-h-0 overflow-y-auto">
+                    <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-0">
+                    <div className="p-4 sm:p-6 border-b border-white/5 space-y-5 xl:border-b-0 xl:border-r">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label className="text-xs font-medium text-white/40 mb-1 block">Тип наказания</label>
@@ -177,7 +164,7 @@ function ReturnFormModal({
                                     value={form.punishment_type}
                                     onChange={(value) => {
                                         if (typeof value === 'string') {
-                                            onChange({ punishment_type: value as 'jail' | 'mute' });
+                                            onChange({ punishment_type: value as ReturnPunishmentType });
                                         }
                                     }}
                                     options={RETURN_PUNISHMENT_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
@@ -193,7 +180,7 @@ function ReturnFormModal({
                                             onChange({ server: value });
                                         }
                                     }}
-                                    options={RETURN_SERVER_OPTIONS}
+                                    options={serverOptions}
                                 />
                             </div>
                         </div>
@@ -229,8 +216,8 @@ function ReturnFormModal({
                             <CustomSelect
                                 value={form.remove_reason}
                                 onChange={(value) => {
-                                    if (typeof value === 'string') {
-                                        onChange({ remove_reason: value as 'На стрим' | 'На видео' });
+                                        if (typeof value === 'string') {
+                                            onChange({ remove_reason: value as ReturnRemoveReason });
                                     }
                                 }}
                                 options={RETURN_REASON_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
@@ -249,7 +236,7 @@ function ReturnFormModal({
                         </div>
                     </div>
 
-                    <div className="p-6 bg-white/[0.02] space-y-4">
+                    <div className="p-4 sm:p-6 bg-white/[0.02] space-y-4">
                         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
                             <div>
                                 <div className="text-xs uppercase tracking-wide text-white/30 mb-1">PR Assistant</div>
@@ -261,7 +248,9 @@ function ReturnFormModal({
                             </div>
                             <div>
                                 <div className="text-xs uppercase tracking-wide text-white/30 mb-1">Сервер</div>
-                                <div className="text-white/80">{formatReturnServerLabel(form.server)}</div>
+                                <div className="text-white/80">
+                                    {serverOptions.find((option) => option.value === form.server)?.label || formatGameServerLabel(form.server, 'full')}
+                                </div>
                             </div>
                             <div>
                                 <div className="text-xs uppercase tracking-wide text-white/30 mb-1">Наказание</div>
@@ -305,7 +294,7 @@ function ReturnFormModal({
                             </div>
                         )}
 
-                        <div className="flex gap-3 pt-2">
+                        <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row">
                             <button
                                 onClick={onSubmit}
                                 disabled={loading}
@@ -321,6 +310,8 @@ function ReturnFormModal({
                             </button>
                         </div>
                     </div>
+                </div>
+                </div>
                 </div>
             </div>
         </div>
@@ -401,7 +392,11 @@ export default function PunishmentReturns() {
     const navigate = useNavigate();
     const { toast, showToast, closeToast } = usePopupToast(2200);
     const { confirm, dialogProps } = useConfirmDialog();
-    const [activeTab, setActiveTab] = React.useState<ReturnsTab>('queue');
+    const { servers: gameServers, serversById } = useGameServers();
+    const canViewQueue = user?.permissions?.['returns.queue.view'] === true;
+    const canViewHistory = user?.permissions?.['returns.history.view'] === true;
+    const canCreate = user?.permissions?.['returns.create'] === true;
+    const [activeTab, setActiveTab] = React.useState<ReturnsTab>(() => (canViewQueue ? 'queue' : 'history'));
     const [queueItems, setQueueItems] = React.useState<PunishmentReturnQueueItem[]>([]);
     const [historyItems, setHistoryItems] = React.useState<PunishmentReturnHistoryItem[]>([]);
     const [queueLoading, setQueueLoading] = React.useState(true);
@@ -412,22 +407,33 @@ export default function PunishmentReturns() {
     const [historyFilters, setHistoryFilters] = React.useState<HistoryFiltersState>(emptyHistoryFilters);
     const [isCreateOpen, setIsCreateOpen] = React.useState(false);
     const [editingRecord, setEditingRecord] = React.useState<PunishmentReturnQueueItem | PunishmentReturnHistoryItem | null>(null);
-    const [formState, setFormState] = React.useState<ReturnFormState>(emptyFormState);
+    const [formState, setFormState] = React.useState<ReturnFormState>(() => createEmptyFormState());
     const [submitting, setSubmitting] = React.useState(false);
     const [deletingRecordId, setDeletingRecordId] = React.useState<string | null>(null);
 
     const actorName = user?.nickname || 'unknown';
-    const canCreate = user?.permissions?.['returns.create'] === true;
-    const canViewHistory = user?.permissions?.['returns.history.view'] === true;
     const historyFiltersRef = React.useRef<HistoryFiltersState>(historyFilters);
 
     React.useEffect(() => {
         historyFiltersRef.current = historyFilters;
     }, [historyFilters]);
 
+    const defaultServerId = React.useMemo(() => getDefaultActiveGameServerId(gameServers), [gameServers]);
+    const createFormState = React.useCallback((serverId = defaultServerId) => createEmptyFormState(serverId), [defaultServerId]);
+
+    React.useEffect(() => {
+        if (activeTab === 'queue' && !canViewQueue && canViewHistory) {
+            setActiveTab('history');
+            return;
+        }
+        if (activeTab === 'history' && !canViewHistory && canViewQueue) {
+            setActiveTab('queue');
+        }
+    }, [activeTab, canViewHistory, canViewQueue]);
+
     const openCreateModal = () => {
         setEditingRecord(null);
-        setFormState(emptyFormState);
+        setFormState(createFormState());
         setIsCreateOpen(true);
     };
 
@@ -446,7 +452,7 @@ export default function PunishmentReturns() {
     const closeFormModal = () => {
         setIsCreateOpen(false);
         setEditingRecord(null);
-        setFormState(emptyFormState);
+        setFormState(createFormState());
     };
 
     const copyCommand = async (value: string) => {
@@ -512,7 +518,7 @@ export default function PunishmentReturns() {
     }, [showToast]);
 
     React.useEffect(() => {
-        if (activeTab === 'queue') {
+        if (activeTab === 'queue' && canViewQueue) {
             void fetchQueue();
             const interval = window.setInterval(() => void fetchQueue(), 15000);
             return () => window.clearInterval(interval);
@@ -521,20 +527,22 @@ export default function PunishmentReturns() {
             void fetchHistory(1);
         }
         return undefined;
-    }, [activeTab, canViewHistory, fetchHistory, fetchQueue]);
+    }, [activeTab, canViewHistory, canViewQueue, fetchHistory, fetchQueue]);
 
     const submitForm = async () => {
         const parsedStatic = Number(formState.static);
         const parsedServer = Number(formState.server);
         const parsedDuration = Number(formState.duration);
         const discordMessageUrl = formState.discord_message_url.trim();
+        const selectedServer = Number.isInteger(parsedServer) ? serversById[parsedServer] : undefined;
 
         if (
             !Number.isInteger(parsedStatic) ||
             parsedStatic <= 0 ||
             !Number.isInteger(parsedServer) ||
             parsedServer <= 0 ||
-            parsedServer > 17 ||
+            !selectedServer ||
+            (!selectedServer.is_active && editingRecord?.server !== parsedServer) ||
             !Number.isInteger(parsedDuration) ||
             parsedDuration <= 0
         ) {
@@ -569,7 +577,9 @@ export default function PunishmentReturns() {
 
             closeFormModal();
             showToast(editingRecord ? 'Возврат обновлен' : 'Возврат создан');
-            await fetchQueue();
+            if (canViewQueue) {
+                await fetchQueue();
+            }
             if (activeTab === 'history' && canViewHistory) {
                 await fetchHistory(historyPage);
             }
@@ -592,7 +602,9 @@ export default function PunishmentReturns() {
                 throw new Error(getApiErrorMessage(errorPayload, 'Не удалось удалить возврат'));
             }
             showToast('Возврат удален');
-            await fetchQueue();
+            if (canViewQueue) {
+                await fetchQueue();
+            }
             if (activeTab === 'history' && canViewHistory) {
                 await fetchHistory(historyPage);
             }
@@ -607,10 +619,10 @@ export default function PunishmentReturns() {
     const requestDelete = async (record: PunishmentReturnQueueItem | PunishmentReturnHistoryItem) => {
         const confirmed = await confirm({
             title: 'Удалить возврат?',
-            message: (
+                message: (
                 <>
                     Запись для статика <span className="text-white font-semibold">{record.static}</span> на сервере{' '}
-                    <span className="text-white font-semibold">{formatReturnServerLabel(record.server)}</span> будет удалена.
+                    <span className="text-white font-semibold">{formatGameServerLabel(record.server, 'full', serversById)}</span> будет удалена.
                 </>
             ),
             tone: 'danger',
@@ -795,6 +807,19 @@ export default function PunishmentReturns() {
         ...RETURN_PUNISHMENT_OPTIONS.map((item) => ({ value: item.value, label: item.label })),
     ];
 
+    const serverOptions = React.useMemo(() => buildGameServerOptions(gameServers, {
+        variant: 'full',
+        includeInactive: Boolean(editingRecord),
+        selectedServerId: formState.server,
+    }), [editingRecord, formState.server, gameServers]);
+
+    const historyServerOptions = React.useMemo(() => buildGameServerOptions(gameServers, {
+        variant: 'full',
+        includeInactive: true,
+        includeEmptyOptionLabel: 'Все серверы',
+        selectedServerId: historyFilters.server,
+    }), [gameServers, historyFilters.server]);
+
     return (
         <div className="space-y-6 animate-[fadeIn_0.5s_ease-in-out] -mx-[calc(50vw-50%)] px-6 lg:px-12 pr-10 lg:pr-16">
             <div className="flex items-center justify-between gap-4">
@@ -814,15 +839,17 @@ export default function PunishmentReturns() {
             </div>
 
             <div className="flex gap-2 border-b border-white/10 pb-2">
-                <button
-                    onClick={() => setActiveTab('queue')}
-                    className={`px-6 py-3 rounded-t-lg font-semibold transition-all ${activeTab === 'queue'
-                        ? 'bg-white/10 text-white border-b-2 border-blue-500'
-                        : 'text-white/60 hover:text-white hover:bg-white/5'
-                        }`}
-                >
-                    К возврату
-                </button>
+                {canViewQueue && (
+                    <button
+                        onClick={() => setActiveTab('queue')}
+                        className={`px-6 py-3 rounded-t-lg font-semibold transition-all ${activeTab === 'queue'
+                            ? 'bg-white/10 text-white border-b-2 border-blue-500'
+                            : 'text-white/60 hover:text-white hover:bg-white/5'
+                            }`}
+                    >
+                        К возврату
+                    </button>
+                )}
                 {canViewHistory && (
                     <button
                         onClick={() => setActiveTab('history')}
@@ -836,7 +863,7 @@ export default function PunishmentReturns() {
                 )}
             </div>
 
-            {activeTab === 'queue' && (
+            {activeTab === 'queue' && canViewQueue && (
                 <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden">
                     {queueLoading ? (
                         <div className="p-10 text-center text-white/40">Загрузка очереди...</div>
@@ -862,7 +889,7 @@ export default function PunishmentReturns() {
                                         <tr key={item.id} className="hover:bg-white/5 transition-colors align-top">
                                             <td className="px-6 py-4 whitespace-nowrap">
                                                 <div className="font-bold text-white/90">{item.static}</div>
-                                                <div className="text-xs text-white/40 mt-1">{formatReturnServerLabel(item.server)}</div>
+                                                <div className="text-xs text-white/40 mt-1">{formatGameServerLabel(item.server, 'full', serversById)}</div>
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap">
                                                 <div className="font-bold text-white/90">{formatPunishmentLabel(item.punishment_type)}</div>
@@ -941,7 +968,7 @@ export default function PunishmentReturns() {
                                         setHistoryFilters((prev) => ({ ...prev, server: value }));
                                     }
                                 }}
-                                options={[{ value: '', label: 'Все серверы' }, ...RETURN_SERVER_OPTIONS]}
+                                options={historyServerOptions}
                                 icon={<Filter className="w-4 h-4" />}
                             />
                         </div>
@@ -1046,7 +1073,7 @@ export default function PunishmentReturns() {
                                             <tr key={item.id} className="hover:bg-white/5 transition-colors align-top">
                                                 <td className="px-6 py-4 whitespace-nowrap">
                                                     <div className="font-bold text-white/90">{item.static}</div>
-                                                    <div className="text-xs text-white/40 mt-1">{formatReturnServerLabel(item.server)}</div>
+                                                    <div className="text-xs text-white/40 mt-1">{formatGameServerLabel(item.server, 'full', serversById)}</div>
                                                 </td>
                                                 <td className="px-6 py-4 whitespace-nowrap">
                                                     <div className="font-bold text-white/90">{formatPunishmentLabel(item.punishment_type)}</div>
@@ -1141,12 +1168,13 @@ export default function PunishmentReturns() {
                 actorName={actorName}
                 form={formState}
                 loading={submitting}
-                existingRecord={editingRecord}
-                onClose={closeFormModal}
-                onChange={(updates) => setFormState((prev) => ({ ...prev, ...updates }))}
-                onCopyCommand={(value) => void copyCommand(value)}
-                onSubmit={() => void submitForm()}
-            />
+            existingRecord={editingRecord}
+            serverOptions={serverOptions}
+            onClose={closeFormModal}
+            onChange={(updates) => setFormState((prev) => ({ ...prev, ...updates }))}
+            onCopyCommand={(value) => void copyCommand(value)}
+            onSubmit={() => void submitForm()}
+        />
 
             <ConfirmDialog {...dialogProps} />
 

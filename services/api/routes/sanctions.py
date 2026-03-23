@@ -29,7 +29,7 @@ from schemas.sanctions import (
 from services.outbox import publish_integration_event
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.broker import BrokerService
 
 
@@ -176,7 +176,7 @@ async def upsert_assistant_day_points(
     request: Request,
     data: AssistantDayPointAdjustmentUpsertRequest,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("assistants.points.manage")),
+    principal: dict = Depends(require_permission("assistants.points.update")),
 ):
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(int(data.assistant_id))
@@ -220,7 +220,7 @@ async def upsert_assistant_day_mchat(
     request: Request,
     data: AssistantDayMchatUpsertRequest,
     db: "Database" = Depends(get_db),
-    principal: dict = Depends(require_permission("assistants.points.manage")),
+    principal: dict = Depends(require_permission("assistants.points.update")),
 ):
     trace_id = get_trace_id(request)
     assistant = await db.get_assistant(int(data.assistant_id))

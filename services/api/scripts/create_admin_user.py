@@ -15,7 +15,7 @@ from getpass import getpass
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
-from database import Database
+from db import Database
 from dotenv import load_dotenv
 from services.auth import AuthService
 
@@ -55,28 +55,14 @@ async def create_admin(username, password, nickname, role, discord_id):
             logger.warning(f"❌ Пользователь '{username}' уже существует!")
             return
 
-        # Create user in web_auth
-        created_discord_id = await db.create_user(
+        created_discord_id = await db.create_user_with_assistant(
             discord_id=discord_id,
             username=username,
             password_hash=password_hash,
+            nickname=nickname,
+            role=role,
             created_by=None,
         )
-
-        # Create/Update assistant profile
-        # Since create_user creates web_auth, we need to manually ensure assistant record exists with role/nick
-        async with db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                # Insert or Update assistant
-                await cursor.execute(
-                    """
-                    INSERT INTO assistants (pr_id, nickname, role, added_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON DUPLICATE KEY UPDATE nickname = %s, role = %s
-                    """,
-                    (discord_id, nickname, role, nickname, role),
-                )
-                await conn.commit()
 
         logger.info("=" * 50)
         logger.info(f"✅ УСПЕХ! Пользователь создан c Discord ID: {created_discord_id}")
@@ -100,7 +86,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--role",
         required=True,
-        choices=["developer", "manager", "senior", "employee", "junior"],
+        choices=[
+            "developer",
+            "manager",
+            "senior_employee",
+            "employee",
+            "junior_employee",
+        ],
         help="Assistant role",
     )
     parser.add_argument(

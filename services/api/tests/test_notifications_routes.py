@@ -31,8 +31,21 @@ def _seed_streamer(fake_db, streamer_id: int = 5001, game_id: int = 32982, game_
     }
 
 
+def _notification_principal() -> dict[str, object]:
+    return {
+        "principal_type": "service",
+        "service_name": "discord_service",
+        "permissions": {
+            "notifications.render": True,
+        },
+    }
+
+
 async def _client(build_api_app):
-    app = build_api_app(notifications_router)
+    app = build_api_app(
+        notifications_router,
+        current_user=_notification_principal(),
+    )
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 

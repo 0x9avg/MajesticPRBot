@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import {
     CalendarClock,
     ChevronDown,
@@ -9,8 +9,11 @@ import {
 } from 'lucide-react';
 
 import { apiFetch } from '../../api/client';
+import type { OutletUserContext } from '../../types/auth';
 import type { Assistant, WeeklyCurrentResponse } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
+import { hasPerm } from '../../rbac/guards';
+import { formatAssistantWarnings } from '../../utils/warnings';
 
 type SortKey =
     | 'nickname'
@@ -102,10 +105,13 @@ const formatWeekRange = (weekStart?: string | null, weekEnd?: string | null) => 
 
 export function PRStats() {
     const navigate = useNavigate();
+    const { user } = useOutletContext<OutletUserContext>();
     const [searchParams] = useSearchParams();
+    const canViewAssistants = hasPerm(user, 'assistants.view');
     const [assistants, setAssistants] = React.useState<Assistant[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [activeLoading, setActiveLoading] = React.useState(true);
+    const [error, setError] = React.useState<string | null>(null);
     const [weeklySearch, setWeeklySearch] = React.useState('');
     const [currentWeek, setCurrentWeek] = React.useState<WeeklyCurrentResponse | null>(null);
     const [sortConfig, setSortConfig] = React.useState<{ key: SortKey, direction: 'asc' | 'desc' }>({ key: 'role', direction: 'desc' });
@@ -113,23 +119,41 @@ export function PRStats() {
     const activeTab: AssistantsTab = searchParams.get('tab') === 'active' ? 'active' : 'stats';
 
     const fetchAssistants = React.useCallback(async (silent = false) => {
+        if (!canViewAssistants) {
+            setAssistants([]);
+            setError('Недостаточно прав для просмотра таблицы ассистентов.');
+            if (!silent) setLoading(false);
+            return;
+        }
         if (!silent) setLoading(true);
         try {
+            setError(null);
             const response = await apiFetch('/api/assistants');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
                 const normalized = Array.isArray(data) ? data : data.assistants;
                 setAssistants(Array.isArray(normalized) ? normalized : []);
+            } else if (response.status === 403) {
+                setAssistants([]);
+                setError('Недостаточно прав для просмотра таблицы ассистентов.');
+            } else {
+                setError('Не удалось загрузить таблицу ассистентов.');
             }
         } catch (error) {
             console.error('Failed to fetch assistants:', error);
+            setError('Не удалось загрузить таблицу ассистентов.');
         } finally {
             if (!silent) setLoading(false);
         }
-    }, []);
+    }, [canViewAssistants]);
 
     const fetchActiveWeek = React.useCallback(async (silent = false) => {
+        if (!canViewAssistants) {
+            setCurrentWeek(null);
+            if (!silent) setActiveLoading(false);
+            return;
+        }
         if (!silent) setActiveLoading(true);
         try {
             const response = await apiFetch('/api/assistant-weekly/current');
@@ -143,17 +167,20 @@ export function PRStats() {
         } finally {
             if (!silent) setActiveLoading(false);
         }
-    }, []);
+    }, [canViewAssistants]);
 
     React.useEffect(() => {
         void fetchAssistants();
         void fetchActiveWeek();
+        if (!canViewAssistants) {
+            return undefined;
+        }
         const interval = setInterval(() => {
             void fetchAssistants(true);
             void fetchActiveWeek(true);
         }, 10000);
         return () => clearInterval(interval);
-    }, [fetchAssistants, fetchActiveWeek]);
+    }, [canViewAssistants, fetchAssistants, fetchActiveWeek]);
 
     const handleSort = (key: SortKey) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -494,7 +521,10 @@ export function PRStats() {
                                 </td>
                                 <td className="p-3 whitespace-nowrap">
                                     <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium border whitespace-nowrap ${getWarningsBadgeClass(assistant)}`}>
-                                        {assistant.active_warnings_display || '0/2 0/2'}
+                                        {formatAssistantWarnings(
+                                            assistant.active_strict_warnings,
+                                            assistant.active_oral_warnings,
+                                        )}
                                     </span>
                                 </td>
                             </tr>
@@ -677,6 +707,22 @@ export function PRStats() {
             )}
         </div>
     );
+
+    if (error) {
+        return (
+            <div className="space-y-6 animate-[fadeIn_0.35s_ease-in-out] -mx-[calc(50vw-50%)] px-6 lg:px-12 pr-10 lg:pr-16">
+                <div>
+                    <h2 className="text-3xl font-bold flex items-center gap-2">
+                        <span className="w-1 h-8 bg-[#3b82f6] rounded-full inline-block"></span>
+                        Таблица PR Ассистентов
+                    </h2>
+                </div>
+                <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-8 text-center text-white/50">
+                    {error}
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="space-y-6 animate-[fadeIn_0.35s_ease-in-out] -mx-[calc(50vw-50%)] px-6 lg:px-12 pr-10 lg:pr-16">

@@ -5,22 +5,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
 
 from dependencies import require_permission
-from services.rbac import can_create_role
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
 from schemas.assistant import (
     AssignmentUpdateResponse,
     AssistantAssignment,
-    AssistantCreate,
-    AssistantDeletedResponse,
     AssistantFull,
-    AssistantSavedResponse,
     AssistantSessionRecord,
     AssistantSessionPatchRequest,
+    AssistantSessionTargetEvent,
+    AssistantSessionTargetStreamer,
+    AssistantSessionTargetsResponse,
     DailyStatsResponse,
     DailyStatsUpdate,
     ManualSpecSession,
@@ -28,7 +27,6 @@ from schemas.assistant import (
     StatsResetResponse,
 )
 from schemas.envelope import success_envelope
-from services.rbac import is_admin_role
 
 router = APIRouter(prefix="/assistants", tags=["Assistants"])
 
@@ -51,15 +49,6 @@ def _resolve_user_pr_id(principal: dict) -> int:
         return int(discord_id)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid discord_id")
-
-
-def ensure_admin_role(current_user: dict):
-    """Allow only manager/developer for sensitive assistant operations."""
-    if not is_admin_role(current_user.get("role")):
-        raise HTTPException(
-            status_code=403,
-            detail="Недостаточно прав для доступа к админ-панели",
-        )
 
 
 @router.get("")
@@ -93,7 +82,7 @@ async def get_all_assistants(
     )
 
 
-@router.get("/{pr_id}")
+@router.get("/{pr_id:int}")
 async def get_assistant(
     request: Request,
     pr_id: int,
@@ -129,65 +118,13 @@ async def get_assistant(
     )
 
 
-@router.post("")
-async def create_or_update_assistant(
-    request: Request,
-    assistant: AssistantCreate,
-    user: dict = Depends(require_permission("assistants.create")),
-    db: "Database" = Depends(get_db),
-):
-    """Create or update a PR staff member."""
-    trace_id = get_trace_id(request)
-
-    # Validate role
-    valid_roles = [
-        "junior_employee",
-        "employee",
-        "senior_employee",
-        "manager",
-        "developer",
-    ]
-    if assistant.role not in valid_roles:
-        raise HTTPException(
-            status_code=400, detail=f"Невалидная роль '{assistant.role}'"
-        )
-
-    user_role = user.get("role", "")
-
-    if not can_create_role(user_role, assistant.role):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Недостаточно прав для назначения роли '{assistant.role}'",
-        )
-
-    await db.create_or_update_assistant(
-        pr_id=assistant.pr_id,
-        nickname=assistant.nickname,
-        role=assistant.role,
-        experience_days=assistant.experience_days,
-    )
-
-    response_data = AssistantSavedResponse(
-        pr_id=assistant.pr_id, nickname=assistant.nickname
-    )
-
-    return JSONResponse(
-        content=success_envelope(
-            data=response_data.model_dump(mode="json"),
-            message=f"Assistant {assistant.nickname} saved successfully",
-            code="ASSISTANT_SAVED",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.put("/{pr_id}/assign")
+@router.put("/{pr_id:int}/assign")
 async def update_assignment(
     request: Request,
     pr_id: int,
     assignment: AssistantAssignment,
     db: "Database" = Depends(get_db),
-    user: dict = Depends(require_permission("assistants.update")),
+    user: dict = Depends(require_permission("assistants.assignment.update")),
 ):
     """Update assistant assignment to a streamer or event."""
     trace_id = get_trace_id(request)
@@ -236,37 +173,7 @@ async def update_assignment(
             trace_id=trace_id,
         )
     )
-
-
-@router.delete("/{pr_id}")
-async def delete_assistant(
-    request: Request,
-    pr_id: int,
-    db: "Database" = Depends(get_db),
-    user: dict = Depends(require_permission("assistants.delete")),
-):
-    """Delete an assistant."""
-    trace_id = get_trace_id(request)
-    success = await db.delete_assistant(pr_id)
-
-    if not success:
-        raise HTTPException(
-            status_code=404, detail=f"Assistant with ID {pr_id} not found"
-        )
-
-    response_data = AssistantDeletedResponse(pr_id=pr_id)
-
-    return JSONResponse(
-        content=success_envelope(
-            data=response_data.model_dump(mode="json"),
-            message=f"Assistant {pr_id} deleted successfully",
-            code="ASSISTANT_DELETED",
-            trace_id=trace_id,
-        )
-    )
-
-
-@router.get("/{pr_id}/logs")
+@router.get("/{pr_id:int}/logs")
 async def get_assistant_logs(
     request: Request,
     pr_id: int,
@@ -300,7 +207,7 @@ async def get_assistant_logs(
     )
 
 
-@router.get("/{pr_id}/sessions")
+@router.get("/{pr_id:int}/sessions")
 async def get_assistant_sessions(
     request: Request,
     pr_id: int,
@@ -331,7 +238,7 @@ async def get_assistant_sessions(
     )
 
 
-@router.get("/{pr_id}/capabilities")
+@router.get("/{pr_id:int}/capabilities")
 async def get_assistant_capabilities(
     request: Request,
     pr_id: int,
@@ -365,7 +272,67 @@ async def get_assistant_capabilities(
     )
 
 
-@router.post("/{pr_id}/session")
+@router.get("/session-targets")
+async def get_assistant_session_targets(
+    request: Request,
+    db: "Database" = Depends(get_db),
+    _user: dict = Depends(require_permission("assistants.sessions.manage")),
+):
+    """Get sorted session targets for assistant manual/edit session forms."""
+    trace_id = get_trace_id(request)
+    raw_streamers = await db.list_all_streamers(include_assignments=False)
+    raw_events = await db.get_all_events()
+
+    sorted_streamers = sorted(
+        raw_streamers,
+        key=lambda item: (
+            -int(bool(item.get("is_online"))),
+            str(item.get("streamer_name") or "").casefold(),
+        ),
+    )
+    sorted_events = sorted(
+        raw_events,
+        key=lambda item: (
+            -int(bool(item.get("is_active"))),
+            str(item.get("name") or "").casefold(),
+        ),
+    )
+
+    response_data = AssistantSessionTargetsResponse(
+        streamers=[
+            AssistantSessionTargetStreamer.model_validate(
+                {
+                    "streamer_id": streamer.get("streamer_id"),
+                    "streamer_name": streamer.get("streamer_name"),
+                    "is_online": bool(streamer.get("is_online")),
+                    "priority": int(streamer.get("priority") or 0),
+                }
+            )
+            for streamer in sorted_streamers
+        ],
+        events=[
+            AssistantSessionTargetEvent.model_validate(
+                {
+                    "id": event.get("id"),
+                    "name": event.get("name"),
+                    "is_active": bool(event.get("is_active")),
+                    "priority": int(event.get("priority") or 0),
+                }
+            )
+            for event in sorted_events
+        ],
+    )
+
+    return JSONResponse(
+        content=success_envelope(
+            data=response_data.model_dump(mode="json"),
+            message="Assistant session targets loaded",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.post("/{pr_id:int}/session")
 async def create_manual_session(
     request: Request,
     pr_id: int,
@@ -438,7 +405,7 @@ async def create_manual_session(
     )
 
 
-@router.patch("/{pr_id}/sessions/{session_id}")
+@router.patch("/{pr_id:int}/sessions/{session_id:int}")
 async def patch_assistant_session(
     request: Request,
     pr_id: int,
@@ -499,7 +466,7 @@ async def patch_assistant_session(
     )
 
 
-@router.delete("/{pr_id}/sessions/{session_id}")
+@router.delete("/{pr_id:int}/sessions/{session_id:int}")
 async def delete_assistant_session(
     request: Request,
     pr_id: int,

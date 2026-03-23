@@ -20,9 +20,9 @@ from disnake import MessageInteraction
 from disnake.ext import commands, tasks
 from utils import parse_to_unix
 
-EVENTS_SECTION_PERMS = ["events.create", "events.manage"]
+EVENTS_SECTION_PERMS = ["events.create", "events.runtime.manage"]
 EVENTS_CREATE_PERMS = ["events.create"]
-EVENTS_MANAGE_PERMS = ["events.manage"]
+EVENTS_MANAGE_PERMS = ["events.runtime.manage"]
 
 # =============================================================================
 # Events Embed

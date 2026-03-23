@@ -19,12 +19,12 @@ from versioning import APP_VERSION
 
 SERVICE_SECTION_PERMS = [
     "monitoring.view",
-    "streamers.status.update",
-    "guild.settings.update",
+    "media.status.update",
+    "game_servers.settings.update",
 ]
 SERVICE_VIEW_PERMS = ["monitoring.view"]
-SERVICE_SYNC_PERMS = ["streamers.status.update"]
-SERVICE_PANEL_PERMS = ["guild.settings.update"]
+SERVICE_SYNC_PERMS = ["media.status.update"]
+SERVICE_PANEL_PERMS = ["game_servers.settings.update"]
 
 
 def _status_icon(value: str) -> str:

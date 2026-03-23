@@ -1,7 +1,7 @@
 import React from 'react';
 import { useState, useEffect } from 'react';
 import { Navigate, Outlet, useOutletContext } from 'react-router-dom';
-import { getAccessToken, tryRefresh } from '../api/client';
+import { getAccessToken, getSiteMaintenanceMessage, tryRefresh } from '../api/client';
 
 void React;
 
@@ -27,7 +27,7 @@ function parseTokenPayload(token: string): { role?: string; exp?: number } | nul
 
 export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
     const parentContext = useOutletContext<unknown>();
-    const [authState, setAuthState] = useState<'checking' | 'ok' | 'denied'>('checking');
+    const [authState, setAuthState] = useState<'checking' | 'ok' | 'denied' | 'maintenance'>('checking');
 
     useEffect(() => {
         let cancelled = false;
@@ -39,7 +39,11 @@ export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
                 // No token at all — try refresh (might have HttpOnly cookie)
                 const refreshed = await tryRefresh();
                 if (!cancelled) {
-                    setAuthState(refreshed ? 'ok' : 'denied');
+                    setAuthState(
+                        refreshed
+                            ? 'ok'
+                            : (getSiteMaintenanceMessage() ? 'maintenance' : 'denied')
+                    );
                 }
                 return;
             }
@@ -52,7 +56,11 @@ export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
                 // Token expired — attempt silent refresh
                 const refreshed = await tryRefresh();
                 if (!cancelled) {
-                    setAuthState(refreshed ? 'ok' : 'denied');
+                    setAuthState(
+                        refreshed
+                            ? 'ok'
+                            : (getSiteMaintenanceMessage() ? 'maintenance' : 'denied')
+                    );
                 }
                 return;
             }
@@ -74,6 +82,16 @@ export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
 
     if (authState === 'denied') {
         return <Navigate to="/login" replace />;
+    }
+
+    if (authState === 'maintenance') {
+        return (
+            <Navigate
+                to="/maintenance"
+                replace
+                state={{ message: getSiteMaintenanceMessage() }}
+            />
+        );
     }
 
     // Role-based access check

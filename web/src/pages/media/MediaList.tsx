@@ -10,29 +10,45 @@ import type { OutletUserContext } from '../../types/auth';
 import type { Streamer } from '../../types/domain';
 import { unwrapApiData } from '../../types/api';
 import { apiFetch } from '../../api/client';
+import { hasPerm } from '../../rbac/guards';
 
 export function MediaList() {
-    useOutletContext<OutletUserContext>();
+    const { user } = useOutletContext<OutletUserContext>();
     const { toast, showToast, closeToast } = usePopupToast(3000);
     const { confirm, dialogProps } = useConfirmDialog();
+    const canViewStreamers = hasPerm(user, 'media.view');
+    const canUpdateStreamers = hasPerm(user, 'media.update');
     const [activeTab, setActiveTab] = React.useState<'all' | 'stats'>('all');
     const [allStreamers, setAllStreamers] = React.useState<Streamer[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [selectedStreamer, setSelectedStreamer] = React.useState<Streamer | null>(null);
+    const [error, setError] = React.useState<string | null>(null);
 
     const fetchAllStreamers = React.useCallback(async () => {
+        if (!canViewStreamers) {
+            setAllStreamers([]);
+            setError('Недостаточно прав для просмотра медиа.');
+            return;
+        }
         try {
+            setError(null);
             const response = await apiFetch('/api/streamers');
             if (response.ok) {
                 const json = await response.json() as unknown;
                 const data = unwrapApiData<{ streamers: Streamer[] } | Streamer[]>(json);
                 const normalized = Array.isArray(data) ? data : data.streamers;
                 setAllStreamers(Array.isArray(normalized) ? normalized : []);
+            } else if (response.status === 403) {
+                setAllStreamers([]);
+                setError('Недостаточно прав для просмотра медиа.');
+            } else {
+                setError('Не удалось загрузить список медиа.');
             }
         } catch (error) {
             console.error('Failed to fetch all streamers:', error);
+            setError('Не удалось загрузить список медиа.');
         }
-    }, []);
+    }, [canViewStreamers]);
 
     React.useEffect(() => {
         const fetchData = async () => {
@@ -40,11 +56,14 @@ export function MediaList() {
             setLoading(false);
         };
         void fetchData();
+        if (!canViewStreamers) {
+            return undefined;
+        }
         const interval = setInterval(() => {
             void fetchAllStreamers();
         }, 10000);
         return () => clearInterval(interval);
-    }, [fetchAllStreamers]);
+    }, [canViewStreamers, fetchAllStreamers]);
 
     const handleUpdateStreamer = async (updates: {
         priority?: number;
@@ -134,6 +153,10 @@ export function MediaList() {
                 <div className="animate-[fadeIn_0.3s_ease-in-out]">
                     {loading ? (
                         <div className="text-white/60 text-center py-12">Загрузка...</div>
+                    ) : error ? (
+                        <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl p-8 text-center text-white/50">
+                            {error}
+                        </div>
                     ) : (
                         <div className="bg-[#242424]/50 backdrop-blur-sm border border-white/5 rounded-2xl overflow-hidden p-2">
                             <div className="flex flex-col gap-1">
@@ -160,13 +183,15 @@ export function MediaList() {
                 </div>
             )}
 
-            <StreamerSettingsModal
-                streamer={selectedStreamer}
-                isOpen={!!selectedStreamer}
-                onClose={() => setSelectedStreamer(null)}
-                onSave={handleUpdateStreamer}
-                mode="global"
-            />
+            {canUpdateStreamers && (
+                <StreamerSettingsModal
+                    streamer={selectedStreamer}
+                    isOpen={!!selectedStreamer}
+                    onClose={() => setSelectedStreamer(null)}
+                    onSave={handleUpdateStreamer}
+                    mode="global"
+                />
+            )}
 
             <ConfirmDialog {...dialogProps} />
 

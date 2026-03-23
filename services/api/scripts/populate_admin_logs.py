@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
-from database import Database
+from db import Database
 from dotenv import load_dotenv
 
 load_dotenv()

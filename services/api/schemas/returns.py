@@ -24,7 +24,7 @@ def make_aware(value: object) -> object:
 class PunishmentReturnCreate(BaseModel):
     punishment_type: PunishmentType
     static: int = Field(..., ge=1)
-    server: int = Field(..., ge=1, le=17)
+    server: int = Field(..., ge=1)
     duration: int = Field(..., ge=1)
     remove_reason: ReturnRemoveReason
     discord_message_url: Optional[str] = Field(None, max_length=512)
@@ -41,7 +41,7 @@ class PunishmentReturnCreate(BaseModel):
 class PunishmentReturnUpdate(BaseModel):
     punishment_type: Optional[PunishmentType] = None
     static: Optional[int] = Field(None, ge=1)
-    server: Optional[int] = Field(None, ge=1, le=17)
+    server: Optional[int] = Field(None, ge=1)
     duration: Optional[int] = Field(None, ge=1)
     remove_reason: Optional[ReturnRemoveReason] = None
     discord_message_url: Optional[str] = Field(None, max_length=512)
@@ -53,6 +53,12 @@ class PunishmentReturnUpdate(BaseModel):
             value = value.strip()
             return value or None
         return value
+
+    @model_validator(mode="after")
+    def reject_null_server(self):
+        if "server" in self.model_fields_set and self.server is None:
+            raise ValueError("server cannot be null")
+        return self
 
 
 class PunishmentReturnRecord(BaseModel):

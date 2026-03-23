@@ -1,6 +1,6 @@
 """Spec Manager - Claim/Unclaim system for PR assistants.
 
-All interactions via BUTTONS only (per GEMINI.md - no slash commands except /setup).
+All interactions via BUTTONS only.
 Monitoring uses ephemeral paginated messages triggered by a launcher button.
 """
 
@@ -24,12 +24,12 @@ from utils import (
     safe_defer,
 )
 
-SPEC_VIEW_CLAIMABLE_PERMS = ["spec.view_claimable"]
+SPEC_VIEW_CLAIMABLE_PERMS = ["spec.claimable.view"]
 SPEC_CLAIM_MAIN_PERMS = ["spec.claim.main"]
 SPEC_CLAIM_PROBATION_ALL_PERMS = ["spec.claim.probation"]
 SPEC_UNCLAIM_PERMS = ["spec.unclaim.self"]
-EVENT_JOIN_PERMS = ["events.join.self"]
-EVENT_LEAVE_PERMS = ["events.leave.self"]
+EVENT_JOIN_PERMS = ["events.participation.self.join"]
+EVENT_LEAVE_PERMS = ["events.participation.self.leave"]
 
 
 class MonitoringLauncherView(disnake.ui.View):
@@ -235,7 +235,9 @@ class Spec(commands.Cog):
 
             data = await self.api.get_claimable_streamers(pr_id)
             if not data:
-                await interaction.followup.send("❌ Ошибка при проверке статуса стримера.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Ошибка при проверке статуса стримера.", ephemeral=True
+                )
                 return
 
             # Check if PR is already assigned
@@ -243,7 +245,7 @@ class Spec(commands.Cog):
                 target_name = data.get("assigned_to_name", "кем-то")
                 await interaction.followup.send(
                     f"❌ Вы уже закреплены за {data.get('assigned_to_type') == 'event' and 'событием' or 'стримером'} **{target_name}**.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
@@ -255,6 +257,7 @@ class Spec(commands.Cog):
 
             if not claimable:
                 from config import Config
+
                 streamer = await self.api.get_streamer(streamer_id)
                 error_msg = "❌ Стример больше не доступен для закрепления."
                 if streamer:
@@ -339,11 +342,15 @@ class Spec(commands.Cog):
         except Exception as e:
             self.logger.debug(f"Defer failed: {e}")
 
-        self.logger.debug(f"[User {pr_id}] Claiming streamer {streamer_id}. Probation: {is_probation}. BEFORE: sending API request.")
+        self.logger.debug(
+            f"[User {pr_id}] Claiming streamer {streamer_id}. Probation: {is_probation}. BEFORE: sending API request."
+        )
         result = await self.api.claim_streamer(
             streamer_id, pr_id, is_probation=is_probation
         )
-        self.logger.debug(f"[User {pr_id}] Claim streamer {streamer_id} result AFTER: {result}")
+        self.logger.debug(
+            f"[User {pr_id}] Claim streamer {streamer_id} result AFTER: {result}"
+        )
 
         if result and "streamer_id" in result:
             streamer_name = result.get("streamer_name")
@@ -393,11 +400,15 @@ class Spec(commands.Cog):
             streamer_id = int(custom_id.replace("spec_unclaim_", ""))
             pr_id = interaction.user.id
 
-            self.logger.debug(f"[User {pr_id}] Unclaiming streamer {streamer_id}. BEFORE: sending API request.")
+            self.logger.debug(
+                f"[User {pr_id}] Unclaiming streamer {streamer_id}. BEFORE: sending API request."
+            )
             result = await self.api.unclaim_streamer(
                 streamer_id, pr_id=pr_id, reason="manual_unclaim"
             )
-            self.logger.debug(f"[User {pr_id}] Unclaim streamer {streamer_id} result AFTER: {result}")
+            self.logger.debug(
+                f"[User {pr_id}] Unclaim streamer {streamer_id} result AFTER: {result}"
+            )
 
             if result and "duration_seconds" in result:
                 duration_str = format_spec_duration(result.get("duration_seconds", 0))
@@ -468,9 +479,15 @@ class Spec(commands.Cog):
                 "POST", f"/events/{event_id}/leave/{pr_id}"
             )
             if result and "event_id" in result:
-                await interaction.followup.send("✅ Вы покинули событие.", ephemeral=True)
+                await interaction.followup.send(
+                    "✅ Вы покинули событие.", ephemeral=True
+                )
             else:
-                error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
+                error = (
+                    result.get("detail", result.get("message", "Ошибка"))
+                    if isinstance(result, dict)
+                    else "API Error"
+                )
                 await interaction.followup.send(f"❌ {error}", ephemeral=True)
 
     async def _handle_monitoring_claim(self, interaction: disnake.MessageInteraction):
@@ -618,16 +635,25 @@ class Spec(commands.Cog):
                     error_message="❌ Нет прав на присоединение к событиям.",
                 ):
                     return
-                
+
                 result = await self.api.join_event(event_id, user_id)
                 if result and "event_id" in result:
                     join_status = result.get("join_status", "joined")
                     if join_status == "reserved":
-                        await interaction.followup.send("✅ Вы закреплены за событием. Спек начнётся при старте события.", ephemeral=True)
+                        await interaction.followup.send(
+                            "✅ Вы закреплены за событием. Спек начнётся при старте события.",
+                            ephemeral=True,
+                        )
                     else:
-                        await interaction.followup.send("✅ Успешно закреплен за событием", ephemeral=True)
+                        await interaction.followup.send(
+                            "✅ Успешно закреплен за событием", ephemeral=True
+                        )
                 else:
-                    error = result.get("detail", result.get("message", "Ошибка")) if isinstance(result, dict) else "API Error"
+                    error = (
+                        result.get("detail", result.get("message", "Ошибка"))
+                        if isinstance(result, dict)
+                        else "API Error"
+                    )
                     await interaction.followup.send(f"❌ {error}", ephemeral=True)
                 return
 
@@ -636,13 +662,13 @@ class Spec(commands.Cog):
 
             # Get user capabilities and streamer info
             data = await self.api.get_claimable_streamers(user_id)
-            
+
             # Check if PR is already assigned
             if data.get("assigned_to_type"):
                 target_name = data.get("assigned_to_name", "кем-то")
                 await interaction.followup.send(
                     f"❌ Вы уже закреплены за {data.get('assigned_to_type') == 'event' and 'событием' or 'стримером'} **{target_name}**.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
@@ -651,12 +677,15 @@ class Spec(commands.Cog):
             # Find selected streamer info
             selected = None
             for s in data.get("streamers", []):
-                if str(s.get("streamer_id")) == str(streamer_id) or str(s.get("event_id")) == str(streamer_id):
+                if str(s.get("streamer_id")) == str(streamer_id) or str(
+                    s.get("event_id")
+                ) == str(streamer_id):
                     selected = s
                     break
 
             if not selected:
                 from config import Config
+
                 streamer = await self.api.get_streamer(streamer_id)
                 error_msg = "❌ Канал больше недоступен."
                 if streamer:
@@ -703,7 +732,6 @@ class Spec(commands.Cog):
         except Exception as e:
             self.logger.error(f"Claim select error: {e}", exc_info=True)
             await interaction.followup.send("❌ Ошибка.", ephemeral=True)
-
 
     # =========================================================================
     # Dropdown Handler (Monitoring Select)
@@ -752,8 +780,6 @@ class Spec(commands.Cog):
     # Transfer Initiation (called from admin assistants panel)
     # =========================================================================
 
-
-
     # =========================================================================
     # Monitoring Launcher & Ephemeral Pagination
     # =========================================================================
@@ -767,7 +793,9 @@ class Spec(commands.Cog):
         try:
             settings = await self.api.get_guild_settings()
             if not settings:
-                self.logger.warning("No guild settings found, skipping monitoring launcher")
+                self.logger.warning(
+                    "No guild settings found, skipping monitoring launcher"
+                )
                 return
 
             monitoring_channel_id = settings.get("monitoring_channel_id")
@@ -777,7 +805,9 @@ class Spec(commands.Cog):
 
             channel = self.bot.get_channel(int(monitoring_channel_id))
             if not channel:
-                self.logger.warning(f"Monitoring channel {monitoring_channel_id} not found")
+                self.logger.warning(
+                    f"Monitoring channel {monitoring_channel_id} not found"
+                )
                 return
 
             old_msg_id = settings.get("monitoring_message_id")
@@ -787,10 +817,14 @@ class Spec(commands.Cog):
                 try:
                     old_msg = await channel.fetch_message(int(old_msg_id))
                 except (disnake.NotFound, disnake.Forbidden):
-                    self.logger.info("Old monitoring launcher message not found, will create new")
+                    self.logger.info(
+                        "Old monitoring launcher message not found, will create new"
+                    )
                     old_msg = None
                 except Exception as e:
-                    self.logger.warning(f"Error fetching monitoring launcher message: {e}")
+                    self.logger.warning(
+                        f"Error fetching monitoring launcher message: {e}"
+                    )
                     old_msg = None
 
             embed = disnake.Embed(
@@ -806,7 +840,9 @@ class Spec(commands.Cog):
             if old_msg:
                 try:
                     await old_msg.edit(embed=embed, view=MonitoringLauncherView())
-                    self.logger.info(f"✓ Updated monitoring launcher in #{channel.name}")
+                    self.logger.info(
+                        f"✓ Updated monitoring launcher in #{channel.name}"
+                    )
                 except Exception as e:
                     self.logger.error(f"Failed to edit monitoring launcher: {e}")
             else:
@@ -826,7 +862,9 @@ class Spec(commands.Cog):
                 self.logger.info(f"✓ Monitoring launcher created in #{channel.name}")
 
         except Exception as e:
-            self.logger.error(f"Failed to ensure monitoring launcher: {e}", exc_info=True)
+            self.logger.error(
+                f"Failed to ensure monitoring launcher: {e}", exc_info=True
+            )
 
     async def _handle_monitoring_open(self, interaction: disnake.MessageInteraction):
         """Handle 'Open monitoring' button — send ephemeral paginated monitoring."""
@@ -839,7 +877,9 @@ class Spec(commands.Cog):
 
         await self._send_monitoring_ephemeral(interaction, page=0)
 
-    async def _handle_monitoring_page(self, interaction: disnake.MessageInteraction, custom_id: str):
+    async def _handle_monitoring_page(
+        self, interaction: disnake.MessageInteraction, custom_id: str
+    ):
         """Handle monitoring pagination buttons."""
         # Format: monitoring_page_{next|prev}_{current_page}
         try:
@@ -859,13 +899,17 @@ class Spec(commands.Cog):
             self.logger.error(f"Invalid monitoring page custom_id: {custom_id}: {e}")
             await interaction.followup.send("❌ Ошибка пагинации.", ephemeral=True)
 
-    async def _send_monitoring_ephemeral(self, interaction: disnake.MessageInteraction, page: int = 0):
+    async def _send_monitoring_ephemeral(
+        self, interaction: disnake.MessageInteraction, page: int = 0
+    ):
         """Build and send/edit an ephemeral monitoring page for the user."""
         try:
             # Fetch data from API
             status = await self.api.get_monitoring_status()
             if not status:
-                await interaction.followup.send("❌ Не удалось получить данные мониторинга.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Не удалось получить данные мониторинга.", ephemeral=True
+                )
                 return
 
             settings = await self.api.get_guild_settings()
@@ -881,13 +925,18 @@ class Spec(commands.Cog):
                 gta_filter = settings.get("monitoring_filter_gta", False)
                 if gta_filter:
                     online_streamers = [
-                        s for s in online_streamers
+                        s
+                        for s in online_streamers
                         if str(s.get("game_id")) == Config.gta5_game_id
                     ]
 
             # Generate all pages
             pages = create_streamers_component(
-                online_streamers, total_count, gta_count, events=active_events, online_count=online_count
+                online_streamers,
+                total_count,
+                gta_count,
+                events=active_events,
+                online_count=online_count,
             )
 
             total_pages = len(pages)
@@ -946,12 +995,16 @@ class Spec(commands.Cog):
             try:
                 await interaction.edit_original_response(components=page_components)
             except Exception:
-                await interaction.followup.send(components=page_components, ephemeral=True)
+                await interaction.followup.send(
+                    components=page_components, ephemeral=True
+                )
 
         except Exception as e:
             self.logger.error(f"Error sending monitoring ephemeral: {e}", exc_info=True)
             try:
-                await interaction.followup.send("❌ Ошибка загрузки мониторинга.", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Ошибка загрузки мониторинга.", ephemeral=True
+                )
             except Exception:
                 pass
 

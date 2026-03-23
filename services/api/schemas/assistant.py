@@ -91,10 +91,8 @@ class AssistantFull(BaseModel):
     active_point_penalty: float = 0.0
     active_percent_penalty: float = 0.0
     active_checks: float = 0.0
-    active_warning_units: int = 0
     active_strict_warnings: int = 0
     active_oral_warnings: int = 0
-    active_warnings_display: str = "0/2 0/2"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -179,6 +177,25 @@ class SessionCreatedResponse(BaseModel):
                 if field in data and data[field]:
                     data[field] = make_aware(data[field])
         return data
+
+
+class AssistantSessionTargetStreamer(BaseModel):
+    streamer_id: Snowflake
+    streamer_name: str
+    is_online: bool
+    priority: int = 0
+
+
+class AssistantSessionTargetEvent(BaseModel):
+    id: Snowflake
+    name: str
+    is_active: bool
+    priority: int = 0
+
+
+class AssistantSessionTargetsResponse(BaseModel):
+    streamers: List[AssistantSessionTargetStreamer]
+    events: List[AssistantSessionTargetEvent]
 
 
 class AssistantSessionRecord(BaseModel):

@@ -8,6 +8,10 @@ import { setAccessToken } from '../../../../api/client';
 
 let mockedUser: UserContext | null = null;
 
+type TestUserContext = UserContext & {
+    manageable_roles?: Array<UserContext['role']>;
+};
+
 type StorageDict = Record<string, string>;
 
 const createLocalStorageMock = () => {
@@ -37,7 +41,7 @@ vi.mock('react-router-dom', async () => {
 const makeUser = (
     role: UserContext['role'],
     canRegisterUsers: boolean
-): UserContext => ({
+): TestUserContext => ({
     id: 1,
     discord_id: '1001',
     username: 'tester',
@@ -47,6 +51,9 @@ const makeUser = (
     permissions: {
         'admin.users.create': canRegisterUsers,
     },
+    manageable_roles: role === 'developer'
+        ? ['junior_employee', 'employee', 'senior_employee', 'manager', 'developer']
+        : ['junior_employee', 'employee', 'senior_employee'],
 });
 
 describe('UserRegistration', () => {

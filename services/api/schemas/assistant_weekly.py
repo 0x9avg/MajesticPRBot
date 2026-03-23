@@ -33,7 +33,7 @@ class AssistantWeeklyAdminSaveRequest(BaseModel):
     day_overrides: list[AssistantWeeklyDayOverrideInput] = Field(default_factory=list)
     selected_result: Optional[WeeklySelectedResult] = None
     payout_type: Optional[WeeklyPayoutType] = None
-    payout_server: Optional[str] = None
+    payout_server_id: Optional[int] = None
     payout_static: Optional[str] = None
 
     @model_validator(mode="after")

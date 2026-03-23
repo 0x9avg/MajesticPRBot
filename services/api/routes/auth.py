@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from fastapi.security import HTTPAuthorizationCredentials
     from services.auth import AuthService
 
@@ -17,10 +17,17 @@ from datetime import datetime, timezone, timedelta
 MSK = timezone(timedelta(hours=3))
 
 from config import Config
-from dependencies import AuthErrorCode, _auth_error, get_current_user as get_authenticated_user
+from dependencies import (
+    AuthErrorCode,
+    _auth_error,
+    enforce_site_maintenance_for_login,
+    get_current_user as get_authenticated_user,
+    get_current_user_allow_maintenance,
+)
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer
 from schemas.auth import LoginRequest, LoginResponse, UserResponse
+from services.rbac import get_manageable_roles
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 security = HTTPBearer()
@@ -84,6 +91,7 @@ async def login(
 
     # Get user
     user = await db.get_user_by_username(login_data.username)
+    await enforce_site_maintenance_for_login(db, user)
 
     if user:
         # Check lockout using account_lockout_duration
@@ -192,6 +200,7 @@ async def refresh_token(
     user_agent = request.headers.get("user-agent", "")
 
     if not refresh_token:
+        await enforce_site_maintenance_for_login(db, None)
         raise _auth_error(AuthErrorCode.TOKEN_INVALID, "Refresh token отсутствует.")
 
     # Find session by hash
@@ -199,6 +208,7 @@ async def refresh_token(
     session = await db.find_session_by_refresh_hash(token_hash)
 
     if not session:
+        await enforce_site_maintenance_for_login(db, None)
         raise _auth_error(AuthErrorCode.TOKEN_INVALID, "Невалидный refresh token.")
 
     # Check if session was already replaced or revoked -> REUSE DETECTION
@@ -227,6 +237,12 @@ async def refresh_token(
         _clear_refresh_cookie(response)
         raise _auth_error(AuthErrorCode.SESSION_EXPIRED, "Сессия истекла. Требуется повторный вход.")
 
+    user = await db.get_user_by_id(session["user_id"])
+    if not user:
+        _clear_refresh_cookie(response)
+        raise _auth_error(AuthErrorCode.TOKEN_INVALID, "Пользователь не найден.")
+    await enforce_site_maintenance_for_login(db, user)
+
     # Generate new tokens
     new_raw, new_hash, new_expires = auth.create_refresh_token(session["user_id"])
 
@@ -248,12 +264,6 @@ async def refresh_token(
             AuthErrorCode.REFRESH_REUSE_DETECTED,
             "Ошибка ротации токена. Все сессии отозваны.",
         )
-
-    # Get user for new access token
-    user = await db.get_user_by_id(session["user_id"])
-    if not user:
-        _clear_refresh_cookie(response)
-        raise _auth_error(AuthErrorCode.TOKEN_INVALID, "Пользователь не найден.")
 
     access_token = auth.create_access_token(
         user["discord_id"],
@@ -285,7 +295,7 @@ async def logout_current(
     request: Request,
     response: Response,
     db: "Database" = Depends(get_db),
-    user: dict = Depends(get_authenticated_user),
+    user: dict = Depends(get_current_user_allow_maintenance),
 ):
     """Logout current session only (current device)."""
     client_ip = request.client.host if request.client else None
@@ -359,6 +369,7 @@ async def get_current_user(
         role=user["role"],
         require_password_change=bool(user["require_password_change"]),
         permissions=user.get("permissions", {}),
+        manageable_roles=list(get_manageable_roles(user.get("role"))),
     )
 
 

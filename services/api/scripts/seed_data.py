@@ -29,7 +29,7 @@ import aiohttp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
-from database import Database
+from db import Database
 from dotenv import load_dotenv
 from services.auth import AuthService
 

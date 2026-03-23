@@ -5,7 +5,7 @@ import { Lock, User, Eye, EyeOff } from 'lucide-react'
 import NotificationToast from '../components/feedback/NotificationToast'
 import { usePopupToast } from '../components/feedback/hooks'
 import { getApiErrorMessage } from '../types/api'
-import { apiFetch, setAccessToken } from '../api/client'
+import { apiFetch, clearSiteMaintenanceState, setAccessToken, readSiteMaintenanceMessage } from '../api/client'
 
 void React
 
@@ -29,6 +29,15 @@ export default function Login() {
                 body: JSON.stringify({ username, password })
             })
 
+            const loginMaintenanceMessage = await readSiteMaintenanceMessage(response)
+            if (loginMaintenanceMessage) {
+                navigate('/maintenance', {
+                    replace: true,
+                    state: { message: loginMaintenanceMessage },
+                })
+                return
+            }
+
             if (!response.ok) {
                 const data = await response.json().catch(() => ({} as unknown))
                 throw new Error(getApiErrorMessage(data, 'Ошибка авторизации'))
@@ -43,6 +52,7 @@ export default function Login() {
 
             // Step 2: Get user info
             const userResponse = await apiFetch('/api/auth/me')
+            const maintenanceMessage = await readSiteMaintenanceMessage(userResponse)
 
             if (userResponse.status === 401) {
                 setAccessToken(null)
@@ -51,10 +61,21 @@ export default function Login() {
                 throw new Error('Сессия недействительна. Выполните вход снова.')
             }
 
-            if (userResponse.ok) {
-                await userResponse.json()
+            if (maintenanceMessage) {
+                navigate('/maintenance', {
+                    replace: true,
+                    state: { message: maintenanceMessage },
+                })
+                return
             }
 
+            if (!userResponse.ok) {
+                const data = await userResponse.json().catch(() => ({} as unknown))
+                throw new Error(getApiErrorMessage(data, 'Не удалось загрузить профиль'))
+            }
+
+            await userResponse.json()
+            clearSiteMaintenanceState()
             navigate('/hub')
         } catch (err: unknown) {
             showToast(err instanceof Error ? err.message : 'Ошибка авторизации', 'error')

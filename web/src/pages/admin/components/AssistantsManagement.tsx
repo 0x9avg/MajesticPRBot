@@ -1,46 +1,43 @@
 import React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Check, Clipboard, Coins, RefreshCw, Timer, Trash2, Wrench } from 'lucide-react';
-import { CustomSelect, CustomDropdown, CustomDatePicker, CustomTimePicker } from '../../../components/CustomInputs';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Clipboard, Coins, RefreshCw, Timer, Trash2, Wrench } from 'lucide-react';
+
+import { CustomDatePicker, CustomDropdown, CustomSelect, CustomTimePicker } from '../../../components/CustomInputs';
 import ConfirmDialog from '../../../components/feedback/ConfirmDialog';
 import NotificationToast from '../../../components/feedback/NotificationToast';
 import { useConfirmDialog, usePopupToast } from '../../../components/feedback/hooks';
+import { apiFetch } from '../../../api/client';
+import type { KnownRole, UserContext } from '../../../types/auth';
+import { unwrapApiData } from '../../../types/api';
 import type {
     ActiveSanction,
-    Assistant,
-    Event,
-    SanctionDayStatus,
-    Streamer,
+    AssistantSessionRecord,
+    AssistantSessionTargetEvent,
+    AssistantSessionTargetStreamer,
     WorkoffPreviewAssistant,
     WorkoffPreviewResponse,
     WorkoffProgressDay,
 } from '../../../types/domain';
-import { unwrapApiData } from '../../../types/api';
 import { parseMskDate, getMskDateOffsetStr, getMskNow, formatMskToLocal, formatToMskIso } from '../../../utils/datetime';
-import { apiFetch } from '../../../api/client';
+import { ROLE_LABELS } from '../../../utils/roles';
+import {
+    useAssistantDayStatus,
+    useAssistantDetail,
+    useAssistantsList,
+    useAssistantSanctions,
+    useAssistantSessions,
+    useSessionTargets,
+} from './assistants/hooks';
 
 void React;
 
-export type SpecSessionEndReason = 'manual_unclaim' | 'stream_end' | 'category_change' | 'admin_closed' | 'event_end' | 'event_rejected' | 'unknown';
-
-interface AssistantSessionRecord {
-    id: number;
-    pr_id: number | string;
-    target_type?: string | null;
-    target_id?: number | string | null;
-    target_name?: string | null;
-    started_at: string;
-    ended_at?: string | null;
-    duration_seconds?: number | null;
-    end_reason?: SpecSessionEndReason | null;
-    is_probation?: boolean;
-    priority_auto?: number | null;
-    priority_override?: number | null;
-    rate_auto?: number | null;
-    credited_points?: number | null;
-    deleted_at?: string | null;
-    delete_reason?: string | null;
+interface AssistantsManagementProps {
+    user?: UserContext | null;
 }
+
+type UserWithManageableRoles = UserContext & {
+    manageable_roles?: KnownRole[];
+};
 
 interface SelectOption {
     value: string;
@@ -49,6 +46,7 @@ interface SelectOption {
 
 type SanctionKind = 'check' | 'point' | 'percent' | 'oral' | 'strict';
 type WorkoffMetric = 'spec' | 'complaints' | 'mchat';
+type MutationMethod = 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 interface WorkoffDraftItem {
     local_id: string;
@@ -96,9 +94,7 @@ const workoffDayStatusTone = (status?: string | null) => {
     return 'text-sky-200 bg-sky-500/10 border-sky-400/20';
 };
 
-const formatDateTime = (value?: string | null) => {
-    return formatMskToLocal(value);
-};
+const formatDateTime = (value?: string | null) => formatMskToLocal(value);
 
 const formatMetricValue = (value?: number | null, fractionDigits = 2) => {
     const numeric = Number(value ?? 0);
@@ -109,6 +105,8 @@ const formatMetricValue = (value?: number | null, fractionDigits = 2) => {
         .replace(/\.0+$/, '')
         .replace(/\.00$/, '');
 };
+
+const formatWorkoffCounter = (value?: number | null) => Number(value ?? 0);
 
 const toNumberOrUndefined = (value: string) => {
     const trimmed = value.trim();
@@ -123,13 +121,11 @@ const toLocalDateTimeInput = (isoValue?: string | null) => {
     return formatToMskIso(dt).substring(0, 16);
 };
 
-/** Split 'YYYY-MM-DDTHH:mm' into { date: 'YYYY-MM-DD', time: 'HH:mm' } */
 const splitDateTime = (combined: string) => {
     const [date = '', time = ''] = combined.split('T');
     return { date, time };
 };
 
-/** Merge date and time parts back into 'YYYY-MM-DDTHH:mm' */
 const mergeDateTimePart = (current: string, part: 'date' | 'time', value: string) => {
     const { date, time } = splitDateTime(current);
     if (part === 'date') return value ? `${value}T${time || '00:00'}` : '';
@@ -138,7 +134,7 @@ const mergeDateTimePart = (current: string, part: 'date' | 'time', value: string
 
 const parseLocalDateTimeToIso = (localValue: string) => {
     if (!localValue) return null;
-    return localValue.length === 16 ? localValue + ':00' : localValue;
+    return localValue.length === 16 ? `${localValue}:00` : localValue;
 };
 
 const getDefaultManualWindow = () => {
@@ -151,7 +147,37 @@ const getDefaultManualWindow = () => {
     };
 };
 
-const makeStreamerOption = (streamer: Streamer): SelectOption => {
+const createInitialManualSanctionForm = () => ({
+    kind: 'point' as SanctionKind,
+    amount: '1',
+    auto_relief_date: '',
+    workoffItems: [] as WorkoffDraftItem[],
+});
+
+const createInitialManualSessionForm = () => {
+    const manualWindow = getDefaultManualWindow();
+    return {
+        target_type: 'streamer',
+        target_id: '',
+        target_name: '',
+        started_at: manualWindow.started_at,
+        ended_at: manualWindow.ended_at,
+        is_probation: false,
+        priority: '0',
+    };
+};
+
+const createInitialSessionEditState = () => ({
+    target_type: 'streamer',
+    target_id: '',
+    target_name: '',
+    started_at: '',
+    ended_at: '',
+    priority_override: '',
+    is_probation: false,
+});
+
+const makeStreamerOption = (streamer: AssistantSessionTargetStreamer): SelectOption => {
     const status = streamer.is_online ? 'онлайн' : 'оффлайн';
     return {
         value: String(streamer.streamer_id),
@@ -159,7 +185,7 @@ const makeStreamerOption = (streamer: Streamer): SelectOption => {
     };
 };
 
-const makeEventOption = (event: Event): SelectOption => {
+const makeEventOption = (event: AssistantSessionTargetEvent): SelectOption => {
     const status = event.is_active ? 'активно' : 'неактивно';
     return {
         value: String(event.id),
@@ -181,7 +207,11 @@ const getAvailableWorkoffMetrics = (items: WorkoffDraftItem[], currentId?: strin
 };
 
 const normalizeWorkoffPreviewResponse = (payload: unknown): WorkoffPreviewAssistant[] => {
-    const data = unwrapApiData<WorkoffPreviewResponse | WorkoffPreviewAssistant[] | { assistants?: WorkoffPreviewAssistant[]; items?: WorkoffPreviewAssistant[] }>(payload);
+    const data = unwrapApiData<
+        WorkoffPreviewResponse
+        | WorkoffPreviewAssistant[]
+        | { assistants?: WorkoffPreviewAssistant[]; items?: WorkoffPreviewAssistant[] }
+    >(payload);
     if (Array.isArray(data)) return data;
     if (data && typeof data === 'object') {
         if (Array.isArray(data.assistants)) return data.assistants;
@@ -189,8 +219,6 @@ const normalizeWorkoffPreviewResponse = (payload: unknown): WorkoffPreviewAssist
     }
     return [];
 };
-
-const formatWorkoffCounter = (value?: number | null) => Number(value ?? 0);
 
 const getSourceTypeLabel = (value?: string | null) => {
     switch (value) {
@@ -217,84 +245,175 @@ const ensureOptionExists = (
     return [{ value, label: `${prefix} ${value} (не найден)` }, ...options];
 };
 
-const AssistantsManagement = () => {
+const getTargetDisplayName = (session: AssistantSessionRecord) => {
+    if (session.target_type === 'manual') {
+        return session.target_name || 'manual';
+    }
+    return session.target_name || (session.target_id != null ? String(session.target_id) : '—');
+};
+
+const getRoleLabel = (role?: string | null) => {
+    if (!role) return 'Не указана';
+    return ROLE_LABELS[role as keyof typeof ROLE_LABELS] ?? role;
+};
+
+const WorkoffDaysList = ({ days, keyPrefix }: { days: WorkoffProgressDay[]; keyPrefix: string }) => (
+    <div className="space-y-2">
+        {days.map((day, index) => (
+            <div
+                key={`${keyPrefix}-${day.date}-${index}`}
+                className="flex flex-col gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between"
+            >
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-white/90">{day.date}</span>
+                    <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
+                        {workoffDayStatusLabel(day.day_status)}
+                    </span>
+                    {day.manual_status && (
+                        <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
+                    )}
+                </div>
+                <div className="flex flex-wrap gap-3 text-white/50">
+                    <span>Требуется: {formatMetricValue(day.required_amount ?? 0)}</span>
+                    <span>Отработано: {formatMetricValue(day.actual_amount ?? 0)}</span>
+                    <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
+                </div>
+            </div>
+        ))}
+    </div>
+);
+
+const InlineState = ({
+    message,
+    tone = 'neutral',
+}: {
+    message: string;
+    tone?: 'neutral' | 'warning' | 'danger';
+}) => {
+    const className = {
+        neutral: 'border-white/10 bg-white/[0.03] text-white/55',
+        warning: 'border-yellow-500/20 bg-yellow-500/10 text-yellow-100',
+        danger: 'border-rose-500/20 bg-rose-500/10 text-rose-100',
+    }[tone];
+
+    return (
+        <div className={`rounded-xl border px-4 py-3 text-sm ${className}`}>
+            {message}
+        </div>
+    );
+};
+
+const AssistantsManagement = ({ user = null }: AssistantsManagementProps) => {
     const { toast, showToast, closeToast } = usePopupToast(3000);
     const { confirm, dialogProps } = useConfirmDialog();
-    const [assistants, setAssistants] = useState<Assistant[]>([]);
+
+    const permissions = user?.permissions ?? {};
+    const canManageSessions = permissions['assistants.sessions.manage'] === true;
+    const canViewSessions = permissions['assistants.sessions.view'] === true || canManageSessions;
+    const canManagePoints = permissions['assistants.points.update'] === true;
+    const canManageSanctions = permissions['assistants.sanctions.manage'] === true;
+    const canWarningsManage = permissions['assistants.warnings.manage'] === true;
+    const canChangeRole = permissions['admin.users.role.update'] === true;
+    const canDeactivateAssistant = permissions['admin.users.deactivate'] === true;
+    const manageableRoles = ((user as UserWithManageableRoles | null)?.manageable_roles ?? []).filter(Boolean) as KnownRole[];
+    const canViewAssistantData = (
+        permissions['assistants.view'] === true
+        || canViewSessions
+        || canManagePoints
+        || canManageSanctions
+        || canWarningsManage
+        || canChangeRole
+        || canDeactivateAssistant
+    );
+    const hasAssistantsAccess = canViewAssistantData;
+
+    const { assistants, loading: assistantsLoading, error: assistantsError, reload: reloadAssistants } = useAssistantsList(canViewAssistantData);
     const [selectedPrId, setSelectedPrId] = useState<string | null>(null);
-    const [copiedId, setCopiedId] = useState(false);
-
-    const handleCopyId = () => {
-        if (!selectedPrId) return;
-        navigator.clipboard.writeText(selectedPrId)
-            .then(() => {
-                setCopiedId(true);
-                setTimeout(() => setCopiedId(false), 1500);
-                showToast('PR ID скопирован');
-            })
-            .catch(() => {
-                showToast('Не удалось скопировать PR ID', 'error');
-            });
-    };
-    const [selectedAssistant, setSelectedAssistant] = useState<Assistant | null>(null);
-    const [sessions, setSessions] = useState<AssistantSessionRecord[]>([]);
-    const [activeSanctions, setActiveSanctions] = useState<ActiveSanction[]>([]);
-    const [selectedDayStatus, setSelectedDayStatus] = useState<SanctionDayStatus | null>(null);
-    const [streamerOptions, setStreamerOptions] = useState<SelectOption[]>([]);
-    const [eventOptions, setEventOptions] = useState<SelectOption[]>([]);
-    const [streamerNameById, setStreamerNameById] = useState<Record<string, string>>({});
-    const [eventNameById, setEventNameById] = useState<Record<string, string>>({});
-    const [streamerPriorityById, setStreamerPriorityById] = useState<Record<string, number>>({});
-    const [eventPriorityById, setEventPriorityById] = useState<Record<string, number>>({});
-    const [optionsLoading, setOptionsLoading] = useState(false);
-    const [optionsError, setOptionsError] = useState<string | null>(null);
-    const [search, setSearch] = useState('');
-    const [loading, setLoading] = useState(true);
-    const [busy, setBusy] = useState(false);
-    const [sessionModeWarning, setSessionModeWarning] = useState<string | null>(null);
-    const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
-    const [sessionEdit, setSessionEdit] = useState({
-        target_type: 'streamer',
-        target_id: '',
-        target_name: '',
-        started_at: '',
-        ended_at: '',
-        priority_override: '',
-        is_probation: false,
-    });
-
+    const { assistant: selectedAssistant, loading: assistantLoading, error: assistantError, reload: reloadAssistantDetail } = useAssistantDetail(selectedPrId, canViewAssistantData);
+    const { sessions, loading: sessionsLoading, error: sessionsError, reload: reloadSessions } = useAssistantSessions(selectedPrId, canViewSessions);
+    const { sanctions: activeSanctions, loading: sanctionsLoading, error: sanctionsError, reload: reloadSanctions } = useAssistantSanctions(selectedPrId, canViewAssistantData);
     const [dayStatusDate, setDayStatusDate] = useState(getMskDateOffsetStr(0));
+    const { dayStatus: selectedDayStatus, loading: dayStatusLoading, error: dayStatusError, reload: reloadDayStatus } = useAssistantDayStatus(selectedPrId, dayStatusDate, canViewAssistantData);
+    const { data: sessionTargets, loading: optionsLoading, error: optionsError, ensureLoaded: ensureSessionTargetsLoaded, reset: resetSessionTargets } = useSessionTargets(canManageSessions);
+    const selectedIsSelf = Boolean(selectedAssistant && user?.discord_id != null)
+        && String(selectedAssistant?.pr_id) === String(user?.discord_id);
+    const canManageSelectedAssistant = React.useMemo(
+        () => selectedIsSelf || (Boolean(selectedAssistant?.role) && manageableRoles.includes(selectedAssistant?.role as KnownRole)),
+        [manageableRoles, selectedAssistant?.role, selectedIsSelf],
+    );
+    const canEditSelectedAssistant = canChangeRole && canManageSelectedAssistant;
+    const canDeactivateSelectedAssistant = canDeactivateAssistant && canManageSelectedAssistant;
+    const targetIsReadOnly = Boolean(selectedAssistant)
+        && !canManageSelectedAssistant
+        && (canManageSessions || canManagePoints || canManageSanctions || canWarningsManage || canChangeRole || canDeactivateAssistant);
+    const targetReadOnlyMessage = targetIsReadOnly
+        ? 'Эта учетная запись выше вашего уровня и доступна только для просмотра.'
+        : null;
+
+    const [copiedId, setCopiedId] = useState(false);
+    const [search, setSearch] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [editingSessionId, setEditingSessionId] = useState<number | null>(null);
+    const [sessionEdit, setSessionEdit] = useState(createInitialSessionEditState);
     const [pointsForm, setPointsForm] = useState({ adjustmentChange: '' });
     const [mchatForm, setMchatForm] = useState({ count: '' });
-    const [manualSanctionForm, setManualSanctionForm] = useState({
-        kind: 'point' as SanctionKind,
-        amount: '1',
-        auto_relief_date: '',
-        workoffItems: [] as WorkoffDraftItem[],
-    });
+    const [manualSanctionForm, setManualSanctionForm] = useState(createInitialManualSanctionForm);
     const [manualWorkoffPreview, setManualWorkoffPreview] = useState<WorkoffPreviewAssistant[]>([]);
     const [manualWorkoffPreviewLoading, setManualWorkoffPreviewLoading] = useState(false);
     const [manualWorkoffPreviewError, setManualWorkoffPreviewError] = useState<string | null>(null);
     const [manualWorkoffPreviewExpanded, setManualWorkoffPreviewExpanded] = useState<Record<string, boolean>>({});
     const [manualReliefAmountBySanctionId, setManualReliefAmountBySanctionId] = useState<Record<string, string>>({});
-    const manualWindow = getDefaultManualWindow();
-    const [manualSessionForm, setManualSessionForm] = useState({
-        target_type: 'streamer',
-        target_id: '',
-        target_name: '',
-        started_at: manualWindow.started_at,
-        ended_at: manualWindow.ended_at,
-        is_probation: false,
-        priority: '0',
-    });
+    const [manualSessionForm, setManualSessionForm] = useState(createInitialManualSessionForm);
+    const workoffPreviewRequestIdRef = useRef(0);
+
+    useEffect(() => {
+        if (!canManageSessions || !canManageSelectedAssistant) {
+            resetSessionTargets();
+            setEditingSessionId(null);
+        }
+    }, [canManageSelectedAssistant, canManageSessions, resetSessionTargets]);
+
+    useEffect(() => {
+        setCopiedId(false);
+        setEditingSessionId(null);
+        setSessionEdit(createInitialSessionEditState());
+        setPointsForm({ adjustmentChange: '' });
+        setMchatForm({ count: '' });
+        setManualReliefAmountBySanctionId({});
+    }, [selectedPrId]);
+
+    useEffect(() => {
+        if (!canViewAssistantData) {
+            setSelectedPrId(null);
+            return;
+        }
+        if (assistants.length === 0) {
+            setSelectedPrId(null);
+            return;
+        }
+        setSelectedPrId((current) => {
+            if (current && assistants.some((assistant) => String(assistant.pr_id) === current)) {
+                return current;
+            }
+            return String(assistants[0].pr_id);
+        });
+    }, [assistants, canViewAssistantData]);
+
+    useEffect(() => {
+        if (!canManageSessions || !canManageSelectedAssistant) return;
+        const needsTargets = manualSessionForm.target_type !== 'manual'
+            || (editingSessionId !== null && sessionEdit.target_type !== 'manual');
+        if (!needsTargets) return;
+        void ensureSessionTargetsLoaded();
+    }, [canManageSelectedAssistant, canManageSessions, editingSessionId, ensureSessionTargetsLoaded, manualSessionForm.target_type, sessionEdit.target_type]);
 
     const filteredAssistants = useMemo(() => {
         const query = search.trim().toLowerCase();
         if (!query) return assistants;
-        return assistants.filter((assistant) =>
+        return assistants.filter((assistant) => (
             assistant.nickname.toLowerCase().includes(query)
             || String(assistant.pr_id).includes(query)
-        );
+        ));
     }, [assistants, search]);
 
     const sanctionTotals = useMemo(() => (
@@ -319,264 +438,121 @@ const AssistantsManagement = () => {
                 period_start: item.period_start,
                 period_end: item.period_end,
             }))
-            .filter(
-                (item) => item.period_start
-                    && item.period_end
-                    && Number.isFinite(item.multiplier)
-                    && item.multiplier > 0
-                    && (seen.has(item.metric) ? false : (seen.add(item.metric), true)),
-            );
+            .filter((item) => (
+                item.period_start
+                && item.period_end
+                && Number.isFinite(item.multiplier)
+                && item.multiplier > 0
+                && (seen.has(item.metric) ? false : (seen.add(item.metric), true))
+            ));
     }, [manualSanctionForm.workoffItems]);
 
-    const canUseStreamerOrEventSelectors = !optionsLoading && !optionsError;
+    const streamerOptions = useMemo(() => (sessionTargets?.streamers ?? []).map(makeStreamerOption), [sessionTargets?.streamers]);
+    const eventOptions = useMemo(() => (sessionTargets?.events ?? []).map(makeEventOption), [sessionTargets?.events]);
+    const streamerNameById = useMemo(() => Object.fromEntries((sessionTargets?.streamers ?? []).map((streamer) => [String(streamer.streamer_id), streamer.streamer_name])), [sessionTargets?.streamers]);
+    const eventNameById = useMemo(() => Object.fromEntries((sessionTargets?.events ?? []).map((event) => [String(event.id), event.name])), [sessionTargets?.events]);
+    const streamerPriorityById = useMemo(() => Object.fromEntries((sessionTargets?.streamers ?? []).map((streamer) => [String(streamer.streamer_id), streamer.priority ?? 0])), [sessionTargets?.streamers]);
+    const eventPriorityById = useMemo(() => Object.fromEntries((sessionTargets?.events ?? []).map((event) => [String(event.id), event.priority ?? 0])), [sessionTargets?.events]);
 
     const manualTargetOptions = useMemo(() => {
         const baseOptions = manualSessionForm.target_type === 'event' ? eventOptions : streamerOptions;
         const prefix = manualSessionForm.target_type === 'event' ? 'Событие ID' : 'Стример ID';
         return ensureOptionExists(baseOptions, manualSessionForm.target_id || undefined, prefix);
-    }, [manualSessionForm.target_type, manualSessionForm.target_id, eventOptions, streamerOptions]);
+    }, [eventOptions, manualSessionForm.target_id, manualSessionForm.target_type, streamerOptions]);
 
     const editTargetOptions = useMemo(() => {
         const baseOptions = sessionEdit.target_type === 'event' ? eventOptions : streamerOptions;
         const prefix = sessionEdit.target_type === 'event' ? 'Событие ID' : 'Стример ID';
         return ensureOptionExists(baseOptions, sessionEdit.target_id || undefined, prefix);
-    }, [sessionEdit.target_type, sessionEdit.target_id, eventOptions, streamerOptions]);
+    }, [eventOptions, sessionEdit.target_id, sessionEdit.target_type, streamerOptions]);
 
-    const fetchAssistants = useCallback(async () => {
-        const response = await apiFetch('/api/assistants');
-        if (!response.ok) throw new Error('Не удалось загрузить ассистентов');
-        const json = await response.json() as unknown;
-        const data = unwrapApiData<Assistant[] | { assistants: Assistant[] }>(json);
-        const normalized = Array.isArray(data) ? data : data.assistants;
-        const list = Array.isArray(normalized) ? normalized : [];
-        setAssistants(list);
-        if (list.length > 0) {
-            setSelectedPrId((prev) => prev ?? String(list[0].pr_id));
+    const roleOptions = useMemo(() => {
+        const roles = new Set<KnownRole>(manageableRoles);
+        if (selectedIsSelf && selectedAssistant?.role) {
+            roles.add(selectedAssistant.role as KnownRole);
         }
-    }, []);
+        return Array.from(roles).map((role) => ({
+            value: role,
+            label: getRoleLabel(role),
+        }));
+    }, [manageableRoles, selectedAssistant?.role, selectedIsSelf]);
 
-    const fetchSessionTargetOptions = useCallback(async () => {
-        setOptionsLoading(true);
-        setOptionsError(null);
+    const handleCopyId = () => {
+        if (!selectedPrId || !navigator.clipboard) return;
+        navigator.clipboard.writeText(selectedPrId)
+            .then(() => {
+                setCopiedId(true);
+                window.setTimeout(() => setCopiedId(false), 1500);
+                showToast('PR ID скопирован');
+            })
+            .catch(() => {
+                showToast('Не удалось скопировать PR ID', 'error');
+            });
+    };
+
+    const refreshSelectionData = useCallback(async () => {
+        const tasks: Promise<unknown>[] = [];
+        if (canViewAssistantData) {
+            tasks.push(reloadAssistantDetail(), reloadSanctions(), reloadDayStatus());
+        }
+        if (canViewSessions) {
+            tasks.push(reloadSessions());
+        }
+        if (tasks.length > 0) {
+            await Promise.allSettled(tasks);
+        }
+    }, [canViewAssistantData, canViewSessions, reloadAssistantDetail, reloadDayStatus, reloadSanctions, reloadSessions]);
+
+    const refreshDetailAndDayStatus = useCallback(async () => {
+        await Promise.allSettled([reloadAssistantDetail(), reloadDayStatus()]);
+    }, [reloadAssistantDetail, reloadDayStatus]);
+
+    const refreshSanctionsAndDayStatus = useCallback(async () => {
+        await Promise.allSettled([reloadAssistantDetail(), reloadSanctions(), reloadDayStatus()]);
+    }, [reloadAssistantDetail, reloadDayStatus, reloadSanctions]);
+
+    const refreshSessionsAndDayStatus = useCallback(async () => {
+        await Promise.allSettled([reloadAssistantDetail(), reloadSessions(), reloadDayStatus()]);
+    }, [reloadAssistantDetail, reloadDayStatus, reloadSessions]);
+
+    const refreshListAndDetail = useCallback(async () => {
+        await Promise.allSettled([reloadAssistants(), reloadAssistantDetail()]);
+    }, [reloadAssistantDetail, reloadAssistants]);
+
+    const runMutation = useCallback(async (
+        endpoint: string,
+        method: MutationMethod,
+        payload: Record<string, unknown> | undefined,
+        successMessage: string,
+        afterSuccess?: () => Promise<void>,
+    ) => {
+        setBusy(true);
         try {
-            const [streamersResponse, eventsResponse] = await Promise.all([
-                apiFetch('/api/streamers'),
-                apiFetch('/api/events'),
-            ]);
-
-            if (!streamersResponse.ok || !eventsResponse.ok) {
-                throw new Error('Не удалось загрузить списки стримеров/событий');
+            const response = await apiFetch(endpoint, {
+                method,
+                headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+                body: payload ? JSON.stringify(payload) : undefined,
+            });
+            const json = await response.json().catch(() => ({} as unknown));
+            if (!response.ok) {
+                throw new Error((json as { detail?: string }).detail || 'Операция не выполнена');
             }
-
-            const streamersJson = await streamersResponse.json() as unknown;
-            const eventsJson = await eventsResponse.json() as unknown;
-
-            const streamersData = unwrapApiData<{ streamers?: Streamer[] } | Streamer[]>(streamersJson);
-            const eventsData = unwrapApiData<Event[] | { events: Event[] }>(eventsJson);
-
-            const rawStreamers = Array.isArray(streamersData)
-                ? streamersData
-                : (streamersData.streamers || []);
-            const rawEvents = Array.isArray(eventsData)
-                ? eventsData
-                : ((eventsData && 'events' in eventsData) ? eventsData.events : []);
-
-            const sortedStreamers = [...rawStreamers].sort((a, b) => {
-                const onlineCmp = Number(Boolean(b.is_online)) - Number(Boolean(a.is_online));
-                if (onlineCmp !== 0) return onlineCmp;
-                return (a.streamer_name || '').localeCompare(b.streamer_name || '', 'ru');
-            });
-            const sortedEvents = [...rawEvents].sort((a, b) => {
-                const activeCmp = Number(Boolean(b.is_active)) - Number(Boolean(a.is_active));
-                if (activeCmp !== 0) return activeCmp;
-                return (a.name || '').localeCompare(b.name || '', 'ru');
-            });
-
-            const nextStreamerNameById: Record<string, string> = {};
-            const nextEventNameById: Record<string, string> = {};
-            const nextStreamerPriorityById: Record<string, number> = {};
-            const nextEventPriorityById: Record<string, number> = {};
-            sortedStreamers.forEach((streamer) => {
-                nextStreamerNameById[String(streamer.streamer_id)] = streamer.streamer_name;
-                nextStreamerPriorityById[String(streamer.streamer_id)] = streamer.priority ?? 0;
-            });
-            sortedEvents.forEach((event) => {
-                nextEventNameById[String(event.id)] = event.name;
-                nextEventPriorityById[String(event.id)] = event.priority ?? 0;
-            });
-
-            setStreamerNameById(nextStreamerNameById);
-            setEventNameById(nextEventNameById);
-            setStreamerPriorityById(nextStreamerPriorityById);
-            setEventPriorityById(nextEventPriorityById);
-            setStreamerOptions(sortedStreamers.map(makeStreamerOption));
-            setEventOptions(sortedEvents.map(makeEventOption));
+            if (afterSuccess) {
+                await afterSuccess();
+            }
+            showToast(successMessage);
+            return true;
         } catch (error: unknown) {
-            setOptionsError(error instanceof Error ? error.message : 'Не удалось загрузить списки стримеров/событий');
+            showToast(error instanceof Error ? error.message : 'Операция не выполнена', 'error');
+            return false;
         } finally {
-            setOptionsLoading(false);
+            setBusy(false);
         }
-    }, []);
-
-    const fetchAssistantDetail = useCallback(async (prId: string) => {
-        const response = await apiFetch(`/api/assistants/${prId}`);
-        if (!response.ok) throw new Error('Не удалось загрузить профиль ассистента');
-        const json = await response.json() as unknown;
-        const data = unwrapApiData<Assistant>(json);
-        setSelectedAssistant(data);
-    }, []);
-
-    const fetchAssistantSessions = useCallback(async (prId: string) => {
-        const response = await apiFetch(`/api/assistants/${prId}/sessions?limit=50`);
-
-        if (response.ok) {
-            const json = await response.json() as unknown;
-            const data = unwrapApiData<AssistantSessionRecord[]>(json);
-            setSessions(Array.isArray(data) ? data : []);
-            setSessionModeWarning(null);
-            return;
-        }
-
-        // Fallback: if auth header is stripped somewhere in the chain,
-        // still show read-only streamer sessions from public spec endpoint.
-        if (response.status === 401 || response.status === 403) {
-            const fallback = await apiFetch(`/api/spec/sessions/${prId}?limit=50`);
-            if (fallback.ok) {
-                const fallbackJson = await fallback.json() as unknown;
-                const fallbackData = unwrapApiData<Array<{
-                    id: number;
-                    pr_id: number | string;
-                    streamer_id?: number | string | null;
-                    started_at: string;
-                    ended_at?: string | null;
-                    duration_seconds?: number | null;
-                    end_reason?: SpecSessionEndReason | null;
-                }>>(fallbackJson);
-                const normalized = Array.isArray(fallbackData)
-                    ? fallbackData.map((item) => ({
-                        id: item.id,
-                        pr_id: item.pr_id,
-                        target_type: 'streamer',
-                        target_id: item.streamer_id ?? null,
-                        target_name: null,
-                        started_at: item.started_at,
-                        ended_at: item.ended_at ?? null,
-                        duration_seconds: item.duration_seconds ?? null,
-                        end_reason: item.end_reason ?? null,
-                        credited_points: null,
-                    } satisfies AssistantSessionRecord))
-                    : [];
-                setSessions(normalized);
-                setSessionModeWarning('Сессии загружены в режиме read-only. Для админ-редактирования выполните повторный вход.');
-                return;
-            }
-        }
-
-        throw new Error('Не удалось загрузить сессии ассистента');
-    }, []);
-
-    const fetchAssistantActiveSanctions = useCallback(async (prId: string) => {
-        const response = await apiFetch(`/api/assistants/${prId}/sanctions/active`);
-        if (!response.ok) {
-            throw new Error('Не удалось загрузить активные санкции ассистента');
-        }
-        const json = await response.json() as unknown;
-        const data = unwrapApiData<ActiveSanction[]>(json);
-        setActiveSanctions(Array.isArray(data) ? data : []);
-    }, []);
-
-    const fetchAssistantDayStatus = useCallback(async (prId: string, workDate: string) => {
-        const response = await apiFetch(`/api/assistants/${prId}/day-status?date=${workDate}`);
-        if (!response.ok) {
-            throw new Error('Не удалось загрузить дневной статус ассистента');
-        }
-        const json = await response.json() as unknown;
-        const data = unwrapApiData<SanctionDayStatus>(json);
-        setSelectedDayStatus(data);
-    }, []);
-
-    const refreshSelectedAssistant = useCallback(async (prId: string) => {
-        const [detailResult, sessionsResult, assistantsResult, sanctionsResult] = await Promise.allSettled([
-            fetchAssistantDetail(prId),
-            fetchAssistantSessions(prId),
-            fetchAssistants(),
-            fetchAssistantActiveSanctions(prId),
-        ]);
-
-        if (detailResult.status === 'rejected') {
-            throw detailResult.reason;
-        }
-        if (assistantsResult.status === 'rejected') {
-            throw assistantsResult.reason;
-        }
-        if (sessionsResult.status === 'rejected') {
-            setSessions([]);
-            setSessionModeWarning(null);
-            showToast(
-                sessionsResult.reason instanceof Error
-                    ? sessionsResult.reason.message
-                    : 'Не удалось загрузить сессии ассистента',
-                'error',
-            );
-        }
-        if (sanctionsResult.status === 'rejected') {
-            setActiveSanctions([]);
-            showToast(
-                sanctionsResult.reason instanceof Error
-                    ? sanctionsResult.reason.message
-                    : 'Не удалось загрузить активные санкции ассистента',
-                'error',
-            );
-        }
-    }, [fetchAssistantActiveSanctions, fetchAssistantDetail, fetchAssistantSessions, fetchAssistants, showToast]);
+    }, [showToast]);
 
     useEffect(() => {
-        const load = async () => {
-            try {
-                setLoading(true);
-                await Promise.all([fetchAssistants(), fetchSessionTargetOptions()]);
-            } catch (error: unknown) {
-                showToast(error instanceof Error ? error.message : 'Ошибка загрузки', 'error');
-            } finally {
-                setLoading(false);
-            }
-        };
-        void load();
-    }, [fetchAssistants, fetchSessionTargetOptions, showToast]);
-
-    useEffect(() => {
-        if (!selectedPrId) return;
-        const loadSelected = async () => {
-            try {
-                setBusy(true);
-                await refreshSelectedAssistant(selectedPrId);
-            } catch (error: unknown) {
-                showToast(error instanceof Error ? error.message : 'Ошибка загрузки данных ассистента', 'error');
-            } finally {
-                setBusy(false);
-            }
-        };
-        void loadSelected();
-    }, [refreshSelectedAssistant, selectedPrId, showToast]);
-
-    useEffect(() => {
-        if (!selectedPrId) {
-            setSelectedDayStatus(null);
-            return;
-        }
-        const loadDayStatus = async () => {
-            try {
-                await fetchAssistantDayStatus(selectedPrId, dayStatusDate);
-            } catch (error: unknown) {
-                setSelectedDayStatus(null);
-                showToast(error instanceof Error ? error.message : 'Не удалось загрузить дневной статус ассистента', 'error');
-            }
-        };
-        void loadDayStatus();
-    }, [dayStatusDate, fetchAssistantDayStatus, selectedPrId, showToast]);
-
-    useEffect(() => {
-        if (!selectedPrId || manualWorkoffItemsPayload.length === 0) {
+        if (!selectedPrId || !canManageSanctions || !canManageSelectedAssistant || manualWorkoffItemsPayload.length === 0) {
+            workoffPreviewRequestIdRef.current += 1;
             setManualWorkoffPreview([]);
             setManualWorkoffPreviewError(null);
             setManualWorkoffPreviewLoading(false);
@@ -584,7 +560,8 @@ const AssistantsManagement = () => {
             return;
         }
 
-        let cancelled = false;
+        const requestId = workoffPreviewRequestIdRef.current + 1;
+        workoffPreviewRequestIdRef.current = requestId;
         setManualWorkoffPreviewLoading(true);
         setManualWorkoffPreviewError(null);
 
@@ -599,23 +576,20 @@ const AssistantsManagement = () => {
                             workoff_items: manualWorkoffItemsPayload,
                         }),
                     });
+                    const payload = await response.json().catch(() => ({} as unknown));
                     if (!response.ok) {
-                        const payload = await response.json().catch(() => ({} as unknown));
                         throw new Error((payload as { detail?: string }).detail || 'Не удалось загрузить предпросмотр отработки');
                     }
-                    const payload = await response.json() as unknown;
-                    if (!cancelled) {
-                        setManualWorkoffPreviewExpanded({});
-                        setManualWorkoffPreview(normalizeWorkoffPreviewResponse(payload));
-                    }
+                    if (workoffPreviewRequestIdRef.current !== requestId) return;
+                    setManualWorkoffPreview(normalizeWorkoffPreviewResponse(payload));
+                    setManualWorkoffPreviewExpanded({});
                 } catch (error: unknown) {
-                    if (!cancelled) {
-                        setManualWorkoffPreview([]);
-                        setManualWorkoffPreviewExpanded({});
-                        setManualWorkoffPreviewError(error instanceof Error ? error.message : 'Не удалось загрузить предпросмотр отработки');
-                    }
+                    if (workoffPreviewRequestIdRef.current !== requestId) return;
+                    setManualWorkoffPreview([]);
+                    setManualWorkoffPreviewExpanded({});
+                    setManualWorkoffPreviewError(error instanceof Error ? error.message : 'Не удалось загрузить предпросмотр отработки');
                 } finally {
-                    if (!cancelled) {
+                    if (workoffPreviewRequestIdRef.current === requestId) {
                         setManualWorkoffPreviewLoading(false);
                     }
                 }
@@ -623,42 +597,29 @@ const AssistantsManagement = () => {
         }, 250);
 
         return () => {
-            cancelled = true;
             window.clearTimeout(timerId);
         };
-    }, [manualWorkoffItemsPayload, selectedPrId]);
+    }, [canManageSanctions, canManageSelectedAssistant, manualWorkoffItemsPayload, selectedPrId]);
 
-    const runMutation = async (
-        endpoint: string,
-        method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
-        payload?: Record<string, unknown>,
-    ) => {
-        if (!selectedPrId) return;
-        setBusy(true);
-        try {
-            const response = await apiFetch(endpoint, {
-                method,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: payload ? JSON.stringify(payload) : undefined,
-            });
-            const json = await response.json().catch(() => ({} as unknown));
-            if (!response.ok) {
-                throw new Error((json as { detail?: string }).detail || 'Операция не выполнена');
-            }
-            await refreshSelectedAssistant(selectedPrId);
-            await fetchAssistantDayStatus(selectedPrId, dayStatusDate);
-            showToast('Изменения сохранены');
-        } catch (error: unknown) {
-            showToast(error instanceof Error ? error.message : 'Операция не выполнена', 'error');
-        } finally {
-            setBusy(false);
+    const ensureTargetsReady = useCallback(async (targetType: string) => {
+        if (targetType === 'manual') return true;
+        const loadedTargets = await ensureSessionTargetsLoaded();
+        if (!loadedTargets) {
+            showToast(optionsError || 'Справочник целей для сессий недоступен', 'error');
+            return false;
         }
-    };
+        const hasOptions = targetType === 'event'
+            ? loadedTargets.events.length > 0
+            : loadedTargets.streamers.length > 0;
+        if (!hasOptions) {
+            showToast(targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров', 'error');
+            return false;
+        }
+        return true;
+    }, [ensureSessionTargetsLoaded, optionsError, showToast]);
 
     const handleManualSanctionCreate = async () => {
-        if (!selectedPrId) return;
+        if (!selectedPrId || !canManageSanctions || !canManageSelectedAssistant) return;
         const fixedAmountKind = ['check', 'oral', 'strict'].includes(manualSanctionForm.kind);
         const needsWarningDate = ['oral', 'strict'].includes(manualSanctionForm.kind);
         if (needsWarningDate && !manualSanctionForm.auto_relief_date) {
@@ -671,51 +632,81 @@ const AssistantsManagement = () => {
             showToast('Укажите корректный размер санкции', 'error');
             return;
         }
-        const payload = {
-            assistant_id: selectedPrId,
-            kind: manualSanctionForm.kind,
-            ...(needsAmount ? { amount } : {}),
-            ...(needsWarningDate ? { auto_relief_date: manualSanctionForm.auto_relief_date } : {}),
-            workoff_items: manualWorkoffItemsPayload,
-        };
-        await runMutation('/api/assistant-sanctions', 'POST', payload);
+        const success = await runMutation(
+            '/api/assistant-sanctions',
+            'POST',
+            {
+                assistant_id: selectedPrId,
+                kind: manualSanctionForm.kind,
+                ...(needsAmount ? { amount } : {}),
+                ...(needsWarningDate ? { auto_relief_date: manualSanctionForm.auto_relief_date } : {}),
+                workoff_items: manualWorkoffItemsPayload,
+            },
+            'Санкция выдана',
+            refreshSanctionsAndDayStatus,
+        );
+        if (success) {
+            setManualSanctionForm(createInitialManualSanctionForm());
+            setManualWorkoffPreview([]);
+            setManualWorkoffPreviewExpanded({});
+            setManualWorkoffPreviewError(null);
+        }
     };
 
     const handleManualRelief = async (sanction: ActiveSanction) => {
+        if (!canManageSanctions || !canManageSelectedAssistant) return;
         const rawAmount = manualReliefAmountBySanctionId[sanction.sanction_id] ?? '';
-        const amount = ['check', 'oral', 'strict'].includes(sanction.kind) ? 1 : toNumberOrUndefined(rawAmount);
+        const amount = ['check', 'oral', 'strict'].includes(sanction.kind)
+            ? 1
+            : toNumberOrUndefined(rawAmount);
         if (!amount || amount <= 0) {
             showToast('Укажите корректный размер снятия', 'error');
             return;
         }
-        await runMutation(`/api/assistant-sanctions/${sanction.sanction_id}/reliefs`, 'POST', {
-            amount,
-            relief_type: 'manual',
-        });
-        setManualReliefAmountBySanctionId((prev) => {
-            const next = { ...prev };
-            delete next[sanction.sanction_id];
-            return next;
-        });
+        const success = await runMutation(
+            `/api/assistant-sanctions/${sanction.sanction_id}/reliefs`,
+            'POST',
+            {
+                amount,
+                relief_type: 'manual',
+            },
+            'Снятие сохранено',
+            refreshSanctionsAndDayStatus,
+        );
+        if (success) {
+            setManualReliefAmountBySanctionId((current) => {
+                const next = { ...current };
+                delete next[sanction.sanction_id];
+                return next;
+            });
+        }
     };
 
     const handlePointsAdjust = async () => {
-        if (!selectedPrId) return;
+        if (!selectedPrId || !canManagePoints || !canManageSelectedAssistant) return;
         const adjustmentChange = toNumberOrUndefined(pointsForm.adjustmentChange);
         if (adjustmentChange === undefined || adjustmentChange === 0) {
             showToast('Укажите, на сколько изменить корректировку баллов', 'error');
             return;
         }
-        await runMutation('/api/assistant-day-points', 'POST', {
-            assistant_id: selectedPrId,
-            work_date: dayStatusDate,
-            delta_points: Number((Number(selectedDayStatus?.manual_points_delta ?? 0) + adjustmentChange).toFixed(4)),
-        });
-        setPointsForm({ adjustmentChange: '' });
+        const success = await runMutation(
+            '/api/assistant-day-points',
+            'POST',
+            {
+                assistant_id: selectedPrId,
+                work_date: dayStatusDate,
+                delta_points: Number((Number(selectedDayStatus?.manual_points_delta ?? 0) + adjustmentChange).toFixed(4)),
+            },
+            'Корректировка баллов сохранена',
+            refreshDetailAndDayStatus,
+        );
+        if (success) {
+            setPointsForm({ adjustmentChange: '' });
+        }
     };
 
     const handleMchatSave = async () => {
-        if (!selectedPrId) return;
+        if (!selectedPrId || !canManagePoints || !canManageSelectedAssistant) return;
         const trimmed = mchatForm.count.trim();
         if (!trimmed) {
             showToast('Укажите количество MChat за день', 'error');
@@ -726,16 +717,24 @@ const AssistantsManagement = () => {
             showToast('Количество MChat должно быть целым числом от 0', 'error');
             return;
         }
-        await runMutation('/api/assistant-day-mchat', 'PUT', {
-            assistant_id: selectedPrId,
-            work_date: dayStatusDate,
-            mchat_count: parsed,
-        });
-        setMchatForm({ count: '' });
+        const success = await runMutation(
+            '/api/assistant-day-mchat',
+            'PUT',
+            {
+                assistant_id: selectedPrId,
+                work_date: dayStatusDate,
+                mchat_count: parsed,
+            },
+            'MChat за день сохранен',
+            refreshDetailAndDayStatus,
+        );
+        if (success) {
+            setMchatForm({ count: '' });
+        }
     };
 
     const handleManualSessionCreate = async () => {
-        if (!selectedPrId) return;
+        if (!selectedPrId || !canManageSessions || !canManageSelectedAssistant) return;
         const startedAtIso = parseLocalDateTimeToIso(manualSessionForm.started_at);
         const endedAtIso = parseLocalDateTimeToIso(manualSessionForm.ended_at);
         if (!startedAtIso || !endedAtIso) {
@@ -746,14 +745,7 @@ const AssistantsManagement = () => {
             showToast('Конец сессии должен быть позже начала', 'error');
             return;
         }
-        const targetType = manualSessionForm.target_type;
-        const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
-        if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
-            showToast(optionsError || 'Справочники стримеров/событий пока недоступны', 'error');
-            return;
-        }
-        if (targetType !== 'manual' && targetOptions.length === 0) {
-            showToast(targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров', 'error');
+        if (!(await ensureTargetsReady(manualSessionForm.target_type))) {
             return;
         }
         if (manualSessionForm.target_type !== 'manual' && !manualSessionForm.target_id.trim()) {
@@ -765,33 +757,38 @@ const AssistantsManagement = () => {
             showToast('Некорректная цель спека', 'error');
             return;
         }
-        if (manualSessionForm.target_type === 'manual') {
-            // manual sessions no longer require a comment
-        }
         const targetName = parsedTargetId !== undefined
             ? (
-                targetType === 'event'
+                manualSessionForm.target_type === 'event'
                     ? eventNameById[String(parsedTargetId)]
                     : streamerNameById[String(parsedTargetId)]
             ) || null
             : null;
-        await runMutation(`/api/assistants/${selectedPrId}/session`, 'POST', {
-            target_type: manualSessionForm.target_type,
-            target_id: manualSessionForm.target_type === 'manual'
-                ? null
-                : parsedTargetId,
-            target_name: manualSessionForm.target_type === 'manual'
-                ? (manualSessionForm.target_name.trim() || null)
-                : targetName,
-            started_at: startedAtIso,
-            ended_at: endedAtIso,
-            is_probation: manualSessionForm.is_probation,
-            priority: Number(manualSessionForm.priority || '0'),
-        });
+
+        const success = await runMutation(
+            `/api/assistants/${selectedPrId}/session`,
+            'POST',
+            {
+                target_type: manualSessionForm.target_type,
+                target_id: manualSessionForm.target_type === 'manual' ? null : parsedTargetId,
+                target_name: manualSessionForm.target_type === 'manual'
+                    ? (manualSessionForm.target_name.trim() || null)
+                    : targetName,
+                started_at: startedAtIso,
+                ended_at: endedAtIso,
+                is_probation: manualSessionForm.is_probation,
+                priority: Number(manualSessionForm.priority || '0'),
+            },
+            'Ручная сессия добавлена',
+            refreshSessionsAndDayStatus,
+        );
+        if (success) {
+            setManualSessionForm(createInitialManualSessionForm());
+        }
     };
 
     const handleSessionPatch = async (sessionId: number) => {
-        if (!selectedPrId) return;
+        if (!selectedPrId || !canManageSessions || !canManageSelectedAssistant) return;
         const startedAtIso = parseLocalDateTimeToIso(sessionEdit.started_at);
         const endedAtIso = parseLocalDateTimeToIso(sessionEdit.ended_at);
         if (!startedAtIso || !endedAtIso) {
@@ -802,14 +799,7 @@ const AssistantsManagement = () => {
             showToast('Конец сессии должен быть позже начала', 'error');
             return;
         }
-        const targetType = sessionEdit.target_type;
-        const targetOptions = targetType === 'event' ? eventOptions : streamerOptions;
-        if (targetType !== 'manual' && !canUseStreamerOrEventSelectors) {
-            showToast(optionsError || 'Справочники стримеров/событий пока недоступны', 'error');
-            return;
-        }
-        if (targetType !== 'manual' && targetOptions.length === 0) {
-            showToast(targetType === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров', 'error');
+        if (!(await ensureTargetsReady(sessionEdit.target_type))) {
             return;
         }
         if (sessionEdit.target_type !== 'manual' && !sessionEdit.target_id.trim()) {
@@ -821,110 +811,131 @@ const AssistantsManagement = () => {
             showToast('Некорректная цель спека', 'error');
             return;
         }
-        if (sessionEdit.target_type === 'manual') {
-            // manual sessions no longer require a comment
-        }
-        const payload: Record<string, unknown> = {
-            target_type: sessionEdit.target_type,
-            target_id: sessionEdit.target_type === 'manual' ? null : parsedTargetId,
-            target_name: sessionEdit.target_type === 'manual'
-                ? (sessionEdit.target_name.trim() || null)
-                : null,
-            started_at: startedAtIso,
-            ended_at: endedAtIso,
-            is_probation: sessionEdit.is_probation,
-        };
+
         const defaultPriority = sessionEdit.target_type === 'event'
             ? eventPriorityById[String(parsedTargetId)] ?? 0
             : sessionEdit.target_type === 'streamer'
                 ? streamerPriorityById[String(parsedTargetId)] ?? 0
                 : 0;
-
+        const targetName = parsedTargetId !== undefined
+            ? (
+                sessionEdit.target_type === 'event'
+                    ? eventNameById[String(parsedTargetId)]
+                    : streamerNameById[String(parsedTargetId)]
+            ) || null
+            : null;
+        const payload: Record<string, unknown> = {
+            target_type: sessionEdit.target_type,
+            target_id: sessionEdit.target_type === 'manual' ? null : parsedTargetId,
+            target_name: sessionEdit.target_type === 'manual'
+                ? (sessionEdit.target_name.trim() || null)
+                : targetName,
+            started_at: startedAtIso,
+            ended_at: endedAtIso,
+            is_probation: sessionEdit.is_probation,
+            priority_override: null,
+        };
         if (sessionEdit.priority_override.trim() !== '') {
             const parsedOverride = Number(sessionEdit.priority_override);
-            if (parsedOverride === defaultPriority) {
-                payload.priority_override = null;
-            } else {
-                payload.priority_override = parsedOverride;
+            if (!Number.isFinite(parsedOverride)) {
+                showToast('Некорректный приоритет', 'error');
+                return;
             }
-        } else {
-            payload.priority_override = null;
+            payload.priority_override = parsedOverride === defaultPriority ? null : parsedOverride;
         }
-
-        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'PATCH', payload);
-        setEditingSessionId(null);
+        const success = await runMutation(
+            `/api/assistants/${selectedPrId}/sessions/${sessionId}`,
+            'PATCH',
+            payload,
+            'Сессия обновлена',
+            refreshSessionsAndDayStatus,
+        );
+        if (success) {
+            setEditingSessionId(null);
+            setSessionEdit(createInitialSessionEditState());
+        }
     };
 
     const handleSessionDelete = async (sessionId: number) => {
-        if (!selectedPrId) return;
-        await runMutation(`/api/assistants/${selectedPrId}/sessions/${sessionId}`, 'DELETE');
+        if (!selectedPrId || !canManageSessions || !canManageSelectedAssistant) return;
+        await runMutation(
+            `/api/assistants/${selectedPrId}/sessions/${sessionId}`,
+            'DELETE',
+            undefined,
+            'Сессия удалена',
+            refreshSessionsAndDayStatus,
+        );
     };
 
     const handleRoleChange = async (newRole: string) => {
-        if (!selectedPrId || !selectedAssistant) return;
-        setBusy(true);
-        try {
-            const response = await apiFetch('/api/assistants', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    pr_id: selectedPrId,
-                    nickname: selectedAssistant.nickname,
-                    role: newRole,
-                    experience_days: selectedAssistant.experience_days ?? 0,
-                }),
-            });
-            const json = await response.json().catch(() => ({} as unknown));
-            if (!response.ok) {
-                throw new Error((json as { detail?: string }).detail || 'Не удалось сменить роль');
-            }
-            await refreshSelectedAssistant(selectedPrId);
-            showToast(`Роль изменена на ${newRole}`);
-        } catch (error: unknown) {
-            showToast(error instanceof Error ? error.message : 'Ошибка смены роли', 'error');
-        } finally {
-            setBusy(false);
-        }
+        if (!selectedPrId || !selectedAssistant || !canEditSelectedAssistant || newRole === selectedAssistant.role) return;
+        await runMutation(
+            `/api/admin/users/${selectedPrId}/role`,
+            'PATCH',
+            {
+                role: newRole,
+            },
+            `Роль изменена на ${getRoleLabel(newRole)}`,
+            refreshListAndDetail,
+        );
     };
 
-    const handleDeleteAssistant = async () => {
-        if (!selectedPrId || !selectedAssistant) return;
+    const handleDeactivateAssistant = async () => {
+        if (!selectedPrId || !selectedAssistant || !canDeactivateSelectedAssistant) return;
         const confirmed = await confirm({
-            title: 'Удалить ассистента?',
-            message: <>Ассистент <span className="text-white font-semibold">{selectedAssistant.nickname}</span> будет удален без возможности восстановления.</>,
-            confirmLabel: 'Удалить',
+            title: 'Деактивировать учетную запись?',
+            message: <>Учетная запись <span className="font-semibold text-white">{selectedAssistant.nickname}</span> будет деактивирована.</>,
+            confirmLabel: 'Деактивировать',
             tone: 'danger',
         });
         if (!confirmed) return;
-        setBusy(true);
-        try {
-            const response = await apiFetch(`/api/assistants/${selectedPrId}`, {
-                method: 'DELETE',
-            });
-            if (!response.ok) {
-                const json = await response.json().catch(() => ({} as unknown));
-                throw new Error((json as { detail?: string }).detail || 'Не удалось удалить ассистента');
-            }
-            setSelectedPrId(null);
-            setSelectedAssistant(null);
-            setSessions([]);
-            await fetchAssistants();
-            setSessionModeWarning(null);
-            showToast('Ассистент удален');
-        } catch (error: unknown) {
-            showToast(error instanceof Error ? error.message : 'Ошибка удаления ассистента', 'error');
-        } finally {
-            setBusy(false);
+
+        const success = await runMutation(
+            `/api/admin/users/${selectedPrId}/deactivate`,
+            'POST',
+            {},
+            'Учетная запись деактивирована',
+            async () => {
+                setSelectedPrId(null);
+                setEditingSessionId(null);
+                await reloadAssistants();
+            },
+        );
+        if (success) {
+            setSessionEdit(createInitialSessionEditState());
         }
     };
+
+    const beginEditingSession = async (session: AssistantSessionRecord) => {
+        if (!canManageSessions || !canManageSelectedAssistant) return;
+        if (session.target_type !== 'manual') {
+            const ready = await ensureTargetsReady(session.target_type || 'streamer');
+            if (!ready) return;
+        }
+        setEditingSessionId(session.id);
+        setSessionEdit({
+            target_type: session.target_type || 'streamer',
+            target_id: session.target_id != null ? String(session.target_id) : '',
+            target_name: session.target_name || '',
+            started_at: toLocalDateTimeInput(session.started_at),
+            ended_at: toLocalDateTimeInput(session.ended_at),
+            priority_override: session.priority_override != null
+                ? String(session.priority_override)
+                : session.priority_auto != null
+                    ? String(session.priority_auto)
+                    : '',
+            is_probation: Boolean(session.is_probation),
+        });
+    };
+
+    const canShowRoleSection = canViewAssistantData;
+    const selectionLoading = assistantLoading || (canViewAssistantData && !selectedAssistant && Boolean(selectedPrId));
 
     return (
         <div className="space-y-6 animate-[fadeIn_0.3s_ease-in-out]">
             <div className="flex items-center gap-4 border-b border-white/10 pb-6">
-                <div className="w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
-                    <Wrench className="w-6 h-6" />
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-indigo-500/30 bg-indigo-500/20 text-indigo-400">
+                    <Wrench className="h-6 w-6" />
                 </div>
                 <div>
                     <h2 className="text-2xl font-bold text-white">Ассистенты</h2>
@@ -932,138 +943,164 @@ const AssistantsManagement = () => {
                 </div>
             </div>
 
-            {optionsError && (
-                <div className="px-4 py-3 rounded-xl flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200">
-                    <AlertCircle className="w-5 h-5" />
-                    {optionsError}. Для `manual`-спека форма продолжит работать.
-                </div>
+            {!hasAssistantsAccess && (
+                <InlineState message="Раздел недоступен для вашей роли." tone="warning" />
             )}
 
-            {sessionModeWarning && (
-                <div className="px-4 py-3 rounded-xl flex items-center gap-3 bg-amber-500/10 border border-amber-500/20 text-amber-200">
-                    <AlertCircle className="w-5 h-5" />
-                    {sessionModeWarning}
-                </div>
+            {hasAssistantsAccess && !canViewAssistantData && (
+                <InlineState message="Данные ассистентов недоступны для вашей роли." tone="warning" />
             )}
 
-            <div className="space-y-4">
-                {/* Поиск + горизонтальные карточки */}
-                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                    <input
-                        type="text"
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Поиск: ник или PR ID"
-                        className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/20 transition-colors"
-                    />
-                    <div className="flex flex-wrap gap-2">
-                        {loading ? (
-                            <div className="text-white/50 text-sm py-1">Загрузка...</div>
-                        ) : filteredAssistants.length === 0 ? (
-                            <div className="text-white/40 text-sm py-1">Ничего не найдено</div>
-                        ) : (
-                            filteredAssistants.map((assistant) => (
-                                <button
-                                    key={assistant.pr_id}
-                                    onClick={() => setSelectedPrId(String(assistant.pr_id))}
-                                    className={`text-left rounded-xl border px-3 py-2 transition-all text-sm shrink-0 ${String(assistant.pr_id) === selectedPrId
-                                        ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200 shadow-[0_0_10px_rgba(99,102,241,0.15)]'
-                                        : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white/90 hover:border-white/20'
-                                        }`}
-                                >
-                                    <div className="font-medium">{assistant.nickname}</div>
-                                </button>
-                            ))
-                        )}
-                    </div>
-                </div>
+            {canViewAssistantData && assistantsError && (
+                <InlineState message={assistantsError} tone="danger" />
+            )}
 
+            {hasAssistantsAccess && (
                 <div className="space-y-4">
-                    {!selectedAssistant ? (
-                        <div className="bg-black/20 border border-white/5 rounded-2xl p-8 text-white/50 text-center">
+                    <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={(event) => setSearch(event.target.value)}
+                            placeholder="Поиск: ник или PR ID"
+                            className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder:text-white/30 transition-colors focus:border-white/20 focus:outline-none"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                            {!canViewAssistantData ? (
+                                <div className="py-1 text-sm text-white/40">Список ассистентов недоступен</div>
+                            ) : assistantsLoading ? (
+                                <div className="py-1 text-sm text-white/50">Загрузка...</div>
+                            ) : filteredAssistants.length === 0 ? (
+                                <div className="py-1 text-sm text-white/40">Ничего не найдено</div>
+                            ) : (
+                                filteredAssistants.map((assistant) => (
+                                    <button
+                                        key={assistant.pr_id}
+                                        type="button"
+                                        onClick={() => setSelectedPrId(String(assistant.pr_id))}
+                                        className={`shrink-0 rounded-xl border px-3 py-2 text-left text-sm transition-all ${
+                                            String(assistant.pr_id) === selectedPrId
+                                                ? 'border-indigo-400/40 bg-indigo-500/10 text-indigo-200 shadow-[0_0_10px_rgba(99,102,241,0.15)]'
+                                                : 'border-white/10 bg-white/5 text-white/70 hover:border-white/20 hover:bg-white/10 hover:text-white/90'
+                                        }`}
+                                    >
+                                        <div className="font-medium">{assistant.nickname}</div>
+                                        <div className="text-xs text-white/40">PR {assistant.pr_id}</div>
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                    </div>
+
+                    {!canViewAssistantData ? null : !selectedPrId ? (
+                        <div className="rounded-2xl border border-white/5 bg-black/20 p-8 text-center text-white/50">
                             Выберите ассистента для управления
+                        </div>
+                    ) : selectionLoading ? (
+                        <div className="rounded-2xl border border-white/5 bg-black/20 p-8 text-center text-white/50">
+                            Загрузка данных ассистента...
+                        </div>
+                    ) : assistantError ? (
+                        <InlineState message={assistantError} tone="danger" />
+                    ) : !selectedAssistant ? (
+                        <div className="rounded-2xl border border-white/5 bg-black/20 p-8 text-center text-white/50">
+                            Профиль ассистента недоступен
                         </div>
                     ) : (
                         <>
-                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
-                                <div className="bg-white/5 rounded-xl p-3">
+                            <div className="grid grid-cols-1 gap-3 rounded-2xl border border-white/5 bg-black/20 p-4 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+                                <div className="rounded-xl bg-white/5 p-3">
                                     <div className="text-xs text-white/50">Ник</div>
                                     <div className="flex items-center gap-2">
-                                        <div className="text-white font-semibold">{selectedAssistant.nickname}</div>
+                                        <div className="font-semibold text-white">{selectedAssistant.nickname}</div>
                                         <button
+                                            type="button"
                                             onClick={handleCopyId}
                                             title={`Скопировать PR ID: ${selectedPrId}`}
-                                            className="ml-auto p-1 rounded-lg text-white/30 hover:text-white/80 hover:bg-white/10 transition-all"
+                                            className="ml-auto rounded-lg p-1 text-white/30 transition-all hover:bg-white/10 hover:text-white/80"
                                         >
                                             {copiedId
-                                                ? <Check className="w-3.5 h-3.5 text-green-400" />
-                                                : <Clipboard className="w-3.5 h-3.5" />}
+                                                ? <Check className="h-3.5 w-3.5 text-green-400" />
+                                                : <Clipboard className="h-3.5 w-3.5" />}
                                         </button>
                                     </div>
+                                    <div className="mt-1 text-xs text-white/40">PR {selectedPrId}</div>
                                 </div>
-                                <div className="bg-white/5 rounded-xl p-3">
+                                <div className="rounded-xl bg-white/5 p-3">
+                                    <div className="text-xs text-white/50">Роль</div>
+                                    <div className="font-semibold text-white">{getRoleLabel(selectedAssistant.role)}</div>
+                                </div>
+                                <div className="rounded-xl bg-white/5 p-3">
                                     <div className="text-xs text-white/50">Баллы до санкций</div>
-                                    <div className="text-green-300 font-semibold">{formatMetricValue(selectedAssistant.gross_points ?? 0)}</div>
+                                    <div className="font-semibold text-green-300">{formatMetricValue(selectedAssistant.gross_points ?? 0)}</div>
                                 </div>
-                                <div className="bg-white/5 rounded-xl p-3">
+                                <div className="rounded-xl bg-white/5 p-3">
                                     <div className="text-xs text-white/50">Баллы после санкций</div>
-                                    <div className="text-emerald-200 font-semibold">
+                                    <div className="font-semibold text-emerald-200">
                                         {formatMetricValue(selectedAssistant.net_points ?? selectedAssistant.gross_points ?? 0)}
                                     </div>
                                 </div>
-                                <div className="bg-white/5 rounded-xl p-3">
+                                <div className="rounded-xl bg-white/5 p-3">
                                     <div className="text-xs text-white/50">Активные штрафные баллы</div>
-                                    <div className="text-amber-300 font-semibold">{formatMetricValue(sanctionTotals.point)}</div>
+                                    <div className="font-semibold text-amber-300">{formatMetricValue(sanctionTotals.point)}</div>
                                 </div>
-                                <div className="bg-white/5 rounded-xl p-3">
+                                <div className="rounded-xl bg-white/5 p-3">
                                     <div className="text-xs text-white/50">Активный штраф, %</div>
-                                    <div className="text-amber-300 font-semibold">{formatMetricValue(sanctionTotals.percent)}%</div>
+                                    <div className="font-semibold text-amber-300">{formatMetricValue(sanctionTotals.percent)}%</div>
                                 </div>
-                                <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Галки</div>
-                                    <div className="text-white font-semibold">{formatMetricValue(sanctionTotals.check)}</div>
-                                </div>
-                                <div className="bg-white/5 rounded-xl p-3">
-                                    <div className="text-xs text-white/50">Устный / строгий</div>
-                                    <div className="text-white font-semibold">{formatMetricValue(sanctionTotals.oral)} / {formatMetricValue(sanctionTotals.strict)}</div>
+                                <div className="rounded-xl bg-white/5 p-3">
+                                    <div className="text-xs text-white/50">Галки / устный / строгий</div>
+                                    <div className="font-semibold text-white">
+                                        {formatMetricValue(sanctionTotals.check)} / {formatMetricValue(sanctionTotals.oral)} / {formatMetricValue(sanctionTotals.strict)}
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                                    <div className="text-white font-semibold flex items-center gap-2">
-                                        <Coins className="w-4 h-4 text-green-400" />Баллы
+                            {targetReadOnlyMessage && (
+                                <InlineState message={targetReadOnlyMessage} tone="warning" />
+                            )}
+
+                            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
+                                    <div className="flex items-center gap-2 font-semibold text-white">
+                                        <Coins className="h-4 w-4 text-green-400" />
+                                        Баллы
                                     </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-3">
+                                    {dayStatusError && (
+                                        <InlineState message={dayStatusError} tone="danger" />
+                                    )}
+                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
                                         <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Дата (MSK)</label>
+                                            <label className="mb-1 block text-xs text-white/40">Дата (MSK)</label>
                                             <CustomDatePicker
                                                 value={dayStatusDate}
                                                 onChange={setDayStatusDate}
                                                 placeholder="Дата"
                                             />
                                         </div>
-                                        <div className="relative">
-                                            <label className="text-xs text-white/40 mb-1 block">Изменение корректировки баллов</label>
-                                            <input
-                                                type="number"
-                                                step="0.0001"
-                                                value={pointsForm.adjustmentChange}
-                                                onChange={(e) => setPointsForm({ adjustmentChange: e.target.value })}
-                                                className="w-full bg-black/40 border border-white/10 rounded-lg pl-3 pr-24 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                                placeholder="На сколько изменить корректировку"
-                                            />
-                                            {pointsForm.adjustmentChange && !isNaN(Number(pointsForm.adjustmentChange)) && (
-                                                <div className="absolute right-3 bottom-2 text-xs font-semibold px-2 py-0.5 rounded-md bg-white/10 text-white/90 shadow-sm border border-white/5 pointer-events-none">
-                                                    Новая корректировка: {formatMetricValue(
-                                                        Number(selectedDayStatus?.manual_points_delta ?? 0) + Number(pointsForm.adjustmentChange),
-                                                        4,
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
+                                        {canManagePoints && canManageSelectedAssistant ? (
+                                            <div className="relative">
+                                                <label className="mb-1 block text-xs text-white/40">Изменение корректировки баллов</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.0001"
+                                                    value={pointsForm.adjustmentChange}
+                                                    onChange={(event) => setPointsForm({ adjustmentChange: event.target.value })}
+                                                    className="w-full rounded-lg border border-white/10 bg-black/40 py-2 pl-3 pr-24 text-sm text-white focus:border-white/20 focus:outline-none"
+                                                    placeholder="На сколько изменить корректировку"
+                                                />
+                                                {pointsForm.adjustmentChange && !Number.isNaN(Number(pointsForm.adjustmentChange)) && (
+                                                    <div className="pointer-events-none absolute bottom-2 right-3 rounded-md border border-white/5 bg-white/10 px-2 py-0.5 text-xs font-semibold text-white/90 shadow-sm">
+                                                        Новая корректировка: {formatMetricValue(
+                                                            Number(selectedDayStatus?.manual_points_delta ?? 0) + Number(pointsForm.adjustmentChange),
+                                                            4,
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : null}
                                     </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
                                         <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
                                             <div className="text-xs text-white/40">Авто за день</div>
                                             <div className="font-semibold text-white">{formatMetricValue(selectedDayStatus?.spec_points_auto ?? 0, 4)}</div>
@@ -1079,42 +1116,51 @@ const AssistantsManagement = () => {
                                             </div>
                                         </div>
                                     </div>
-                                    <button
-                                        onClick={() => void handlePointsAdjust()}
-                                        disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-50"
-                                    >
-                                        Сохранить корректировку баллов
-                                    </button>
+                                    {canManagePoints && canManageSelectedAssistant && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void handlePointsAdjust()}
+                                            disabled={busy || dayStatusLoading}
+                                            className="w-full rounded-lg bg-blue-500/20 px-3 py-2 text-sm font-medium text-blue-300 disabled:opacity-50 hover:bg-blue-500/30"
+                                        >
+                                            Сохранить корректировку баллов
+                                        </button>
+                                    )}
                                 </div>
 
-                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                                    <div className="text-white font-semibold flex items-center gap-2">
-                                        <Timer className="w-4 h-4 text-cyan-300" />MChat
+                                <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
+                                    <div className="flex items-center gap-2 font-semibold text-white">
+                                        <Timer className="h-4 w-4 text-cyan-300" />
+                                        MChat
                                     </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-3">
+                                    {dayStatusError && (
+                                        <InlineState message={dayStatusError} tone="danger" />
+                                    )}
+                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
                                         <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Дата (MSK)</label>
+                                            <label className="mb-1 block text-xs text-white/40">Дата (MSK)</label>
                                             <CustomDatePicker
                                                 value={dayStatusDate}
                                                 onChange={setDayStatusDate}
                                                 placeholder="Дата"
                                             />
                                         </div>
-                                        <div className="relative">
-                                            <label className="text-xs text-white/40 mb-1 block">Количество MChat за день</label>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                step="1"
-                                                value={mchatForm.count}
-                                                onChange={(e) => setMchatForm({ count: e.target.value })}
-                                                className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                                placeholder="Введите итоговое количество MChat"
-                                            />
-                                        </div>
+                                        {canManagePoints && canManageSelectedAssistant ? (
+                                            <div>
+                                                <label className="mb-1 block text-xs text-white/40">Количество MChat за день</label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="1"
+                                                    value={mchatForm.count}
+                                                    onChange={(event) => setMchatForm({ count: event.target.value })}
+                                                    className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-white/20 focus:outline-none"
+                                                    placeholder="Введите итоговое количество MChat"
+                                                />
+                                            </div>
+                                        ) : null}
                                     </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
                                         <div className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
                                             <div className="text-xs text-white/40">Текущее значение</div>
                                             <div className="font-semibold text-white">{selectedDayStatus?.mchat_count ?? 0}</div>
@@ -1124,205 +1170,222 @@ const AssistantsManagement = () => {
                                             <div className="font-semibold text-white">{selectedDayStatus?.complaints_count ?? 0}</div>
                                         </div>
                                     </div>
-                                    <button
-                                        onClick={() => void handleMchatSave()}
-                                        disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-cyan-500/20 text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50"
-                                    >
-                                        Сохранить MChat за день
-                                    </button>
+                                    {canManagePoints && canManageSelectedAssistant && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleMchatSave()}
+                                            disabled={busy || dayStatusLoading}
+                                            className="w-full rounded-lg bg-cyan-500/20 px-3 py-2 text-sm font-medium text-cyan-200 disabled:opacity-50 hover:bg-cyan-500/30"
+                                        >
+                                            Сохранить MChat за день
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-4">
+                            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                                <div className="space-y-4 rounded-2xl border border-white/5 bg-black/20 p-4">
                                     <div className="flex items-center justify-between">
-                                        <div className="text-white font-semibold">Ручная санкция</div>
-                                        <button
-                                            type="button"
-                                            onClick={() => setManualSanctionForm((prev) => {
-                                                const nextMetric = getAvailableWorkoffMetrics(prev.workoffItems)[0];
-                                                if (!nextMetric) return prev;
-                                                return {
-                                                    ...prev,
-                                                    workoffItems: [
-                                                        ...prev.workoffItems,
-                                                        { ...createEmptyWorkoffDraft(), metric: nextMetric },
-                                                    ],
-                                                };
-                                            })}
-                                            disabled={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems).length === 0}
-                                            className="rounded-lg px-3 py-1.5 text-sm border border-emerald-400/20 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20"
-                                        >
-                                            + Добавить отработку
-                                        </button>
-                                    </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        <div>
-                                            <label className="text-xs text-white/50 mb-1 block">Тип санкции</label>
-                                            <CustomDropdown
-                                                value={manualSanctionForm.kind}
-                                                onChange={(value) => setManualSanctionForm((prev) => ({
-                                                    ...prev,
-                                                    kind: value as SanctionKind,
-                                                    amount: ['check', 'oral', 'strict'].includes(value as SanctionKind) ? '1' : prev.amount,
-                                                }))}
-                                                options={[
-                                                    { value: 'check', label: 'Галка' },
-                                                    { value: 'point', label: 'Штрафной балл' },
-                                                    { value: 'percent', label: 'Штрафной %' },
-                                                    { value: 'oral', label: 'Устный' },
-                                                    { value: 'strict', label: 'Строгий' },
-                                                ]}
-                                            />
-                                        </div>
-                                        {!['check', 'oral', 'strict'].includes(manualSanctionForm.kind) && (
-                                            <div>
-                                                <label className="text-xs text-white/50 mb-1 block">Размер</label>
-                                                <input
-                                                    type="number"
-                                                    min="0"
-                                                    step="0.0001"
-                                                    value={manualSanctionForm.amount}
-                                                    onChange={(e) => setManualSanctionForm((prev) => ({ ...prev, amount: e.target.value }))}
-                                                    className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                                    placeholder="1"
-                                                />
-                                            </div>
-                                        )}
-                                        {['oral', 'strict'].includes(manualSanctionForm.kind) && (
-                                            <div>
-                                                <label className="text-xs text-white/50 mb-1 block">Дата автоснятия</label>
-                                                <CustomDatePicker
-                                                    value={manualSanctionForm.auto_relief_date}
-                                                    onChange={(value) => setManualSanctionForm((prev) => ({ ...prev, auto_relief_date: value }))}
-                                                />
-                                            </div>
+                                        <div className="font-semibold text-white">Ручная санкция</div>
+                                        {canManageSanctions && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setManualSanctionForm((current) => {
+                                                    const nextMetric = getAvailableWorkoffMetrics(current.workoffItems)[0];
+                                                    if (!nextMetric) return current;
+                                                    return {
+                                                        ...current,
+                                                        workoffItems: [
+                                                            ...current.workoffItems,
+                                                            { ...createEmptyWorkoffDraft(), metric: nextMetric },
+                                                        ],
+                                                    };
+                                                })}
+                                                disabled={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems).length === 0}
+                                                className="rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-3 py-1.5 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                                            >
+                                                + Добавить отработку
+                                            </button>
                                         )}
                                     </div>
 
-                                    {manualSanctionForm.workoffItems.length > 0 && (
-                                        <div className="space-y-3">
-                                            {manualSanctionForm.workoffItems.map((item) => (
-                                                <div key={item.local_id} className="rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-3">
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="text-sm text-white/75">Отработка</div>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setManualSanctionForm((prev) => ({
-                                                                ...prev,
-                                                                workoffItems: prev.workoffItems.filter((entry) => entry.local_id !== item.local_id),
-                                                            }))}
-                                                            className="rounded-lg p-2 text-rose-200 hover:bg-rose-500/10"
-                                                        >
-                                                            <Trash2 className="w-4 h-4" />
-                                                        </button>
-                                                    </div>
-                                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                                                        <div>
-                                                            <label className="text-xs text-white/50 mb-1 block">Тип</label>
-                                                            <CustomDropdown
-                                                                value={item.metric}
-                                                                onChange={(value) => setManualSanctionForm((prev) => ({
-                                                                    ...prev,
-                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, metric: value as WorkoffMetric } : entry),
-                                                                }))}
-                                                                options={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems, item.local_id)
-                                                                    .concat(item.metric)
-                                                                    .filter((metric, index, array) => array.indexOf(metric) === index)
-                                                                    .map((metric) => ({
-                                                                        value: metric,
-                                                                        label: metric === 'spec'
-                                                                            ? 'Спек'
-                                                                            : metric === 'complaints'
-                                                                                ? 'Жалобы'
-                                                                                : 'MChat',
-                                                                    }))}
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/50 mb-1 block">X от нормы</label>
-                                                            <input
-                                                                type="number"
-                                                                min="0"
-                                                                step="0.1"
-                                                                value={item.multiplier}
-                                                                onChange={(e) => setManualSanctionForm((prev) => ({
-                                                                    ...prev,
-                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, multiplier: e.target.value } : entry),
-                                                                }))}
-                                                                className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/50 mb-1 block">Период с</label>
-                                                            <CustomDatePicker
-                                                                value={item.period_start}
-                                                                onChange={(value) => setManualSanctionForm((prev) => ({
-                                                                    ...prev,
-                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, period_start: value } : entry),
-                                                                }))}
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/50 mb-1 block">Период по</label>
-                                                            <CustomDatePicker
-                                                                value={item.period_end}
-                                                                onChange={(value) => setManualSanctionForm((prev) => ({
-                                                                    ...prev,
-                                                                    workoffItems: prev.workoffItems.map((entry) => entry.local_id === item.local_id ? { ...entry, period_end: value } : entry),
-                                                                }))}
-                                                            />
-                                                        </div>
-                                                    </div>
+                                    {canManageSanctions && canManageSelectedAssistant && (
+                                        <>
+                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                                                <div>
+                                                    <label className="mb-1 block text-xs text-white/50">Тип санкции</label>
+                                                    <CustomDropdown
+                                                        value={manualSanctionForm.kind}
+                                                        onChange={(value) => setManualSanctionForm((current) => ({
+                                                            ...current,
+                                                            kind: value as SanctionKind,
+                                                            amount: ['check', 'oral', 'strict'].includes(value as SanctionKind) ? '1' : current.amount,
+                                                        }))}
+                                                        options={[
+                                                            { value: 'check', label: 'Галка' },
+                                                            { value: 'point', label: 'Штрафной балл' },
+                                                            { value: 'percent', label: 'Штрафной %' },
+                                                            { value: 'oral', label: 'Устный' },
+                                                            { value: 'strict', label: 'Строгий' },
+                                                        ]}
+                                                    />
                                                 </div>
-                                            ))}
-                                        </div>
-                                    )}
-
-                                    {manualSanctionForm.workoffItems.length > 0 && (
-                                        <div className="rounded-xl border border-white/10 bg-sky-500/5 p-4 space-y-3">
-                                            <div className="flex items-center justify-between gap-3">
-                                                <div className="text-sm font-medium text-white">Предпросмотр отработки</div>
-                                                {manualWorkoffPreviewLoading && (
-                                                    <div className="text-xs text-white/45">Обновляем...</div>
+                                                {!['check', 'oral', 'strict'].includes(manualSanctionForm.kind) && (
+                                                    <div>
+                                                        <label className="mb-1 block text-xs text-white/50">Размер</label>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            step="0.0001"
+                                                            value={manualSanctionForm.amount}
+                                                            onChange={(event) => setManualSanctionForm((current) => ({ ...current, amount: event.target.value }))}
+                                                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-white/20 focus:outline-none"
+                                                            placeholder="1"
+                                                        />
+                                                    </div>
+                                                )}
+                                                {['oral', 'strict'].includes(manualSanctionForm.kind) && (
+                                                    <div>
+                                                        <label className="mb-1 block text-xs text-white/50">Дата автоснятия</label>
+                                                        <CustomDatePicker
+                                                            value={manualSanctionForm.auto_relief_date}
+                                                            onChange={(value) => setManualSanctionForm((current) => ({ ...current, auto_relief_date: value }))}
+                                                        />
+                                                    </div>
                                                 )}
                                             </div>
-                                            {manualWorkoffPreviewError && (
-                                                <div className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
-                                                    {manualWorkoffPreviewError}
-                                                </div>
-                                            )}
-                                            {!manualWorkoffPreviewLoading && manualWorkoffPreview.length === 0 && !manualWorkoffPreviewError && (
-                                                <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/50">
-                                                    Добавьте валидную отработку, чтобы увидеть расчет.
-                                                </div>
-                                            )}
-                                            <div className="space-y-3">
-                                                {manualWorkoffPreview.map((previewAssistant) => (
-                                                    <div key={previewAssistant.assistant_id} className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-3">
-                                                        <div className="flex items-center justify-between gap-3">
-                                                            <div className="text-sm text-white/80 font-medium">
-                                                                {previewAssistant.nickname || selectedAssistant?.nickname || `Ассистент ${previewAssistant.assistant_id}`}
+
+                                            {manualSanctionForm.workoffItems.length > 0 && (
+                                                <div className="space-y-3">
+                                                    {manualSanctionForm.workoffItems.map((item) => (
+                                                        <div key={item.local_id} className="space-y-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="text-sm text-white/75">Отработка</div>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setManualSanctionForm((current) => ({
+                                                                        ...current,
+                                                                        workoffItems: current.workoffItems.filter((entry) => entry.local_id !== item.local_id),
+                                                                    }))}
+                                                                    className="rounded-lg p-2 text-rose-200 hover:bg-rose-500/10"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4" />
+                                                                </button>
                                                             </div>
-                                                            <div className="text-xs text-white/45">ID {previewAssistant.assistant_id}</div>
+                                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs text-white/50">Тип</label>
+                                                                    <CustomDropdown
+                                                                        value={item.metric}
+                                                                        onChange={(value) => setManualSanctionForm((current) => ({
+                                                                            ...current,
+                                                                            workoffItems: current.workoffItems.map((entry) => (
+                                                                                entry.local_id === item.local_id
+                                                                                    ? { ...entry, metric: value as WorkoffMetric }
+                                                                                    : entry
+                                                                            )),
+                                                                        }))}
+                                                                        options={getAvailableWorkoffMetrics(manualSanctionForm.workoffItems, item.local_id)
+                                                                            .concat(item.metric)
+                                                                            .filter((metric, index, array) => array.indexOf(metric) === index)
+                                                                            .map((metric) => ({
+                                                                                value: metric,
+                                                                                label: workoffMetricLabel(metric),
+                                                                            }))}
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs text-white/50">X от нормы</label>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        step="0.1"
+                                                                        value={item.multiplier}
+                                                                        onChange={(event) => setManualSanctionForm((current) => ({
+                                                                            ...current,
+                                                                            workoffItems: current.workoffItems.map((entry) => (
+                                                                                entry.local_id === item.local_id
+                                                                                    ? { ...entry, multiplier: event.target.value }
+                                                                                    : entry
+                                                                            )),
+                                                                        }))}
+                                                                        className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-white/20 focus:outline-none"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs text-white/50">Период с</label>
+                                                                    <CustomDatePicker
+                                                                        value={item.period_start}
+                                                                        onChange={(value) => setManualSanctionForm((current) => ({
+                                                                            ...current,
+                                                                            workoffItems: current.workoffItems.map((entry) => (
+                                                                                entry.local_id === item.local_id
+                                                                                    ? { ...entry, period_start: value }
+                                                                                    : entry
+                                                                            )),
+                                                                        }))}
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs text-white/50">Период по</label>
+                                                                    <CustomDatePicker
+                                                                        value={item.period_end}
+                                                                        onChange={(value) => setManualSanctionForm((current) => ({
+                                                                            ...current,
+                                                                            workoffItems: current.workoffItems.map((entry) => (
+                                                                                entry.local_id === item.local_id
+                                                                                    ? { ...entry, period_end: value }
+                                                                                    : entry
+                                                                            )),
+                                                                        }))}
+                                                                    />
+                                                                </div>
+                                                            </div>
                                                         </div>
-                                                        <div className="space-y-2">
-                                                            {previewAssistant.items.map((item, index) => (
-                                                                <div key={`${previewAssistant.assistant_id}-${item.metric}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] p-3 space-y-2">
-                                                                    {(() => {
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {manualSanctionForm.workoffItems.length > 0 && (
+                                                <div className="space-y-3 rounded-xl border border-white/10 bg-sky-500/5 p-4">
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="text-sm font-medium text-white">Предпросмотр отработки</div>
+                                                        {manualWorkoffPreviewLoading && (
+                                                            <div className="text-xs text-white/45">Обновляем...</div>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-xs text-white/45">
+                                                        U/O не засчитываются и продлевают отработку.
+                                                    </div>
+                                                    {manualWorkoffPreviewError && (
+                                                        <InlineState message={manualWorkoffPreviewError} tone="danger" />
+                                                    )}
+                                                    {!manualWorkoffPreviewLoading && manualWorkoffPreview.length === 0 && !manualWorkoffPreviewError && (
+                                                        <InlineState message="Добавьте валидную отработку, чтобы увидеть расчет." />
+                                                    )}
+                                                    <div className="space-y-3">
+                                                        {manualWorkoffPreview.map((previewAssistant) => (
+                                                            <div key={previewAssistant.assistant_id} className="space-y-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                                                                <div className="flex items-center justify-between gap-3">
+                                                                    <div className="text-sm font-medium text-white/80">
+                                                                        {previewAssistant.nickname || selectedAssistant.nickname || `Ассистент ${previewAssistant.assistant_id}`}
+                                                                    </div>
+                                                                    <div className="text-xs text-white/45">ID {previewAssistant.assistant_id}</div>
+                                                                </div>
+                                                                <div className="space-y-2">
+                                                                    {previewAssistant.items.map((item, index) => {
                                                                         const itemKey = workoffPreviewItemKey(previewAssistant.assistant_id, item.metric, index);
                                                                         const isExpanded = Boolean(manualWorkoffPreviewExpanded[itemKey]);
                                                                         const days = item.days ?? [];
                                                                         const hasDays = days.length > 0;
                                                                         return (
-                                                                            <>
+                                                                            <div key={itemKey} className="space-y-2 rounded-lg border border-white/10 bg-white/[0.03] p-3">
                                                                                 <div className="flex flex-wrap items-center gap-2 text-sm">
                                                                                     <span className="text-white/80">{workoffMetricLabel(item.metric)}</span>
                                                                                     <span className="text-white/45">x{formatMetricValue(item.multiplier, 1)}</span>
                                                                                     <span className="text-white/45">{item.period_start} - {item.period_end}</span>
                                                                                 </div>
-                                                                                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                                                <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
                                                                                     <div className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-white/70">
                                                                                         Дней по плану: {formatWorkoffCounter(item.required_work_days)}
                                                                                     </div>
@@ -1344,58 +1407,50 @@ const AssistantsManagement = () => {
                                                                                         <button
                                                                                             type="button"
                                                                                             className="inline-flex items-center rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-white/75 transition hover:bg-white/10 hover:text-white"
-                                                                                            onClick={() => setManualWorkoffPreviewExpanded((prev) => ({ ...prev, [itemKey]: !prev[itemKey] }))}
+                                                                                            onClick={() => setManualWorkoffPreviewExpanded((current) => ({ ...current, [itemKey]: !current[itemKey] }))}
                                                                                         >
                                                                                             {isExpanded ? 'Скрыть дни' : `Показать дни (${days.length})`}
                                                                                         </button>
                                                                                     </div>
                                                                                 )}
                                                                                 {hasDays && isExpanded && (
-                                                                                    <div className="space-y-2">
-                                                                                        {days.map((day: WorkoffProgressDay) => (
-                                                                                            <div key={`${previewAssistant.assistant_id}-${item.metric}-${day.date}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
-                                                                                                <div className="flex flex-wrap items-center gap-2">
-                                                                                                    <span className="text-white/90">{day.date}</span>
-                                                                                                    <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
-                                                                                                        {workoffDayStatusLabel(day.day_status)}
-                                                                                                    </span>
-                                                                                                    {day.manual_status && (
-                                                                                                        <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
-                                                                                                    )}
-                                                                                                </div>
-                                                                                                <div className="flex flex-wrap gap-3 text-white/50">
-                                                                                                    <span>Требуется: {formatMetricValue(day.required_amount ?? 0)}</span>
-                                                                                                    <span>Отработано: {formatMetricValue(day.actual_amount ?? 0)}</span>
-                                                                                                    <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
-                                                                                                </div>
-                                                                                            </div>
-                                                                                        ))}
-                                                                                    </div>
+                                                                                    <WorkoffDaysList
+                                                                                        days={days}
+                                                                                        keyPrefix={`preview-${previewAssistant.assistant_id}-${item.metric}-${index}`}
+                                                                                    />
                                                                                 )}
-                                                                            </>
+                                                                            </div>
                                                                         );
-                                                                    })()}
+                                                                    })}
                                                                 </div>
-                                                            ))}
-                                                        </div>
+                                                            </div>
+                                                        ))}
                                                     </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
+                                                </div>
+                                            )}
 
-                                    <button
-                                        onClick={() => void handleManualSanctionCreate()}
-                                        disabled={busy}
-                                        className="w-full rounded-lg px-3 py-2 text-sm font-medium bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 disabled:opacity-50"
-                                    >
-                                        Выдать санкцию
-                                    </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => void handleManualSanctionCreate()}
+                                                disabled={busy}
+                                                className="w-full rounded-lg bg-rose-500/20 px-3 py-2 text-sm font-medium text-rose-200 disabled:opacity-50 hover:bg-rose-500/30"
+                                            >
+                                                Выдать санкцию
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
 
-                                <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                                    <div className="text-white font-semibold">Активные санкции</div>
-                                    {activeSanctions.length === 0 ? (
+                                <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
+                                    <div className="font-semibold text-white">Активные санкции</div>
+                                    {sanctionsError && (
+                                        <InlineState message={sanctionsError} tone="danger" />
+                                    )}
+                                    {sanctionsLoading && activeSanctions.length === 0 ? (
+                                        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-white/45">
+                                            Загрузка санкций...
+                                        </div>
+                                    ) : activeSanctions.length === 0 ? (
                                         <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-white/45">
                                             У ассистента нет активных санкций
                                         </div>
@@ -1404,11 +1459,15 @@ const AssistantsManagement = () => {
                                             {activeSanctions.map((sanction) => {
                                                 const needsAmount = !['check', 'oral', 'strict'].includes(sanction.kind);
                                                 return (
-                                                    <div key={sanction.sanction_id} className="rounded-xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
-                                                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                                                    <div key={sanction.sanction_id} className="space-y-3 rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                                                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                                             <div>
-                                                                <div className="text-white font-medium">{sanction.kind} · остаток {sanction.active_amount}</div>
-                                                                <div className="text-xs text-white/45">Источник: {getSourceTypeLabel(sanction.source_type)} · Выдано: {formatDateTime(sanction.display_issued_at ?? sanction.issued_at)}</div>
+                                                                <div className="font-medium text-white">
+                                                                    {sanction.kind} · остаток {sanction.active_amount}
+                                                                </div>
+                                                                <div className="text-xs text-white/45">
+                                                                    Источник: {getSourceTypeLabel(sanction.source_type)} · Выдано: {formatDateTime(sanction.display_issued_at ?? sanction.issued_at)}
+                                                                </div>
                                                                 {sanction.auto_relief_date && (
                                                                     <div className="text-xs text-white/45">Автоснятие: {sanction.auto_relief_date}</div>
                                                                 )}
@@ -1422,16 +1481,16 @@ const AssistantsManagement = () => {
                                                         {sanction.workoff_progress_summary.items.length > 0 && (
                                                             <div className="space-y-3">
                                                                 {sanction.workoff_progress_summary.items.map((item, index) => (
-                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}`} className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-3">
+                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}`} className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-3">
                                                                         <div className="flex flex-wrap items-center justify-between gap-3">
                                                                             <div className="text-sm text-white/80">
-                                                                                {workoffMetricLabel(item.metric as 'spec' | 'complaints' | 'mchat')} · x{formatMetricValue(item.multiplier, 1)} · {item.period_start} - {item.period_end}
+                                                                                {workoffMetricLabel(item.metric as WorkoffMetric)} · x{formatMetricValue(item.multiplier, 1)} · {item.period_start} - {item.period_end}
                                                                             </div>
                                                                             <div className="text-xs text-white/50">
                                                                                 {workoffStatusLabel(item.status)}
                                                                             </div>
                                                                         </div>
-                                                                        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                                                                        <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
                                                                             <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-white/70">
                                                                                 План: {formatWorkoffCounter(item.required_work_days ?? item.target_amount)}
                                                                             </div>
@@ -1446,26 +1505,10 @@ const AssistantsManagement = () => {
                                                                             </div>
                                                                         </div>
                                                                         {item.days && item.days.length > 0 ? (
-                                                                            <div className="space-y-2">
-                                                                                {item.days.map((day, dayIndex) => (
-                                                                                    <div key={`${sanction.sanction_id}-${item.metric}-${index}-${day.date}-${dayIndex}`} className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
-                                                                                        <div className="flex flex-wrap items-center gap-2">
-                                                                                            <span className="text-white/90">{day.date}</span>
-                                                                                            <span className={`rounded-full border px-2 py-0.5 ${workoffDayStatusTone(day.day_status)}`}>
-                                                                                                {workoffDayStatusLabel(day.day_status)}
-                                                                                            </span>
-                                                                                            {day.manual_status && (
-                                                                                                <span className="text-white/45">{workoffManualStatusLabel(day.manual_status)}</span>
-                                                                                            )}
-                                                                                        </div>
-                                                                                        <div className="flex flex-wrap gap-3 text-white/50">
-                                                                                            <span>Требуется: {formatMetricValue(day.required_amount ?? 0)}</span>
-                                                                                            <span>Отработано: {formatMetricValue(day.actual_amount ?? 0)}</span>
-                                                                                            <span>{workoffCountedLabel(day.counts_for_workoff)}</span>
-                                                                                        </div>
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
+                                                                            <WorkoffDaysList
+                                                                                days={item.days}
+                                                                                keyPrefix={`sanction-${sanction.sanction_id}-${item.metric}-${index}`}
+                                                                            />
                                                                         ) : (
                                                                             <div className="text-xs text-white/45">
                                                                                 {formatMetricValue(item.amount_done ?? 0)}/{formatMetricValue(item.target_amount ?? 0)}
@@ -1475,32 +1518,35 @@ const AssistantsManagement = () => {
                                                                 ))}
                                                             </div>
                                                         )}
-                                                        <div className="flex flex-col md:flex-row md:items-end gap-3">
-                                                            {needsAmount && (
-                                                                <div className="w-full md:w-48">
-                                                                    <label className="text-xs text-white/50 mb-1 block">Сколько снять</label>
-                                                                    <input
-                                                                        type="number"
-                                                                        min="0"
-                                                                        step="0.0001"
-                                                                        value={manualReliefAmountBySanctionId[sanction.sanction_id] ?? ''}
-                                                                        onChange={(e) => setManualReliefAmountBySanctionId((prev) => ({
-                                                                            ...prev,
-                                                                            [sanction.sanction_id]: e.target.value,
-                                                                        }))}
-                                                                        className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/20"
-                                                                        placeholder={String(sanction.active_amount)}
-                                                                    />
-                                                                </div>
-                                                            )}
-                                                            <button
-                                                                onClick={() => void handleManualRelief(sanction)}
-                                                                disabled={busy}
-                                                                className="rounded-lg px-4 py-2 text-sm font-medium bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 disabled:opacity-50"
-                                                            >
-                                                                {needsAmount ? 'Снять вручную' : 'Снять полностью'}
-                                                            </button>
-                                                        </div>
+                                                        {canManageSanctions && canManageSelectedAssistant ? (
+                                                            <div className="flex flex-col gap-3 md:flex-row md:items-end">
+                                                                {needsAmount && (
+                                                                    <div className="w-full md:w-48">
+                                                                        <label className="mb-1 block text-xs text-white/50">Сколько снять</label>
+                                                                        <input
+                                                                            type="number"
+                                                                            min="0"
+                                                                            step="0.0001"
+                                                                            value={manualReliefAmountBySanctionId[sanction.sanction_id] ?? ''}
+                                                                            onChange={(event) => setManualReliefAmountBySanctionId((current) => ({
+                                                                                ...current,
+                                                                                [sanction.sanction_id]: event.target.value,
+                                                                            }))}
+                                                                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-white/20 focus:outline-none"
+                                                                            placeholder={String(sanction.active_amount)}
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => void handleManualRelief(sanction)}
+                                                                    disabled={busy}
+                                                                    className="rounded-lg bg-amber-500/20 px-4 py-2 text-sm font-medium text-amber-200 disabled:opacity-50 hover:bg-amber-500/30"
+                                                                >
+                                                                    {needsAmount ? 'Снять вручную' : 'Снять полностью'}
+                                                                </button>
+                                                            </div>
+                                                        ) : null}
                                                     </div>
                                                 );
                                             })}
@@ -1509,381 +1555,428 @@ const AssistantsManagement = () => {
                                 </div>
                             </div>
 
-
-                            {/* Role & Delete */}
-                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 flex items-center gap-4">
-                                <div className="flex-1">
-                                    <label className="text-xs text-white/50 mb-1 block">Роль</label>
-                                    <CustomDropdown
-                                        value={selectedAssistant.role || 'employee'}
-                                        onChange={(v) => void handleRoleChange(v)}
-                                        disabled={busy}
-                                        options={[
-                                            { value: 'junior_employee', label: 'Младший ассистент' },
-                                            { value: 'employee', label: 'Ассистент' },
-                                            { value: 'senior_employee', label: 'Старший ассистент' },
-                                            { value: 'manager', label: 'Глава ассистентов' },
-                                            { value: 'developer', label: 'Разработчик' },
-                                        ]}
-                                    />
-                                </div>
-                                <button
-                                    onClick={() => void handleDeleteAssistant()}
-                                    disabled={busy}
-                                    className="mt-5 flex items-center gap-2 px-4 py-2 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50 text-sm font-medium transition-colors"
-                                >
-                                    <Trash2 className="w-4 h-4" />
-                                    Удалить
-                                </button>
-                            </div>
-
-
-                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <div className="text-white font-semibold flex items-center gap-2"><Timer className="w-4 h-4 text-indigo-400" />Ручная сессия</div>
-
-                                </div>
-                                <div className="space-y-3">
-                                    {/* Row 1: Target type + selector */}
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <div className="shrink-0 w-36">
+                            {canShowRoleSection && (
+                                <div className="flex flex-col gap-4 rounded-2xl border border-white/5 bg-black/20 p-4 lg:flex-row lg:items-center">
+                                    <div className="flex-1">
+                                        <label className="mb-1 block text-xs text-white/50">Роль</label>
+                                        {canEditSelectedAssistant ? (
                                             <CustomDropdown
-                                                value={manualSessionForm.target_type}
-                                                onChange={(v) => setManualSessionForm((prev) => ({
-                                                    ...prev,
-                                                    target_type: v,
-                                                    target_id: '',
-                                                    priority: '0',
-                                                }))}
-                                                options={[
-                                                    { value: 'streamer', label: 'Стример' },
-                                                    { value: 'event', label: 'Событие' },
-                                                    { value: 'manual', label: 'Manual' },
-                                                ]}
+                                                value={selectedAssistant.role || 'employee'}
+                                                onChange={(value) => void handleRoleChange(value)}
+                                                disabled={busy || roleOptions.length === 0}
+                                                options={roleOptions}
                                             />
-                                        </div>
-                                        {manualSessionForm.target_type !== 'manual' && (
-                                            <div className="flex-1 min-w-[200px]">
-                                                <CustomSelect
-                                                    options={manualTargetOptions}
-                                                    value={manualSessionForm.target_id}
-                                                    onChange={(value) => {
-                                                        const targetId = String(value);
-                                                        const defaultPriority = manualSessionForm.target_type === 'event'
-                                                            ? eventPriorityById[targetId] ?? 0
-                                                            : streamerPriorityById[targetId] ?? 0;
-                                                        setManualSessionForm((prev) => ({
-                                                            ...prev,
-                                                            target_id: targetId,
-                                                            priority: String(defaultPriority),
-                                                        }));
-                                                    }}
-                                                    placeholder={
-                                                        optionsLoading
-                                                            ? 'Loading...'
-                                                            : manualTargetOptions.length > 0
-                                                                ? (manualSessionForm.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
-                                                                : (manualSessionForm.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
-                                                    }
-                                                />
+                                        ) : (
+                                            <div className="space-y-2">
+                                                <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/75">
+                                                    {getRoleLabel(selectedAssistant.role)}
+                                                </div>
                                             </div>
                                         )}
-                                        {manualSessionForm.target_type === 'manual' && (
-                                            <input
-                                                type="text"
-                                                value={manualSessionForm.target_name}
-                                                onChange={(e) => setManualSessionForm((prev) => ({ ...prev, target_name: e.target.value }))}
-                                                className="flex-1 min-w-[150px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                placeholder="Название"
-                                            />
-                                        )}
                                     </div>
-                                    {/* Row 2: Date/time pickers */}
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                        <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Дата начала</label>
-                                            <CustomDatePicker
-                                                value={splitDateTime(manualSessionForm.started_at).date}
-                                                onChange={(d) => setManualSessionForm((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'date', d) }))}
-                                                placeholder="Дата"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Время начала</label>
-                                            <CustomTimePicker
-                                                value={splitDateTime(manualSessionForm.started_at).time}
-                                                onChange={(t) => setManualSessionForm((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'time', t) }))}
-                                                placeholder="--:--"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Дата конца</label>
-                                            <CustomDatePicker
-                                                value={splitDateTime(manualSessionForm.ended_at).date}
-                                                onChange={(d) => setManualSessionForm((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'date', d) }))}
-                                                placeholder="Дата"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-xs text-white/40 mb-1 block">Время конца</label>
-                                            <CustomTimePicker
-                                                value={splitDateTime(manualSessionForm.ended_at).time}
-                                                onChange={(t) => setManualSessionForm((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'time', t) }))}
-                                                placeholder="--:--"
-                                            />
-                                        </div>
-                                    </div>
-                                    {/* Row 3: Priority + probation */}
-                                    <div className="flex flex-wrap items-center gap-3">
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-white/40">Приоритет:</span>
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                max="3"
-                                                value={manualSessionForm.priority}
-                                                onChange={(e) => setManualSessionForm((prev) => ({ ...prev, priority: e.target.value }))}
-                                                disabled={manualSessionForm.is_probation}
-                                                className="w-16 bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-50"
-                                            />
-                                        </div>
-                                        <label className="flex items-center gap-2 cursor-pointer group">
-                                            <div className="relative">
-                                                <input
-                                                    type="checkbox"
-                                                    className="sr-only peer"
-                                                    checked={manualSessionForm.is_probation}
-                                                    onChange={(e) => setManualSessionForm((prev) => ({ ...prev, is_probation: e.target.checked }))}
-                                                />
-                                                <div className="w-10 h-5 bg-white/10 rounded-full peer peer-checked:bg-yellow-500/50 transition-colors"></div>
-                                                <div className="absolute left-1 top-1 w-3 h-3 bg-white/40 rounded-full peer-checked:translate-x-5 peer-checked:bg-white transition-transform"></div>
-                                            </div>
-                                            <span className="text-xs text-white/60 group-hover:text-white transition-colors">Стажерский</span>
-                                        </label>
+                                    {canDeactivateSelectedAssistant ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleDeactivateAssistant()}
+                                            disabled={busy}
+                                            className="flex items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+                                        >
+                                            <Trash2 className="h-4 w-4" />
+                                            Деактивировать
+                                        </button>
+                                    ) : null}
+                                </div>
+                            )}
+
+                            <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2 font-semibold text-white">
+                                        <Timer className="h-4 w-4 text-indigo-400" />
+                                        Ручная сессия
                                     </div>
                                 </div>
-                                <button
-                                    onClick={() => void handleManualSessionCreate()}
-                                    disabled={busy}
-                                    className="rounded-lg px-3 py-2 text-sm font-medium bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 disabled:opacity-50"
-                                >
-                                    Добавить ручную сессию
-                                </button>
+
+                                {canManageSessions && canManageSelectedAssistant && (
+                                    <>
+                                        {optionsError && manualSessionForm.target_type !== 'manual' && (
+                                            <InlineState
+                                                message={`${optionsError}. Для manual-сессии форма продолжит работать.`}
+                                                tone="warning"
+                                            />
+                                        )}
+                                        <div className="space-y-3">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <div className="w-36 shrink-0">
+                                                    <CustomDropdown
+                                                        value={manualSessionForm.target_type}
+                                                        onChange={(value) => setManualSessionForm((current) => ({
+                                                            ...current,
+                                                            target_type: value,
+                                                            target_id: '',
+                                                            priority: '0',
+                                                        }))}
+                                                        options={[
+                                                            { value: 'streamer', label: 'Стример' },
+                                                            { value: 'event', label: 'Событие' },
+                                                            { value: 'manual', label: 'Manual' },
+                                                        ]}
+                                                    />
+                                                </div>
+                                                {manualSessionForm.target_type !== 'manual' && (
+                                                    <div className="min-w-[200px] flex-1">
+                                                        <CustomSelect
+                                                            options={manualTargetOptions}
+                                                            value={manualSessionForm.target_id}
+                                                            onChange={(value) => {
+                                                                const targetId = String(value);
+                                                                const defaultPriority = manualSessionForm.target_type === 'event'
+                                                                    ? eventPriorityById[targetId] ?? 0
+                                                                    : streamerPriorityById[targetId] ?? 0;
+                                                                setManualSessionForm((current) => ({
+                                                                    ...current,
+                                                                    target_id: targetId,
+                                                                    priority: String(defaultPriority),
+                                                                }));
+                                                            }}
+                                                            placeholder={
+                                                                optionsLoading
+                                                                    ? 'Loading...'
+                                                                    : manualTargetOptions.length > 0
+                                                                        ? (manualSessionForm.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                                        : (manualSessionForm.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                            }
+                                                        />
+                                                    </div>
+                                                )}
+                                                {manualSessionForm.target_type === 'manual' && (
+                                                    <input
+                                                        type="text"
+                                                        value={manualSessionForm.target_name}
+                                                        onChange={(event) => setManualSessionForm((current) => ({ ...current, target_name: event.target.value }))}
+                                                        className="min-w-[150px] flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                                                        placeholder="Название"
+                                                    />
+                                                )}
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                                                <div>
+                                                    <label className="mb-1 block text-xs text-white/40">Дата начала</label>
+                                                    <CustomDatePicker
+                                                        value={splitDateTime(manualSessionForm.started_at).date}
+                                                        onChange={(value) => setManualSessionForm((current) => ({
+                                                            ...current,
+                                                            started_at: mergeDateTimePart(current.started_at, 'date', value),
+                                                        }))}
+                                                        placeholder="Дата"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="mb-1 block text-xs text-white/40">Время начала</label>
+                                                    <CustomTimePicker
+                                                        value={splitDateTime(manualSessionForm.started_at).time}
+                                                        onChange={(value) => setManualSessionForm((current) => ({
+                                                            ...current,
+                                                            started_at: mergeDateTimePart(current.started_at, 'time', value),
+                                                        }))}
+                                                        placeholder="--:--"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="mb-1 block text-xs text-white/40">Дата конца</label>
+                                                    <CustomDatePicker
+                                                        value={splitDateTime(manualSessionForm.ended_at).date}
+                                                        onChange={(value) => setManualSessionForm((current) => ({
+                                                            ...current,
+                                                            ended_at: mergeDateTimePart(current.ended_at, 'date', value),
+                                                        }))}
+                                                        placeholder="Дата"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="mb-1 block text-xs text-white/40">Время конца</label>
+                                                    <CustomTimePicker
+                                                        value={splitDateTime(manualSessionForm.ended_at).time}
+                                                        onChange={(value) => setManualSessionForm((current) => ({
+                                                            ...current,
+                                                            ended_at: mergeDateTimePart(current.ended_at, 'time', value),
+                                                        }))}
+                                                        placeholder="--:--"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xs text-white/40">Приоритет:</span>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        max="3"
+                                                        value={manualSessionForm.priority}
+                                                        onChange={(event) => setManualSessionForm((current) => ({ ...current, priority: event.target.value }))}
+                                                        disabled={manualSessionForm.is_probation}
+                                                        className="w-16 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white disabled:opacity-50"
+                                                    />
+                                                </div>
+                                                <label className="group flex cursor-pointer items-center gap-2">
+                                                    <div className="relative">
+                                                        <input
+                                                            type="checkbox"
+                                                            className="peer sr-only"
+                                                            checked={manualSessionForm.is_probation}
+                                                            onChange={(event) => setManualSessionForm((current) => ({ ...current, is_probation: event.target.checked }))}
+                                                        />
+                                                        <div className="h-5 w-10 rounded-full bg-white/10 transition-colors peer-checked:bg-yellow-500/50" />
+                                                        <div className="absolute left-1 top-1 h-3 w-3 rounded-full bg-white/40 transition-transform peer-checked:translate-x-5 peer-checked:bg-white" />
+                                                    </div>
+                                                    <span className="text-xs text-white/60 transition-colors group-hover:text-white">Стажерский</span>
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleManualSessionCreate()}
+                                            disabled={busy}
+                                            className="rounded-lg bg-indigo-500/20 px-3 py-2 text-sm font-medium text-indigo-300 disabled:opacity-50 hover:bg-indigo-500/30"
+                                        >
+                                            Добавить ручную сессию
+                                        </button>
+                                    </>
+                                )}
                             </div>
 
-                            <div className="bg-black/20 border border-white/5 rounded-2xl p-4 space-y-3">
+                            <div className="space-y-3 rounded-2xl border border-white/5 bg-black/20 p-4">
                                 <div className="flex items-center justify-between">
-                                    <div className="text-white font-semibold">Сессии ассистента</div>
-                                    <button
-                                        onClick={() => selectedPrId && void refreshSelectedAssistant(selectedPrId)}
-                                        disabled={busy}
-                                        className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 text-white/80 hover:bg-white/10 disabled:opacity-50"
-                                    >
-                                        <RefreshCw className="w-3.5 h-3.5" />
-                                        Обновить
-                                    </button>
+                                    <div className="font-semibold text-white">Сессии ассистента</div>
+                                    {canViewSessions && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void refreshSelectionData()}
+                                            disabled={busy || sessionsLoading || assistantLoading || sanctionsLoading || dayStatusLoading}
+                                            className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/80 disabled:opacity-50 hover:bg-white/10"
+                                        >
+                                            <RefreshCw className="h-3.5 w-3.5" />
+                                            Обновить
+                                        </button>
+                                    )}
                                 </div>
-                                <div className="space-y-2 max-h-[440px] overflow-y-auto pr-1">
-                                    {sessions.length === 0 ? (
-                                        <div className="text-white/40 text-sm">Сессий нет</div>
-                                    ) : sessions.map((session) => (
-                                        <div key={session.id} className="border border-white/10 rounded-xl bg-white/5 p-3 space-y-2">
-                                            <div className="flex flex-wrap items-center gap-3 text-xs text-white/50">
-                                                <span>ID: {session.id}</span>
-                                                <span>Тип: {session.target_type || '—'}</span>
-                                                <span>
-                                                    Цель: {session.target_type === 'manual'
-                                                        ? 'manual'
-                                                        : (session.target_name || session.target_id || '—')}
-                                                </span>
-                                                <span>Начало: {formatDateTime(session.started_at)}</span>
-                                                <span>Конец: {formatDateTime(session.ended_at)}</span>
-                                                <span>Длительность: {session.duration_seconds ?? 0} сек.</span>
-                                                <span>Баллы: {session.credited_points ?? 0}</span>
-                                                {session.is_probation ? (
-                                                    <span className="text-yellow-400/80 font-medium">Стажерский</span>
-                                                ) : (
-                                                    <span>Приоритет: {session.priority_override ?? session.priority_auto ?? 0}</span>
-                                                )}
-                                            </div>
-                                            {editingSessionId === session.id && (
-                                                <div className="space-y-3">
-                                                    {/* Row 1: Target type + selector */}
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <div className="shrink-0 w-36">
-                                                            <CustomDropdown
-                                                                value={sessionEdit.target_type}
-                                                                onChange={(v) => setSessionEdit((prev) => ({
-                                                                    ...prev,
-                                                                    target_type: v,
-                                                                    target_id: '',
-                                                                    priority_override: '0',
-                                                                }))}
-                                                                options={[
-                                                                    { value: 'streamer', label: 'Стример' },
-                                                                    { value: 'event', label: 'Событие' },
-                                                                    { value: 'manual', label: 'Manual' },
-                                                                ]}
-                                                            />
-                                                        </div>
-                                                        {sessionEdit.target_type !== 'manual' && (
-                                                            <div className="flex-1 min-w-[200px]">
-                                                                <CustomSelect
-                                                                    options={editTargetOptions}
-                                                                    value={sessionEdit.target_id}
-                                                                    onChange={(value) => {
-                                                                        const targetId = String(value);
-                                                                        const defaultPriority = sessionEdit.target_type === 'event'
-                                                                            ? eventPriorityById[targetId] ?? 0
-                                                                            : streamerPriorityById[targetId] ?? 0;
-                                                                        setSessionEdit((prev) => ({
-                                                                            ...prev,
-                                                                            target_id: targetId,
-                                                                            priority_override: String(defaultPriority),
-                                                                        }));
-                                                                    }}
-                                                                    placeholder={
-                                                                        optionsLoading
-                                                                            ? 'Loading...'
-                                                                            : editTargetOptions.length > 0
-                                                                                ? (sessionEdit.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
-                                                                                : (sessionEdit.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
-                                                                    }
-                                                                />
-                                                            </div>
-                                                        )}
-                                                        {sessionEdit.target_type === 'manual' && (
-                                                            <input
-                                                                type="text"
-                                                                value={sessionEdit.target_name}
-                                                                onChange={(e) => setSessionEdit((prev) => ({ ...prev, target_name: e.target.value }))}
-                                                                className="flex-1 min-w-[150px] bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                                placeholder="Название"
-                                                            />
-                                                        )}
-                                                    </div>
-                                                    {/* Row 2: Date/time pickers */}
-                                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                                        <div>
-                                                            <label className="text-xs text-white/40 mb-1 block">Дата начала</label>
-                                                            <CustomDatePicker
-                                                                value={splitDateTime(sessionEdit.started_at).date}
-                                                                onChange={(d) => setSessionEdit((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'date', d) }))}
-                                                                placeholder="Дата"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/40 mb-1 block">Время начала</label>
-                                                            <CustomTimePicker
-                                                                value={splitDateTime(sessionEdit.started_at).time}
-                                                                onChange={(t) => setSessionEdit((prev) => ({ ...prev, started_at: mergeDateTimePart(prev.started_at, 'time', t) }))}
-                                                                placeholder="--:--"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/40 mb-1 block">Дата конца</label>
-                                                            <CustomDatePicker
-                                                                value={splitDateTime(sessionEdit.ended_at).date}
-                                                                onChange={(d) => setSessionEdit((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'date', d) }))}
-                                                                placeholder="Дата"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="text-xs text-white/40 mb-1 block">Время конца</label>
-                                                            <CustomTimePicker
-                                                                value={splitDateTime(sessionEdit.ended_at).time}
-                                                                onChange={(t) => setSessionEdit((prev) => ({ ...prev, ended_at: mergeDateTimePart(prev.ended_at, 'time', t) }))}
-                                                                placeholder="--:--"
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="text-xs text-white/40">Приоритет:</span>
-                                                            <input
-                                                                type="number"
-                                                                min="0"
-                                                                max="3"
-                                                                value={sessionEdit.priority_override}
-                                                                onChange={(e) => setSessionEdit((prev) => ({ ...prev, priority_override: e.target.value }))}
-                                                                className="w-16 bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
-                                                                disabled={sessionEdit.is_probation}
-                                                            />
-                                                        </div>
-                                                        <label className="flex items-center gap-2 cursor-pointer group">
-                                                            <div className="relative">
-                                                                <input
-                                                                    type="checkbox"
-                                                                    className="sr-only peer"
-                                                                    checked={sessionEdit.is_probation}
-                                                                    onChange={(e) => setSessionEdit((prev) => ({ ...prev, is_probation: e.target.checked }))}
-                                                                />
-                                                                <div className="w-10 h-5 bg-white/10 rounded-full peer peer-checked:bg-yellow-500/50 transition-colors"></div>
-                                                                <div className="absolute left-1 top-1 w-3 h-3 bg-white/40 rounded-full peer-checked:translate-x-5 peer-checked:bg-white transition-transform"></div>
-                                                            </div>
-                                                            <span className="text-xs text-white/60 group-hover:text-white transition-colors">Стажерский</span>
-                                                        </label>
-                                                    </div>
+                                {!canViewSessions ? (
+                                    <InlineState message="Сессии недоступны для вашей роли." tone="warning" />
+                                ) : sessionsError ? (
+                                    <InlineState message={sessionsError} tone="danger" />
+                                ) : sessionsLoading && sessions.length === 0 ? (
+                                    <div className="text-sm text-white/40">Загрузка сессий...</div>
+                                ) : (
+                                    <div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">
+                                        {sessions.length === 0 ? (
+                                            <div className="text-sm text-white/40">Сессий нет</div>
+                                        ) : sessions.map((session) => (
+                                            <div key={session.id} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+                                                <div className="flex flex-wrap items-center gap-3 text-xs text-white/50">
+                                                    <span>ID: {session.id}</span>
+                                                    <span>Тип: {session.target_type || '—'}</span>
+                                                    <span>Цель: {getTargetDisplayName(session)}</span>
+                                                    <span>Начало: {formatDateTime(session.started_at)}</span>
+                                                    <span>Конец: {formatDateTime(session.ended_at)}</span>
+                                                    <span>Длительность: {session.duration_seconds ?? 0} сек.</span>
+                                                    <span>Баллы: {session.credited_points ?? 0}</span>
+                                                    {session.is_probation ? (
+                                                        <span className="font-medium text-yellow-400/80">Стажерский</span>
+                                                    ) : (
+                                                        <span>Приоритет: {session.priority_override ?? session.priority_auto ?? 0}</span>
+                                                    )}
                                                 </div>
-                                            )}
-                                            <div className="flex items-center gap-2">
-                                                {editingSessionId === session.id ? (
-                                                    <>
-                                                        <button
-                                                            onClick={() => void handleSessionPatch(session.id)}
-                                                            disabled={busy}
-                                                            className="text-xs px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
-                                                        >
-                                                            Сохранить
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setEditingSessionId(null)}
-                                                            disabled={busy}
-                                                            className="text-xs px-3 py-1.5 rounded-lg border border-white/20 bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-50"
-                                                        >
-                                                            Отмена
-                                                        </button>
-                                                    </>
-                                                ) : (
-                                                    <button
-                                                        onClick={() => {
-                                                            setEditingSessionId(session.id);
-                                                            setSessionEdit({
-                                                                target_type: session.target_type || 'streamer',
-                                                                target_id: session.target_id != null ? String(session.target_id) : '',
-                                                                target_name: session.target_name || '',
-                                                                started_at: toLocalDateTimeInput(session.started_at),
-                                                                ended_at: toLocalDateTimeInput(session.ended_at),
-                                                                priority_override: session.priority_override != null
-                                                                    ? String(session.priority_override)
-                                                                    : session.priority_auto != null
-                                                                        ? String(session.priority_auto)
-                                                                        : '',
-                                                                is_probation: !!session.is_probation,
-                                                            });
-                                                        }}
-                                                        disabled={busy}
-                                                        className="text-xs px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
-                                                    >
-                                                        Редактировать
-                                                    </button>
+                                                {editingSessionId === session.id && canManageSessions && canManageSelectedAssistant && (
+                                                    <div className="space-y-3">
+                                                        {optionsError && sessionEdit.target_type !== 'manual' && (
+                                                            <InlineState message={optionsError} tone="warning" />
+                                                        )}
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            <div className="w-36 shrink-0">
+                                                                <CustomDropdown
+                                                                    value={sessionEdit.target_type}
+                                                                    onChange={(value) => setSessionEdit((current) => ({
+                                                                        ...current,
+                                                                        target_type: value,
+                                                                        target_id: '',
+                                                                        priority_override: '0',
+                                                                    }))}
+                                                                    options={[
+                                                                        { value: 'streamer', label: 'Стример' },
+                                                                        { value: 'event', label: 'Событие' },
+                                                                        { value: 'manual', label: 'Manual' },
+                                                                    ]}
+                                                                />
+                                                            </div>
+                                                            {sessionEdit.target_type !== 'manual' && (
+                                                                <div className="min-w-[200px] flex-1">
+                                                                    <CustomSelect
+                                                                        options={editTargetOptions}
+                                                                        value={sessionEdit.target_id}
+                                                                        onChange={(value) => {
+                                                                            const targetId = String(value);
+                                                                            const defaultPriority = sessionEdit.target_type === 'event'
+                                                                                ? eventPriorityById[targetId] ?? 0
+                                                                                : streamerPriorityById[targetId] ?? 0;
+                                                                            setSessionEdit((current) => ({
+                                                                                ...current,
+                                                                                target_id: targetId,
+                                                                                priority_override: String(defaultPriority),
+                                                                            }));
+                                                                        }}
+                                                                        placeholder={
+                                                                            optionsLoading
+                                                                                ? 'Loading...'
+                                                                                : editTargetOptions.length > 0
+                                                                                    ? (sessionEdit.target_type === 'event' ? 'Выберите событие' : 'Выберите стримера')
+                                                                                    : (sessionEdit.target_type === 'event' ? 'Нет доступных событий' : 'Нет доступных стримеров')
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                            )}
+                                                            {sessionEdit.target_type === 'manual' && (
+                                                                <input
+                                                                    type="text"
+                                                                    value={sessionEdit.target_name}
+                                                                    onChange={(event) => setSessionEdit((current) => ({ ...current, target_name: event.target.value }))}
+                                                                    className="min-w-[150px] flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                                                                    placeholder="Название"
+                                                                />
+                                                            )}
+                                                        </div>
+                                                        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                                                            <div>
+                                                                <label className="mb-1 block text-xs text-white/40">Дата начала</label>
+                                                                <CustomDatePicker
+                                                                    value={splitDateTime(sessionEdit.started_at).date}
+                                                                    onChange={(value) => setSessionEdit((current) => ({
+                                                                        ...current,
+                                                                        started_at: mergeDateTimePart(current.started_at, 'date', value),
+                                                                    }))}
+                                                                    placeholder="Дата"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="mb-1 block text-xs text-white/40">Время начала</label>
+                                                                <CustomTimePicker
+                                                                    value={splitDateTime(sessionEdit.started_at).time}
+                                                                    onChange={(value) => setSessionEdit((current) => ({
+                                                                        ...current,
+                                                                        started_at: mergeDateTimePart(current.started_at, 'time', value),
+                                                                    }))}
+                                                                    placeholder="--:--"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="mb-1 block text-xs text-white/40">Дата конца</label>
+                                                                <CustomDatePicker
+                                                                    value={splitDateTime(sessionEdit.ended_at).date}
+                                                                    onChange={(value) => setSessionEdit((current) => ({
+                                                                        ...current,
+                                                                        ended_at: mergeDateTimePart(current.ended_at, 'date', value),
+                                                                    }))}
+                                                                    placeholder="Дата"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="mb-1 block text-xs text-white/40">Время конца</label>
+                                                                <CustomTimePicker
+                                                                    value={splitDateTime(sessionEdit.ended_at).time}
+                                                                    onChange={(value) => setSessionEdit((current) => ({
+                                                                        ...current,
+                                                                        ended_at: mergeDateTimePart(current.ended_at, 'time', value),
+                                                                    }))}
+                                                                    placeholder="--:--"
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-4">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs text-white/40">Приоритет:</span>
+                                                                <input
+                                                                    type="number"
+                                                                    min="0"
+                                                                    max="3"
+                                                                    value={sessionEdit.priority_override}
+                                                                    onChange={(event) => setSessionEdit((current) => ({ ...current, priority_override: event.target.value }))}
+                                                                    className="w-16 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                                                                    disabled={sessionEdit.is_probation}
+                                                                />
+                                                            </div>
+                                                            <label className="group flex cursor-pointer items-center gap-2">
+                                                                <div className="relative">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        className="peer sr-only"
+                                                                        checked={sessionEdit.is_probation}
+                                                                        onChange={(event) => setSessionEdit((current) => ({ ...current, is_probation: event.target.checked }))}
+                                                                    />
+                                                                    <div className="h-5 w-10 rounded-full bg-white/10 transition-colors peer-checked:bg-yellow-500/50" />
+                                                                    <div className="absolute left-1 top-1 h-3 w-3 rounded-full bg-white/40 transition-transform peer-checked:translate-x-5 peer-checked:bg-white" />
+                                                                </div>
+                                                                <span className="text-xs text-white/60 transition-colors group-hover:text-white">Стажерский</span>
+                                                            </label>
+                                                        </div>
+                                                    </div>
                                                 )}
-                                                <button
-                                                    onClick={() => void handleSessionDelete(session.id)}
-                                                    disabled={busy}
-                                                    className="text-xs px-3 py-1.5 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 disabled:opacity-50"
-                                                >
-                                                    Удалить
-                                                </button>
+                                                <div className="flex items-center gap-2">
+                                                    {canManageSessions && canManageSelectedAssistant ? (
+                                                        editingSessionId === session.id ? (
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => void handleSessionPatch(session.id)}
+                                                                    disabled={busy}
+                                                                    className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 disabled:opacity-50 hover:bg-blue-500/20"
+                                                                >
+                                                                    Сохранить
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setEditingSessionId(null);
+                                                                        setSessionEdit(createInitialSessionEditState());
+                                                                    }}
+                                                                    disabled={busy}
+                                                                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs text-white/70 disabled:opacity-50 hover:bg-white/10"
+                                                                >
+                                                                    Отмена
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => void beginEditingSession(session)}
+                                                                disabled={busy}
+                                                                className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 disabled:opacity-50 hover:bg-blue-500/20"
+                                                                >
+                                                                    Редактировать
+                                                                </button>
+                                                        )
+                                                    ) : canManageSessions ? (
+                                                        <span className="text-xs text-white/40">Read-only</span>
+                                                    ) : (
+                                                        <span className="text-xs text-white/40">Read-only</span>
+                                                    )}
+                                                    {canManageSessions && canManageSelectedAssistant && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => void handleSessionDelete(session.id)}
+                                                            disabled={busy}
+                                                            className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-300 disabled:opacity-50 hover:bg-red-500/20"
+                                                        >
+                                                            Удалить
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
-                                </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </>
                     )}
                 </div>
-            </div>
+            )}
 
             <ConfirmDialog {...dialogProps} />
 

@@ -951,6 +951,11 @@ const SanctionsQueueManagement = () => {
                                         Добавьте валидную отработку, чтобы увидеть расчет.
                                     </div>
                                 )}
+                                {workoffPreview.length > 0 && (
+                                    <div className="rounded-lg border border-amber-400/15 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                                        U/O не засчитываются и продлевают отработку.
+                                    </div>
+                                )}
                                 <div className="space-y-3">
                                     {workoffPreview.map((assistantPreview) => (
                                         <div key={assistantPreview.assistant_id} className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-3">

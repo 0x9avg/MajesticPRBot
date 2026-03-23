@@ -10,17 +10,19 @@ from typing import TYPE_CHECKING
 from dependencies import require_permission
 
 if TYPE_CHECKING:
-    from database import Database
+    from db import Database
     from services.auth import AuthService
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from middleware import get_trace_id
-from schemas.admin import UserCreate
+from schemas.admin import UserCreate, UserDeactivateRequest, UserRoleUpdate
 from schemas.envelope import success_envelope
 from services.rbac import (
     ROLE_RANK,
+    can_manage_target_account,
     can_create_role,
+    get_manageable_roles,
     is_valid_role,
 )
 
@@ -42,6 +44,96 @@ def generate_password(length=12):
     """Generate a secure random password."""
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
     return "".join(secrets.choice(alphabet) for i in range(length))
+
+
+def _actor_name(principal: dict) -> str:
+    return (
+        str(
+            principal.get("nickname")
+            or principal.get("username")
+            or principal.get("service_name")
+            or "Unknown"
+        ).strip()
+        or "Unknown"
+    )
+
+
+def _raise_role_access_denied(actor_role: str, target_role: str) -> None:
+    if actor_role == "developer":
+        raise HTTPException(
+            status_code=403,
+            detail="Разработчик может управлять всеми учетными записями",
+        )
+    actor_rank = ROLE_RANK[actor_role]
+    target_rank = ROLE_RANK[target_role]
+    if target_rank == actor_rank:
+        detail = "Нельзя управлять пользователем с идентичной ролью"
+    else:
+        detail = "Нельзя управлять пользователем с ролью выше вашей"
+    raise HTTPException(status_code=403, detail=detail)
+
+
+async def _get_manageable_account_or_404(
+    *,
+    db: "Database",
+    discord_id: int,
+    current_user: dict,
+    next_role: str | None = None,
+) -> dict:
+    account = await db.get_user_account(discord_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if account.get("assistant_pr_id") is None:
+        logger.error(
+            "RBAC lifecycle target %s has no linked assistant profile",
+            discord_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Учетная запись не привязана к профилю ассистента",
+        )
+
+    actor_role = str(current_user.get("role") or "")
+    target_role = str(account.get("role") or "")
+    actor_discord_id = current_user.get("discord_id")
+    is_self = actor_discord_id is not None and int(actor_discord_id) == int(discord_id)
+    if not is_valid_role(target_role):
+        logger.error(
+            "RBAC lifecycle target %s has invalid assistant role '%s'",
+            discord_id,
+            target_role,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Профиль ассистента имеет недопустимую роль",
+        )
+    if not can_manage_target_account(
+        actor_role,
+        target_role,
+        next_role,
+        is_self=is_self,
+    ):
+        _raise_role_access_denied(actor_role, target_role)
+    return account
+
+
+async def _ensure_not_last_active_developer(
+    db: "Database",
+    *,
+    account: dict,
+) -> None:
+    if str(account.get("role") or "") != "developer":
+        return
+    if not bool(account.get("is_active", True)):
+        return
+    if account.get("dismissed_at") is not None:
+        return
+    developers = await db.count_active_users_with_role("developer")
+    if developers <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя изменить последнего активного developer",
+        )
 
 
 @router.post("/users")
@@ -92,7 +184,7 @@ async def create_user(
             detail=f"Пользователь с Discord ID {user_data.discord_id} уже существует",
         )
 
-    existing_assistant = await db.get_assistant(user_data.discord_id)
+    existing_assistant = await db.get_assistant(user_data.discord_id, include_inactive=True)
     if existing_assistant:
         raise HTTPException(
             status_code=400,
@@ -115,7 +207,7 @@ async def create_user(
 
         try:
             await db.log_admin_action_v2(
-                actor_name=current_user["nickname"],
+                actor_name=_actor_name(current_user),
                 actor_role=current_user.get("role"),
                 action="user.create",
                 target_type="user",
@@ -185,3 +277,139 @@ async def create_user(
 
         logger.error("Failed to create user in /admin/users: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Ошибка при создании пользователя")
+
+
+@router.patch("/users/{discord_id}/role")
+async def update_user_role(
+    request: Request,
+    discord_id: int,
+    payload: UserRoleUpdate,
+    db: "Database" = Depends(get_db),
+    current_user: dict = Depends(require_permission("admin.users.role.update")),
+):
+    trace_id = get_trace_id(request)
+    target_role = str(payload.role or "").strip()
+    if not is_valid_role(target_role):
+        allowed_roles = ", ".join(get_manageable_roles(current_user.get("role")))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимая роль. Доступные роли: {allowed_roles}",
+        )
+
+    account = await _get_manageable_account_or_404(
+        db=db,
+        discord_id=discord_id,
+        current_user=current_user,
+        next_role=target_role,
+    )
+    if str(account.get("role") or "") != target_role and str(account.get("role") or "") == "developer":
+        await _ensure_not_last_active_developer(db, account=account)
+
+    if not bool(account.get("is_active", True)):
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя изменить роль деактивированной учетной записи",
+        )
+
+    updated = await db.update_user_role_with_assistant(discord_id, target_role)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    await db.log_admin_action_v2(
+        actor_name=_actor_name(current_user),
+        actor_role=current_user.get("role"),
+        action="user.role.update",
+        target_type="user",
+        target_id=str(discord_id),
+        details={
+            "summary": f"Updated user role for {discord_id}",
+            "payload": {
+                "previous_role": account.get("role"),
+                "role": target_role,
+            },
+            "meta": {
+                "ip": request.client.host if request.client else None,
+                "request_path": str(request.url.path),
+                "method": request.method,
+                "actor_id": current_user.get("id"),
+            },
+        },
+    )
+
+    return JSONResponse(
+        content=success_envelope(
+            data={
+                "discord_id": str(discord_id),
+                "nickname": updated.get("nickname"),
+                "role": target_role,
+            },
+            message="Роль пользователя обновлена",
+            code="USER_ROLE_UPDATED",
+            trace_id=trace_id,
+        )
+    )
+
+
+@router.post("/users/{discord_id}/deactivate")
+async def deactivate_user(
+    request: Request,
+    discord_id: int,
+    payload: UserDeactivateRequest | None = None,
+    db: "Database" = Depends(get_db),
+    current_user: dict = Depends(require_permission("admin.users.deactivate")),
+):
+    trace_id = get_trace_id(request)
+    account = await _get_manageable_account_or_404(
+        db=db,
+        discord_id=discord_id,
+        current_user=current_user,
+    )
+    await _ensure_not_last_active_developer(db, account=account)
+
+    if not bool(account.get("is_active", True)):
+        raise HTTPException(
+            status_code=409,
+            detail="Учетная запись уже деактивирована",
+        )
+
+    updated = await db.deactivate_user_with_assistant(
+        discord_id,
+        actor_id=current_user.get("discord_id") or current_user.get("id"),
+        reason=payload.reason if payload else None,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    await db.log_admin_action_v2(
+        actor_name=_actor_name(current_user),
+        actor_role=current_user.get("role"),
+        action="user.deactivate",
+        target_type="user",
+        target_id=str(discord_id),
+        details={
+            "summary": f"Deactivated user {discord_id}",
+            "payload": {
+                "reason": payload.reason if payload else None,
+                "role": account.get("role"),
+            },
+            "meta": {
+                "ip": request.client.host if request.client else None,
+                "request_path": str(request.url.path),
+                "method": request.method,
+                "actor_id": current_user.get("id"),
+            },
+        },
+    )
+
+    return JSONResponse(
+        content=success_envelope(
+            data={
+                "discord_id": str(discord_id),
+                "nickname": updated.get("nickname"),
+                "deactivated": True,
+            },
+            message="Учетная запись деактивирована",
+            code="USER_DEACTIVATED",
+            trace_id=trace_id,
+        )
+    )

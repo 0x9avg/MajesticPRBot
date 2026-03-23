@@ -30,6 +30,19 @@ async def post_create_user(app, payload: dict):
         return await client.post("/api/admin/users", json=payload)
 
 
+async def patch_user_role(app, discord_id: int, role: str):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.patch(f"/api/admin/users/{discord_id}/role", json={"role": role})
+
+
+async def post_deactivate_user(app, discord_id: int, reason: str | None = None):
+    payload = {}
+    if reason is not None:
+        payload["reason"] = reason
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post(f"/api/admin/users/{discord_id}/deactivate", json=payload)
+
+
 @pytest.mark.parametrize(
     ("role", "expected_status"),
     [
@@ -65,7 +78,7 @@ async def test_manager_hierarchy_rules(app, fake_db, set_current_user, role, exp
         assert "detail" in response.json()
 
 
-async def test_developer_can_create_all_roles(app, set_current_user):
+async def test_developer_can_create_all_staff_roles(app, set_current_user):
     set_current_user(
         role="developer", permissions={"admin.users.create": True}, nickname="Dev"
     )
@@ -270,3 +283,235 @@ async def test_create_user_with_appointed_at(
     assert len(fake_db.logged_actions) == 1
     payload = fake_db.logged_actions[0].get("details", {}).get("payload", {})
     assert payload.get("appointed_at") == "2026-01-05"
+
+
+async def test_role_update_requires_manageable_target_role(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.role.update": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8101,
+        username="assistant_dev",
+        password_hash="hash",
+        nickname="Assistant Dev",
+        role="developer",
+    )
+
+    response = await patch_user_role(app, 8101, "employee")
+
+    assert response.status_code == 403
+    assert "ролью выше вашей" in response.json()["detail"]
+
+
+async def test_role_update_rejects_same_rank_target(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.role.update": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8103,
+        username="assistant_manager",
+        password_hash="hash",
+        nickname="Assistant Manager",
+        role="manager",
+    )
+
+    response = await patch_user_role(app, 8103, "employee")
+
+    assert response.status_code == 403
+    assert "идентичной ролью" in response.json()["detail"]
+
+
+async def test_role_update_applies_to_manageable_account(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.role.update": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8102,
+        username="assistant_employee",
+        password_hash="hash",
+        nickname="Assistant Employee",
+        role="employee",
+    )
+
+    response = await patch_user_role(app, 8102, "junior_employee")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["discord_id"] == "8102"
+    assert body["role"] == "junior_employee"
+    assert fake_db.users_by_discord[8102]["role"] == "junior_employee"
+    assert fake_db.assistants_by_id[8102]["role"] == "junior_employee"
+
+
+async def test_role_update_allows_self_account(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.role.update": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=1001,
+        username="manager_self",
+        password_hash="hash",
+        nickname="Manager",
+        role="manager",
+    )
+
+    response = await patch_user_role(app, 1001, "employee")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["role"] == "employee"
+    assert fake_db.users_by_discord[1001]["role"] == "employee"
+    assert fake_db.assistants_by_id[1001]["role"] == "employee"
+
+
+async def test_developer_can_update_other_developer_account(app, fake_db, set_current_user):
+    set_current_user(
+        role="developer",
+        permissions={"admin.users.role.update": True},
+        nickname="Developer",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=1001,
+        username="developer_self",
+        password_hash="hash",
+        nickname="Developer",
+        role="developer",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8104,
+        username="assistant_developer",
+        password_hash="hash",
+        nickname="Assistant Developer",
+        role="developer",
+    )
+
+    response = await patch_user_role(app, 8104, "manager")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["role"] == "manager"
+    assert fake_db.users_by_discord[8104]["role"] == "manager"
+
+
+async def test_deactivate_user_requires_manageable_account(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.deactivate": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8201,
+        username="assistant_dev",
+        password_hash="hash",
+        nickname="Assistant Dev",
+        role="developer",
+    )
+
+    response = await post_deactivate_user(app, 8201, reason="cleanup")
+
+    assert response.status_code == 403
+    assert "ролью выше вашей" in response.json()["detail"]
+
+
+async def test_deactivate_user_rejects_same_rank_target(
+    app, fake_db, set_current_user
+):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.deactivate": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8203,
+        username="assistant_manager",
+        password_hash="hash",
+        nickname="Assistant Manager",
+        role="manager",
+    )
+
+    response = await post_deactivate_user(app, 8203, reason="cleanup")
+
+    assert response.status_code == 403
+    assert "идентичной ролью" in response.json()["detail"]
+
+
+async def test_deactivate_user_sets_inactive_and_revokes_sessions(
+    app, fake_db, set_current_user
+):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.deactivate": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8202,
+        username="assistant_employee",
+        password_hash="hash",
+        nickname="Assistant Employee",
+        role="employee",
+    )
+    fake_db.sessions.append({"id": 1, "user_id": 8202, "revoked": False})
+
+    response = await post_deactivate_user(app, 8202, reason="cleanup")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["discord_id"] == "8202"
+    assert fake_db.users_by_discord[8202]["is_active"] is False
+    assert fake_db.assistants_by_id[8202]["dismissed_at"] is not None
+    assert fake_db.sessions[0]["revoked"] is True
+
+
+async def test_developer_can_deactivate_other_developer_account(
+    app, fake_db, set_current_user
+):
+    set_current_user(
+        role="developer",
+        permissions={"admin.users.deactivate": True},
+        nickname="Developer",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=1001,
+        username="developer_self",
+        password_hash="hash",
+        nickname="Developer",
+        role="developer",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8204,
+        username="assistant_developer",
+        password_hash="hash",
+        nickname="Assistant Developer",
+        role="developer",
+    )
+
+    response = await post_deactivate_user(app, 8204, reason="cleanup")
+
+    assert response.status_code == 200
+    assert fake_db.users_by_discord[8204]["is_active"] is False
+
+
+async def test_deactivate_user_accepts_empty_body(app, fake_db, set_current_user):
+    set_current_user(
+        role="manager",
+        permissions={"admin.users.deactivate": True},
+        nickname="Manager",
+    )
+    await fake_db.create_user_with_assistant(
+        discord_id=8205,
+        username="assistant_employee_2",
+        password_hash="hash",
+        nickname="Assistant Employee 2",
+        role="employee",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/admin/users/8205/deactivate")
+
+    assert response.status_code == 200
+    assert fake_db.users_by_discord[8205]["is_active"] is False

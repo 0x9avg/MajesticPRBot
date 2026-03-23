@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserContext } from '../../../types/auth';
 
@@ -18,9 +18,31 @@ vi.mock('react-router-dom', async () => {
 
 import PunishmentReturns from '../PunishmentReturns';
 
+const gameServers = Array.from({ length: 18 }, (_, index) => {
+    const id = index + 1;
+    return {
+        id,
+        full_name: `Majestic #${id}`,
+        short_name: `#${id}`,
+        command_name: `RU${id}`,
+        sort_order: id,
+        is_active: id !== 14,
+    };
+});
+
 const createFetchMock = () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+
+        if (url.includes('/api/game-servers')) {
+            return new Response(
+                JSON.stringify({
+                    status: 'success',
+                    data: gameServers,
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+        }
 
         if (url.includes('/api/returns/queue')) {
             return new Response(
@@ -199,9 +221,9 @@ describe('PunishmentReturns', () => {
             role: 'manager',
             require_password_change: false,
             permissions: {
-                'returns.view': true,
+                'returns.queue.view': true,
                 'returns.create': true,
-                'returns.execute': true,
+                'returns.process': true,
                 'returns.history.view': true,
                 'returns.manage.self': true,
                 'returns.manage.any': true,
@@ -243,6 +265,67 @@ describe('PunishmentReturns', () => {
             expect(screen.getByText('Все серверы')).toBeInTheDocument();
             expect(screen.getByText('История пуста')).toBeInTheDocument();
         });
+    });
+
+    it('keeps inactive server visible in edit mode and filters history by server', async () => {
+        const fetchMock = createFetchMock();
+        const ui = userEvent.setup();
+
+        render(<PunishmentReturns />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Majestic #14')).toBeInTheDocument();
+        });
+
+        const queueRow = screen.getByText('27253').closest('tr');
+        expect(queueRow).toBeTruthy();
+        await ui.click(within(queueRow as HTMLElement).getByTitle('Редактировать'));
+
+        await waitFor(() => {
+            expect(screen.getAllByText('Majestic #14 (неактивен)').length).toBeGreaterThan(0);
+        });
+
+        await ui.click(screen.getByRole('button', { name: 'Закрыть' }));
+
+        await ui.click(screen.getByRole('button', { name: 'История' }));
+        await ui.click(screen.getByText('Все серверы'));
+        await ui.click(screen.getByText('Majestic #14 (неактивен)'));
+        await ui.click(screen.getByRole('button', { name: 'Применить' }));
+
+        await waitFor(() => {
+            expect(
+                fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).includes('/api/returns/history?') && String(requestUrl).includes('server=14')),
+            ).toBe(true);
+        });
+    });
+
+    it('opens history by default for history-only users and skips queue request', async () => {
+        const fetchMock = createFetchMock();
+        mockedUser = {
+            id: '2',
+            discord_id: '2001',
+            username: 'auditor',
+            nickname: 'Auditor',
+            role: 'employee',
+            require_password_change: false,
+            permissions: {
+                'returns.history.view': true,
+            },
+        };
+
+        render(<PunishmentReturns />);
+
+        await waitFor(() => {
+            expect(screen.getByText('История пуста')).toBeInTheDocument();
+        });
+
+        expect(screen.queryByRole('button', { name: 'К возврату' })).not.toBeInTheDocument();
+        expect(
+            fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).includes('/api/returns/queue')),
+        ).toBe(false);
+        expect(
+            fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).includes('/api/returns/history')),
+        ).toBe(true);
     });
 
     it('shows release button for current claimer', async () => {
